@@ -34,21 +34,47 @@ Kaseya, ConnectWise, HaloPSA, Huntress, Ninja, Pax8, Syncro, Veeam, N-Able.
    - If the post is behind a paywall / login wall / unreadable without paying:
      action = "paywall".
 
-## SENTIMENT JUDGMENT (attribution certainty is the most important nuance)
-- NEGATIVE: CONFIRMED, directed complaint/criticism, or a product confirmed to
-  break things — even if the tone is calm/technical. Sarcasm that puts the brand
-  in a bad light is Negative.
-- NEUTRAL: informational, how-to, factual, status relays, mild jokes, comparisons,
-  incidental name-drops, AND speculative/uncertain attribution. If the brand is
-  only REFERENCED as a possible/suspected/unconfirmed cause (hedging like "maybe",
-  "might be", "could be", "looking into"), classify NEUTRAL even if some words
-  sound negative.
-- POSITIVE: praise, recommendation, satisfaction, or a favorable comparison toward
-  the brand. NOTE: if the POSITIVE points at our brand but the post's PRIMARY
-  subject is a competitor, that is action = "skip_flag" for the competitor, not a
-  forced Positive for our brand.
+## SENTIMENT JUDGMENT — read this carefully, it is the crux
 
-Judge by attribution and stance, not by keywords."""
+The bar for NEGATIVE and POSITIVE is HIGH. NEUTRAL is the default. Most posts in a
+social-listening feed are operational discussion, not opinions about the brand.
+Distinguish an EVALUATIVE STANCE about the brand from FACTUAL / OPERATIONAL TALK.
+
+NEGATIVE — only when the post delivers a clear, brand-directed NEGATIVE VERDICT or
+OPINION. The negativity is the point, and it is aimed at the brand as a judgment:
+  - "Kaseya is terrible / a scam / avoid them", "regret buying", "we're leaving
+    BECAUSE they're bad", overt condemnation, derision, or a recommendation against.
+  - The author is expressing dissatisfaction as an opinion, not just reporting a fact.
+  Do NOT mark NEGATIVE merely because a problem, bug, outage, price increase, or
+  support issue is described. Describing a problem is not the same as condemning the
+  brand.
+
+NEUTRAL — the DEFAULT. Use it for factual or operational content, EVEN WHEN a
+problem is described, including:
+  - bug reports, error descriptions, troubleshooting, "is anyone else seeing X?",
+    outage / status relays, "how do I fix…"
+  - feature quirks, how-to, configuration, comparisons, tool-stack name-drops
+  - factual relays of price / policy / renewal changes (even increases) without an
+    opinionated verdict on the brand
+  - inquiries / help-seeking / "anyone have experience with X?" / asking for opinions
+  - mild jokes, memes, light banter, incidental or passing mentions
+  - speculative / uncertain attribution (hedging: "maybe", "might be", "could be",
+    "looking into") — NEUTRAL even if some words sound negative
+  - a frustrated tone in what is fundamentally a support/troubleshooting post
+
+POSITIVE — only for clear praise, recommendation, endorsement, or satisfaction
+directed at the brand ("works great", "would recommend", "switched and happy").
+NOTE: if positive sentiment points at our brand but the post's PRIMARY subject is a
+competitor, action = "skip_flag" for that competitor — do not force Positive for us.
+
+TIE-BREAK: if you are unsure between NEGATIVE and NEUTRAL, choose NEUTRAL. If unsure
+between POSITIVE and NEUTRAL, choose NEUTRAL. Only commit to Negative/Positive when
+the post is genuinely an opinion/verdict about the brand, not operational chatter.
+
+Sarcasm: judge the implied stance. Heavy, clearly derisive sarcasm aimed at the
+brand can be NEGATIVE; mild jokes/memes are NEUTRAL.
+
+Judge by evaluative stance, not by keywords or by whether a problem is "confirmed"."""
 
 # Per-post user message template
 POST_TEMPLATE = """Run brand: {run_brand}

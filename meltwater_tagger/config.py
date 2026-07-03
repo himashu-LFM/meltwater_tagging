@@ -26,10 +26,9 @@ _load_dotenv()
 
 # --- Classification (phase 1) ---------------------------------------------
 
-# Model used to judge sentiment. The skill's nuance (sarcasm, attribution
-# certainty, primary-brand selection) is demanding, so default to Opus.
-# Override with MELTWATER_MODEL=claude-sonnet-4-6 for a cheaper/faster run.
-MODEL = os.environ.get("MELTWATER_MODEL", "claude-opus-4-8")
+# Model used to judge sentiment. Default to Sonnet for cost; override with
+# MELTWATER_MODEL=claude-opus-4-8 if you need the extra nuance on a hard batch.
+MODEL = os.environ.get("MELTWATER_MODEL", "claude-sonnet-4-6")
 
 # How many posts to classify concurrently (Claude API calls in flight).
 CLASSIFY_CONCURRENCY = int(os.environ.get("MELTWATER_CLASSIFY_CONCURRENCY", "8"))
