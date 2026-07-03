@@ -30,6 +30,11 @@ import httpx
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
+# CDP fetch needs a local logged-in Chrome, which a cloud host doesn't have.
+# On the server set MELTWATER_ALLOW_CDP=false so the UI hides CDP and fetching
+# uses the Reddit API / anonymous path instead.
+ALLOW_CDP = os.environ.get("MELTWATER_ALLOW_CDP", "true").lower() == "true"
+
 
 def run_async(coro):
     """Run an async coroutine from a sync Flask handler (Proactor loop on Windows)."""
@@ -38,7 +43,7 @@ def run_async(coro):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", allow_cdp=ALLOW_CDP)
 
 
 @app.route("/api/extract", methods=["POST"])
@@ -67,6 +72,8 @@ def classify():
     urls = [u.strip() for u in data.get("urls", []) if u and u.strip()]
     brand = (data.get("brand") or "").strip()
     fetch_mode = data.get("fetch_mode", "cdp")  # 'cdp' or 'anon'
+    if not ALLOW_CDP and fetch_mode == "cdp":
+        fetch_mode = "anon"  # server has no local Chrome
     if not urls:
         return jsonify({"error": "No URLs provided"}), 400
     if not brand:
@@ -151,4 +158,6 @@ def export():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host=host, port=port, debug=False)

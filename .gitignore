@@ -65,3 +65,7 @@ htmlcov/
 # Windows
 $RECYCLE.BIN/
 ehthumbs.db
+
+# Browser profiles
+.mw_browser_profile/
+meltwater_tagger/.mw_browser_profile/
