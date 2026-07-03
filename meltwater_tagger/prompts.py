@@ -18,21 +18,37 @@ Taggable brands (each has Positive/Negative/Neutral variants):
 Kaseya, ConnectWise, HaloPSA, Huntress, Ninja, Pax8, Syncro, Veeam, N-Able.
 
 ## YOUR JOB FOR THIS POST
+
+This post already matched the {run_brand} topic search — it surfaced because it
+contains {run_brand} (or a family product) keywords. The DEFAULT outcome is to TAG
+IT for {run_brand}. Leaving a post completely untagged is the RARE exception, not
+the default — only do that in the two narrow cases spelled out in step 3.
+
 1. Read the FULL post text provided. Do NOT rely on a short excerpt.
    Read specifically for: sarcasm, irony, buried punchlines, nuanced brand
    mentions, and whether criticism is directed/confirmed vs. speculative.
    Ignore any Meltwater auto-sentiment label — judge independently.
-2. Identify the ONE brand that is the PRIMARY subject of the sentiment.
-   If multiple brands appear, choose the one being evaluated/praised/criticized.
+2. Ask: is a DIFFERENT specific taggable brand (ConnectWise, HaloPSA, Huntress,
+   Ninja, Pax8, Syncro, Veeam, N-Able) the one being DIRECTLY EVALUATED —
+   praised or criticized — as the main point of the post? A brand merely
+   mentioned alongside {run_brand} (comparisons, tool-stack lists, roundups) is
+   NOT "being evaluated" unless the post's actual point is a judgment about it.
 3. Decide the action:
-   - If the primary brand rolls up to the run brand ({run_brand}):
-     classify sentiment as Positive, Negative, or Neutral and action = "apply".
-   - If the primary brand is a DIFFERENT taggable brand:
-     action = "skip_flag" (flag for that brand's run; do not tag now).
-   - If genuinely ambiguous which brand is primary:
-     action = "review" (leave untagged, flag for review).
+   - If a different specific brand IS the one being directly evaluated as the
+     post's main point: action = "skip_flag" (flag for that brand's run; do not
+     tag {run_brand} now).
+   - If it is genuinely a toss-up between {run_brand} and exactly one other
+     specific brand for who is being evaluated: action = "review" (rare).
    - If the post is behind a paywall / login wall / unreadable without paying:
      action = "paywall".
+   - OTHERWISE — including incidental/passing mentions of {run_brand}, name
+     collisions (e.g. a venue or unrelated entity sharing the name), roundup
+     lists naming several tools with no single one evaluated, off-topic content
+     that only matched on a keyword, or any case where no other single brand is
+     clearly the evaluated subject — action = "apply" with primary_brand =
+     "{run_brand}" and sentiment = "Neutral" (unless the post text itself
+     contains a genuine positive or negative verdict about {run_brand}, per the
+     sentiment rules below). This is the MOST COMMON outcome for borderline posts.
 
 ## SENTIMENT JUDGMENT — read this carefully, it is the crux
 
@@ -40,27 +56,34 @@ The bar for NEGATIVE and POSITIVE is HIGH. NEUTRAL is the default. Most posts in
 social-listening feed are operational discussion, not opinions about the brand.
 Distinguish an EVALUATIVE STANCE about the brand from FACTUAL / OPERATIONAL TALK.
 
-NEGATIVE — only when the post delivers a clear, brand-directed NEGATIVE VERDICT or
-OPINION. The negativity is the point, and it is aimed at the brand as a judgment:
-  - "Kaseya is terrible / a scam / avoid them", "regret buying", "we're leaving
-    BECAUSE they're bad", overt condemnation, derision, or a recommendation against.
-  - The author is expressing dissatisfaction as an opinion, not just reporting a fact.
-  Do NOT mark NEGATIVE merely because a problem, bug, outage, price increase, or
-  support issue is described. Describing a problem is not the same as condemning the
-  brand.
+NEGATIVE — reserve this for a STRONG, whole-brand condemnation, or the company
+seriously failing/harming its customers. The bar is high. Qualifying cases look like:
+  - broad condemnation of the brand/company itself ("Kaseya is a disaster",
+    "painfully inept", "avoid them", "regret it", "we're leaving because they're bad")
+  - the company inflicting real harm and being unresponsive: support/billing totally
+    unreachable with clear frustration, pushing a change that broke production without
+    consent, quality visibly collapsing and driving customers away.
+  It must read as an overall verdict against the BRAND, not a gripe about one thing.
 
-NEUTRAL — the DEFAULT. Use it for factual or operational content, EVEN WHEN a
-problem is described, including:
-  - bug reports, error descriptions, troubleshooting, "is anyone else seeing X?",
-    outage / status relays, "how do I fix…"
-  - feature quirks, how-to, configuration, comparisons, tool-stack name-drops
-  - factual relays of price / policy / renewal changes (even increases) without an
-    opinionated verdict on the brand
+  CRITICAL — the following are NOT enough for Negative; tag them NEUTRAL:
+  - criticism of a single FEATURE ("the AI feature is bad", "Agent Browser is buggy")
+  - criticism of an EMPLOYEE or a specific PERSON
+  - criticism of a PRICE / POLICY / renewal change (even a hike, even if annoyed)
+  - a described bug, outage, or security issue
+  - sarcasm or a snarky one-liner about a product quirk
+  These are ordinary discussion. The analyst standard treats them as NEUTRAL.
+
+NEUTRAL — the DEFAULT, and by far the most common tag. Use it for general discussion
+and factual/operational content, EVEN WHEN a problem or criticism is present:
+  - general discussion, factual observations, "is anyone else seeing X?"
+  - bug reports, error descriptions, troubleshooting, outage/status relays, how-to
+  - security issues, feature quirks, configuration, comparisons, tool-stack name-drops
+  - criticism of a specific feature, employee, or price/policy change (see above)
+  - factual relays of price / policy / renewal changes (even increases)
   - inquiries / help-seeking / "anyone have experience with X?" / asking for opinions
-  - mild jokes, memes, light banter, incidental or passing mentions
-  - speculative / uncertain attribution (hedging: "maybe", "might be", "could be",
-    "looking into") — NEUTRAL even if some words sound negative
-  - a frustrated tone in what is fundamentally a support/troubleshooting post
+  - mild jokes, memes, snark, light banter, incidental or passing mentions
+  - speculative / uncertain attribution (hedging: "maybe", "might be", "looking into")
+  - a frustrated tone in what is fundamentally a support/troubleshooting/gripe post
 
 POSITIVE — only for clear praise, recommendation, endorsement, or satisfaction
 directed at the brand ("works great", "would recommend", "switched and happy").
@@ -92,7 +115,11 @@ DECISION_SCHEMA = {
     "properties": {
         "primary_brand": {
             "type": "string",
-            "description": "Canonical primary brand, e.g. Kaseya, Ninja, or 'none' if no taggable brand is the subject.",
+            "description": (
+                "Canonical brand this post should be tagged for. Default to the run "
+                "brand unless a DIFFERENT specific taggable brand is clearly the one "
+                "being directly evaluated (praised/criticized) as the post's main point."
+            ),
         },
         "sentiment": {
             "type": "string",

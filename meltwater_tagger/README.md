@@ -54,6 +54,25 @@ Meltwater, open the topic feed, and press Enter. Your login is reused next time.
 - Posts judged `review` / `skip_flag` (another brand) / `paywall` are **flagged
   in the report, never tagged** — matching the skill's report format.
 
+## Web UI (upload / paste URLs → classify → export)
+A browser UI for the classification step, with Excel export.
+
+```bash
+pip install -r requirements.txt
+python webapp/app.py
+# open http://127.0.0.1:5000
+```
+- **Upload** a Meltwater export (only the URL column is used) **or paste** one or
+  more post URLs.
+- Set the **run brand** (auto-filled from the export's topic when available) and
+  the **fetch mode** (Real Chrome / CDP recommended — start Chrome with the debug
+  port first, see Option B below).
+- Runs the same pipeline as `classify.py`, shows a results table, and the
+  **Export Excel** button downloads the tagged post URLs.
+
+Needs `ANTHROPIC_API_KEY` in `.env` (same as the CLI). Applying tags into
+Meltwater is still done by `apply_tags.py`.
+
 ## Reddit full-text (important for Reddit feeds)
 The skill's accuracy comes from reading each post's **full text**. Meltwater
 exports often don't include the post body (Title/Opening Text/Hit Sentence can be

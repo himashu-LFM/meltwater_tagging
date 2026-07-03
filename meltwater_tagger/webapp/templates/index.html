@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sentiment Tagger</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <header class="topbar">
+    <div class="logo">
+      <span class="logo-dot"></span>
+      Meltwater <b>Sentiment Tagger</b>
+    </div>
+    <div class="pill" id="modePill">CDP fetch</div>
+  </header>
+
+  <main class="wrap">
+    <!-- INPUT VIEW -->
+    <section id="inputView" class="view">
+      <h1 class="title">Tag posts by <span class="grad">sentiment</span></h1>
+      <p class="subtitle">Upload a Meltwater export or paste post URLs. We read the URL column,
+        classify each post, and let you export the tagged results.</p>
+
+      <div class="card glass">
+        <div class="row">
+          <label class="field">
+            <span class="field-label">Run brand</span>
+            <input id="brand" type="text" placeholder="e.g. Kaseya" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span class="field-label">Fetch mode</span>
+            <select id="fetchMode">
+              <option value="cdp">Real Chrome (CDP) — recommended</option>
+              <option value="anon">Anonymous (throttled)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="dropzone" id="dropzone">
+          <input type="file" id="fileInput" accept=".xlsx,.xls" hidden />
+          <div class="dz-inner">
+            <div class="dz-icon">⬆</div>
+            <div><b>Upload Excel</b> (.xlsx) — we use the URL column only</div>
+            <div class="dz-sub" id="dzSub">drag &amp; drop or click to browse</div>
+          </div>
+        </div>
+
+        <div class="or"><span>or paste URLs</span></div>
+
+        <textarea id="urls" rows="5"
+          placeholder="Paste one or more post URLs, one per line&#10;https://www.reddit.com/r/...&#10;https://www.reddit.com/r/..."></textarea>
+
+        <div class="actions">
+          <span class="counter" id="urlCount">0 URLs</span>
+          <button id="runBtn" class="btn primary">
+            <span class="btn-shine"></span>
+            <span class="btn-label">Classify</span>
+          </button>
+        </div>
+      </div>
+      <div class="err" id="inputErr"></div>
+    </section>
+
+    <!-- LOADING -->
+    <section id="loadingView" class="view hidden">
+      <div class="loader">
+        <div class="orbit"><i></i><i></i><i></i></div>
+        <div class="loader-text" id="loaderText">Fetching post text…</div>
+      </div>
+    </section>
+
+    <!-- RESULTS VIEW -->
+    <section id="resultsView" class="view hidden">
+      <div class="results-head">
+        <div>
+          <h2 class="results-title">Results — <span class="grad" id="resBrand"></span></h2>
+          <div class="stats" id="stats"></div>
+        </div>
+        <div class="results-actions">
+          <button id="backBtn" class="btn ghost">← New run</button>
+          <button id="exportBtn" class="btn primary">
+            <span class="btn-shine"></span>
+            <span class="btn-label">Export Excel</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="table-wrap glass">
+        <table id="resTable">
+          <thead>
+            <tr><th>#</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th></tr>
+          </thead>
+          <tbody id="resBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='background.js') }}"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
