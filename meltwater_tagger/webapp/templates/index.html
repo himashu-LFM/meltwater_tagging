@@ -33,8 +33,8 @@
           <label class="field">
             <span class="field-label">Fetch mode</span>
             <select id="fetchMode">
-              <option value="cdp">Real Chrome (CDP) — recommended</option>
-              <option value="anon">Anonymous (throttled)</option>
+              {% if allow_cdp %}<option value="cdp">Real Chrome (CDP) — recommended</option>{% endif %}
+              <option value="anon">Reddit API / anonymous</option>
             </select>
           </label>
         </div>

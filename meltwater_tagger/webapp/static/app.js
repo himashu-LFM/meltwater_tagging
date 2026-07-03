@@ -147,4 +147,6 @@ function showView(id) {
   ["inputView", "loadingView", "resultsView"].forEach(v => $(v).classList.toggle("hidden", v !== id));
 }
 
+// sync fetch-mode pill with whatever option is selected on load
+$("modePill").textContent = $("fetchMode").value === "cdp" ? "CDP fetch" : "Anon fetch";
 countUrls();
