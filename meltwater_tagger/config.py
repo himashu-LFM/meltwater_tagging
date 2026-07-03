@@ -53,7 +53,9 @@ REDDIT_USER_AGENT = os.environ.get(
 )
 # Option B: attach to a real Chrome you start with --remote-debugging-port.
 # This avoids Playwright's automation fingerprint that Reddit blocks.
-CHROME_CDP_URL = os.environ.get("MELTWATER_CHROME_CDP_URL", "http://localhost:9222")
+# Use 127.0.0.1 (IPv4), not "localhost" — Chrome's debug port listens on IPv4 and
+# "localhost" can resolve to IPv6 (::1), causing ECONNREFUSED.
+CHROME_CDP_URL = os.environ.get("MELTWATER_CHROME_CDP_URL", "http://127.0.0.1:9222")
 
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

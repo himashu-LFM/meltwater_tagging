@@ -25,15 +25,6 @@ import httpx
 import pandas as pd
 from anthropic import AsyncAnthropic, AuthenticationError, APIStatusError
 
-# On Windows the default Proactor loop spams "Event loop is closed" on shutdown
-# when httpx/anthropic sockets are GC'd — the selector loop avoids that noise.
-# BUT Playwright needs the Proactor loop to spawn the browser subprocess, so only
-# switch to the selector loop when we're NOT using the browser fetch modes.
-if sys.platform.startswith("win") and not (
-    "--browser" in sys.argv or "--reddit-login" in sys.argv or "--cdp" in sys.argv
-):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 import config
 from prompts import SYSTEM_PROMPT, POST_TEMPLATE, DECISION_SCHEMA
 from results_writer import write_results_excel
@@ -497,4 +488,12 @@ async def main():
 
 
 if __name__ == "__main__":
+    # On Windows the default Proactor loop spams "Event loop is closed" on shutdown
+    # when httpx/anthropic sockets are GC'd — the selector loop avoids that noise.
+    # BUT Playwright needs the Proactor loop to spawn the browser subprocess, so only
+    # switch to the selector loop when we're NOT using the browser fetch modes.
+    if sys.platform.startswith("win") and not (
+        "--browser" in sys.argv or "--reddit-login" in sys.argv or "--cdp" in sys.argv
+    ):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

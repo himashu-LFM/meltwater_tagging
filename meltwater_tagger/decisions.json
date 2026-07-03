@@ -5,291 +5,289 @@
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1ucw8vu/comment/otul4bk/",
       "action": "apply",
-      "reason": "Operational troubleshooting post about Datto RMM not detecting WSUS-approved updates; help-seeking with no evaluative verdict about the brand.",
+      "reason": "Operational troubleshooting discussion about Datto RMM not detecting WSUS-approved updates; no overall brand verdict, just a support/bug report.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/SmallMSP/comments/1ufp4y4/comment/otu8anu/",
       "action": "apply",
-      "reason": "Factual mention of Datto RMM as part of a tool-stack description in a remote support tool survey; no evaluative stance expressed.",
+      "reason": "Post is a general inquiry about remote support tools; Datto RMM is mentioned in passing as part of a tool stack list with no evaluative stance.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/SmallMSP/comments/1ufp4y4/comment/otu17wb/",
       "action": "apply",
-      "reason": "Post is a tool-stack name-drop mentioning Datto RMM (Kaseya family) as a backup remote access tool — factual/operational, no evaluative verdict.",
+      "reason": "Post is a tool-stack roundup/inquiry mentioning Datto RMM as a backup remote access option — no evaluative verdict about Kaseya/Datto, just an operational mention in a list.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/SmallMSP/comments/1ufp4y4/comment/ottvl3b/",
       "action": "apply",
-      "reason": "Factual/operational feedback in a tool-recommendation thread — 'not the best but okay' and 'development has stalled' are observational assessments, not a strong brand condemnation; plan to switch is speculative ('I think I probably'), so tie-break favors Neutral.",
+      "reason": "Commenter says Datto RMM is 'still okay' but criticizes stalled development post-acquisition — a specific product/development criticism rather than a whole-brand condemnation; considering NinjaOne is speculative and NinjaOne is not the post's evaluated subject.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/sysadmin/comments/1uevdxa/comment/ottg343/",
       "action": "apply",
-      "reason": "Post relays a Kaseya/Datto BCDR renewal policy notice and asks clarifying questions about opt-out mechanics; the comment about a 'price increase framed as flexibility' is mild editorial framing within what is fundamentally an informational/help-seeking post, not a brand condemnation.",
+      "reason": "Post factually relays a Kaseya/Datto BCDR renewal policy change and asks clarifying operational questions; criticism of a pricing/policy change does not meet the Negative threshold.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/comment/ott765s/",
       "action": "apply",
-      "reason": "Meme-format post describing a Datto RMM Agent Browser quirk in a light, humorous tone — operational/quirk observation, not a brand condemnation.",
+      "reason": "Snarky but mild gripe about a specific Datto RMM Agent Browser quirk (Privacy Mode prompt behavior); criticism of a single feature, not a broad brand condemnation.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/sysadmin/comments/1uevdxa/comment/otsges5/",
       "action": "apply",
-      "reason": "Post is primarily an informational relay of a Datto BCDR renewal policy change with operational clarifying questions; the comment 'price increase framed as flexibility' is mildly editorializing but does not constitute a clear negative verdict or condemnation of the brand.",
+      "reason": "Factual relay of a Kaseya/Datto BCDR renewal policy change with open questions about opt-out mechanics; no broad brand condemnation, just operational/policy discussion.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/taxpros/comments/1mektwq/comment/otsfw58/",
       "action": "apply",
-      "reason": "MSP owner explicitly recommends Kaseya as a security stack, saying it 'covers all the bases' and enables cyber insurance eligibility, despite acknowledging it has mixed reputation — a qualified but clear endorsement.",
+      "reason": "Commenter explicitly recommends Kaseya as a security stack, stating it 'covers all the bases' and helps qualify for cyber insurance, despite acknowledging it has detractors — a clear endorsement.",
       "tag": "Kaseya - positive"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/otscdt8/",
       "action": "apply",
-      "reason": "User explicitly states 'we're done with Kaseya,' 'quality has massively decreased since Kaseya bought them,' and they are actively transitioning away from all Kaseya/Datto products — a clear brand-directed negative verdict, not merely a support question.",
+      "reason": "Broad condemnation of Kaseya as a brand: account management failures, bouncing emails, vague support, 'quality has massively decreased' post-acquisition, and explicit 'we're done with Kaseya' verdict leading to full product transition away.",
       "tag": "Kaseya - negative"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/comment/otrusc3/",
       "action": "apply",
-      "reason": "Author explicitly states 'Kaseya is painfully inept at this kind of thing' and criticizes product execs as clueless — a clear negative verdict directed at the brand, not merely a support/troubleshooting post.",
+      "reason": "Post directly condemns Kaseya with 'painfully inept,' citing product execs being unaware of user pain points — an evaluative verdict against the brand matching the Negative threshold.",
       "tag": "Kaseya - negative"
     },
     {
       "permalink": "https://www.reddit.com/r/sysadmin/comments/1uevdxa/comment/otrj3om/",
       "action": "apply",
-      "reason": "Post is primarily informational — relaying a Kaseya/Datto BCDR renewal policy change and asking clarifying questions about opt-out mechanics; the one critical remark ('price increase framed as flexibility') is incidental to what is fundamentally operational/advisory content, not a brand condemnation.",
+      "reason": "Factual relay of a Kaseya/Datto BCDR renewal policy change with open questions; criticism of a price/policy change is explicitly Neutral per the rules.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/taxpros/comments/1i0o2zg/comment/otr3sea/",
       "action": "apply",
-      "reason": "Author explicitly states they work with Kaseya and that clients love IT Glue, calling it seamless — clear positive endorsement.",
+      "reason": "Post explicitly recommends IT Glue (Kaseya product), saying clients love it and praising its features.",
       "tag": "Kaseya - positive"
     },
     {
       "permalink": "https://www.reddit.com/r/sysadmin/comments/1uevdxa/comment/otqppww/",
       "action": "apply",
-      "reason": "Post is primarily factual/informational — relaying a policy change, listing open questions, and seeking community clarification on opt-out mechanics; mild frustration about communication and a brief critical framing of the 10% increase fall well short of a brand-directed negative verdict.",
+      "reason": "Factual relay of a Kaseya/Datto BCDR renewal policy change with open questions and mild snark about communication; per rules, criticism of a price/policy change (even with annoyance) defaults to Neutral.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1uexkup/comment/otq1ykh/",
       "action": "apply",
-      "reason": "Kaseya is mentioned factually as one example of MSP models that outsource NOC/SOC, with no evaluative verdict or opinion about the brand.",
+      "reason": "Kaseya is mentioned incidentally in a roundup/comparison context about user-to-tech ratios; no evaluative verdict about Kaseya is made.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/automation/comments/1uf3h2b/comment/otpwggk/",
       "action": "apply",
-      "reason": "Datto RMM is mentioned factually alongside other RMM tools (NinjaRMM, Atera) as an example of AI-layer remediation; no evaluative verdict is made about the brand.",
+      "reason": "Datto RMM is mentioned in a roundup list of RMM tools with AI capabilities; no single brand is being directly evaluated as the post's main point.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/comment/otpukgt/",
       "action": "apply",
-      "reason": "Light-hearted meme/joke about a Datto RMM UI quirk ('privacy mode'); no evaluative verdict or brand condemnation, just playful operational banter.",
+      "reason": "Light joke/meme about a recognizable Datto RMM UI quirk (privacy mode); operational humor, no evaluative verdict about the brand.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/sysadmin/comments/1uevdxa/comment/otora1e/",
       "action": "apply",
-      "reason": "Post factually relays Datto BCDR renewal policy change, asks operational questions about opt-out mechanics, and notes migration to a competitor — informational/operational content despite mild critical framing ('price increase framed as flexibility'), not a brand condemnation.",
+      "reason": "Factual relay of Kaseya/Datto BCDR renewal policy change with operational questions and migration note; no broad brand condemnation, just policy/pricing discussion.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/comment/oto67fy/",
       "action": "apply",
-      "reason": "Meme-format post making a light, humorous reference to a Datto RMM quirk; no evaluative verdict about the brand, just mild banter.",
+      "reason": "Humorous/meme post about a Datto RMM UI quirk; no strong evaluative verdict about the brand, just light banter referencing a product behavior.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/comment/oto64s2/",
       "action": "apply",
-      "reason": "Light meme/banter referencing Datto RMM with a minor feature discovery ('I didn't know you can turn it off') — no clear positive or negative verdict about the brand.",
+      "reason": "Light humorous post about Datto RMM (Kaseya product) with no clear positive or negative evaluative stance — just playful community banter.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/comment/oto48ba/",
       "action": "apply",
-      "reason": "User clearly condemns a Datto RMM AI overlay feature as 'awful' and 'poorly done,' citing hallucinations, UI obstruction, and lack of context — an explicit negative verdict about the product, not mere troubleshooting.",
-      "tag": "Kaseya - negative"
+      "reason": "Criticism of a specific AI feature in Datto RMM (hallucinations, UI overlay issues) — this is a feature-level gripe, not a broad condemnation of the brand, so Neutral applies.",
+      "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/Datto/comments/1uey2wu/comment/otny9r0/",
       "action": "apply",
-      "reason": "Factual relay of a renewal policy change for Datto BCDR partners, no opinionated verdict on the brand.",
+      "reason": "Factual relay of a renewal policy change for Kaseya/Datto BCDR — no evaluative stance, just an informational notice.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/sysadmin/comments/1uevdxa/comment/otnm3mh/",
       "action": "apply",
-      "reason": "Post is a factual relay of a Kaseya/Datto BCDR renewal policy change with clarifying questions and concerns about internal compliance; the critical framing ('price increase framed as flexibility') is an observation, not a brand condemnation.",
+      "reason": "Factual relay of a Kaseya/Datto BCDR renewal policy change with open questions and clarifications sought; criticism of the price increase framing is a policy/pricing gripe, not a broad brand condemnation.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/comment/otnkuw7/",
       "action": "apply",
-      "reason": "Clearly derisive sarcasm: paid $1200 for Datto RMM onboarding and got 404 pages and KB walkthroughs; 'best money I ever spent, besides gas station sushi' is an unambiguous negative verdict on the onboarding experience.",
-      "tag": "Kaseya - negative"
+      "reason": "Sarcastic gripe about Datto RMM's paid onboarding service (404 pages, knowledge-article walkthrough for $1200) — criticism of a specific service experience, not a broad brand condemnation; per rules, snarky one-liners and single-feature/service complaints default to Neutral.",
+      "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/Datto/comments/1uey2wu/kaseyadatto_bcdr_partners_renewal_policy_change/",
       "action": "apply",
-      "reason": "Factual relay of a Datto BCDR renewal policy change with no evaluative stance or opinion expressed.",
+      "reason": "Factual relay of a Kaseya/Datto BCDR renewal policy change — no evaluative stance, just informational content.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/sysadmin/comments/1uexf9e/comment/otnftcj/",
       "action": "apply",
-      "reason": "Inky (Kaseya) is mentioned as a passing name-drop in a list of email security alternatives; no evaluative stance toward Kaseya is expressed.",
+      "reason": "Post is about evaluating Barracuda email security; Kaseya (Inky) is mentioned incidentally in a list of alternatives with no evaluative stance.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/comment/otn4p0v/",
       "action": "apply",
-      "reason": "Meme/joke format poking fun at Datto RMM patch compliance reports; light banter shared among users rather than a clear negative verdict or brand condemnation.",
+      "reason": "Snarky joke about Datto RMM patch compliance report reliability — mild product gripe/meme, not a whole-brand condemnation; tagged Neutral per policy.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1u9ahfh/comment/otn0pto/",
       "action": "apply",
-      "reason": "The post is primarily a Teams troubleshooting thread; the Kaseya mention at the end factually reports that a Kaseya update caused crashes and was rolled out without notification, but the mode is informational/contextual rather than an explicit brand condemnation or verdict.",
-      "tag": "Kaseya - neutral"
+      "reason": "Commenter confirms Kaseya pushed an update that crashed Teams and IIS on Exchange servers, enabling it across all customer policies without consent or notification — a confirmed production harm matching the 'pushing a change that broke production without consent' Negative criterion.",
+      "tag": "Kaseya - negative"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1uer8mz/tell_me_you_use_datto_rmm_without_telling_me_you/",
       "action": "apply",
-      "reason": "Thread is a collection of clearly derisive, sarcastic evaluative verdicts about Datto RMM: 'Best money I ever spent' (sarcasm re $1200 onboarding), 'Just everything about it is poorly done' (direct negative verdict on AI feature), and mocking patch compliance/uptime claims — goes well beyond operational chatter into brand condemnation.",
-      "tag": "Kaseya - negative"
+      "reason": "Community humor thread ('tell me you use Datto RMM without telling me') with multiple specific feature gripes (AI widget, patch compliance, Agent Browser, onboarding); snarky/meme tone but no broad brand condemnation — per rules, specific feature criticism and frustrated chatter default to Neutral.",
+      "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/u_Amazing_Falcon/comments/1ueniw6/kaseya_one_complete/",
       "action": "apply",
-      "reason": "User is asking for opinions/advice on Kaseya One platform; no evaluative verdict, purely an inquiry.",
+      "reason": "User asking for community input on Kaseya One platform — general inquiry/help-seeking with no evaluative verdict about Kaseya.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/othdjd6/",
       "action": "apply",
-      "reason": "User seeking billing contact info for Kaseya/Unitrends renewal — operational/help-seeking post, no evaluative stance about the brand.",
+      "reason": "User seeking billing contact info for Kaseya/Unitrends renewal — operational/help-seeking inquiry, not a brand verdict.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/otg8beg/",
       "action": "apply",
-      "reason": "User is seeking billing contact info for Kaseya/Unitrends renewal — operational/help-seeking post with no clear evaluative stance toward the brand.",
+      "reason": "User seeking billing contact for Kaseya/Unitrends renewal; operational/support inquiry with minor frustration about bouncing emails, not a broad brand condemnation.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/otelz9a/",
       "action": "apply",
-      "reason": "User seeking billing contact info for Kaseya/Unitrends renewal — operational/help-seeking post, no evaluative stance toward the brand.",
+      "reason": "User seeking billing contact info for Kaseya/Unitrends renewal; resolved quickly. Operational/support inquiry, not a brand verdict.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1qwl3h0/comment/otc5g6c/",
-      "action": "skip_flag",
-      "reason": "Post is asking for password manager recommendations with no mention of Kaseya or any other taggable brand.",
-      "tag": null,
-      "flag_brand": "none"
+      "action": "apply",
+      "reason": "General MSP question about password manager options; Kaseya/IT Glue is a natural candidate but no brand is directly evaluated as the post's main point.",
+      "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/MkeBucks/comments/1ude1a5/comment/otb6k14/",
-      "action": "skip_flag",
-      "reason": "Kaseya is mentioned only as a venue name-drop (Kaseya Center usher), not as a brand being evaluated; no taggable brand is the primary subject of sentiment.",
-      "tag": null,
-      "flag_brand": "none"
+      "action": "apply",
+      "reason": "'Kaseya' refers to Kaseya Center (arena), not the tech company — incidental/passing mention in NBA/Bucks fan discussion; no evaluative stance about the brand.",
+      "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/otaz8li/",
       "action": "apply",
-      "reason": "Help-seeking post about Kaseya Billing contact for Unitrends renewal; the 'satancorp.hell' joke is mild banter, not a brand condemnation — fundamentally an operational inquiry.",
+      "reason": "Help-seeking post about finding a billing contact; the 'youcanneverleave@satancorp.hell' joke is mild snark, not a broad brand condemnation — fundamentally operational/inquiry content.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/otav4o7/",
       "action": "apply",
-      "reason": "User seeking billing contact info for Unitrends renewal — operational/help-seeking post, no evaluative verdict about Kaseya.",
+      "reason": "User seeking Kaseya billing contact for Unitrends renewal; operational/support inquiry with no strong evaluative verdict about the brand.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/otafwyf/",
       "action": "apply",
-      "reason": "Post is a help-seeking inquiry about Kaseya billing contact; the humorous reply is light banter, not a clear negative verdict about the brand.",
+      "reason": "Post is a billing contact inquiry with mild frustration about bounced emails and a snarky reply — operational gripe, not a broad brand condemnation.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/ot8s78h/",
       "action": "apply",
-      "reason": "User seeking billing contact info for Kaseya/Unitrends renewal; operational/support inquiry with no evaluative verdict on the brand.",
+      "reason": "User seeking Kaseya billing contact for Unitrends renewal info; operational/support inquiry with no evaluative verdict about the brand.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/ot8owag/",
       "action": "apply",
-      "reason": "Post expresses frustration and derision toward Kaseya Billing—'they just are not smart'—going beyond mere troubleshooting into a negative verdict about the brand's competence.",
-      "tag": "Kaseya - negative"
+      "reason": "User seeking Kaseya billing contact; response describes billing system issues (erroneous past due notices despite ACH autopay) — operational/support frustration, not a broad brand condemnation.",
+      "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/ot8n392/",
       "action": "apply",
-      "reason": "User seeking Kaseya billing contact info and reporting login issues — operational/support inquiry, not a brand verdict.",
+      "reason": "User seeking billing contact info for Kaseya/Unitrends renewal; frustrated but fundamentally a support/help-seeking post, not a brand condemnation.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/ot8krxl/",
       "action": "apply",
-      "reason": "User asking a simple billing/renewal inquiry about Kaseya/Unitrends — operational/support question with no evaluative stance toward the brand.",
+      "reason": "User asking for Kaseya billing contact due to bouncing emails; another user provides a helpful workaround. Operational/support discussion, not a brand verdict.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/ot8kbb4/",
       "action": "apply",
-      "reason": "Operational/support inquiry about billing contact for Kaseya/Unitrends renewal; no evaluative verdict on the brand despite frustration.",
+      "reason": "User seeking billing contact for Unitrends renewal — operational/support inquiry, not a brand verdict.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/comment/ot8jsjf/",
       "action": "apply",
-      "reason": "User seeking billing contact info for Kaseya/Unitrends renewal — operational/support inquiry, no evaluative verdict on the brand.",
+      "reason": "User seeking billing contact info for Unitrends renewal — operational/support inquiry with no strong evaluative stance toward Kaseya.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1ud2dti/anyone_have_a_contact_email_for_kaseya_billing/",
       "action": "apply",
-      "reason": "Thread contains clear brand-directed negative verdicts: 'we're done with Kaseya,' 'quality has massively decreased' since the Datto acquisition, and support compared unfavorably to a 'carousel of nonsense,' going beyond mere troubleshooting into explicit condemnation.",
+      "reason": "Thread contains explicit whole-brand condemnation: 'All in all, we're done with Kaseya,' 'quality has massively decreased since Kaseya bought them,' and billing/support completely unreachable — meeting the bar for broad brand-level verdict.",
       "tag": "Kaseya - negative"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1uca6bk/comment/ot6bwg9/",
       "action": "apply",
-      "reason": "Promotional post for a third-party MSP quote design service that integrates with Kaseya Quote Manager; no evaluative verdict on Kaseya itself, just a name-drop as context for the service offering.",
+      "reason": "Promotional post for a third-party MSP quote design service that integrates with Kaseya Quote Manager; incidental/operational mention of Kaseya as a platform, no evaluative stance on Kaseya itself.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/msp/comments/1u9ahfh/comment/ot0ii37/",
       "action": "apply",
-      "reason": "Datto EDR update confirmed as root cause that broke Teams (and other apps) due to AMSI changes — clear negative operational impact attributed to the product.",
-      "tag": "Kaseya - negative"
+      "reason": "Datto EDR update broke Teams via AMSI change (confirmed bug/outage report); troubleshooting discussion, not a whole-brand condemnation — Neutral per rules.",
+      "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/sysadmin/comments/1u975ig/comment/osujiew/",
       "action": "apply",
-      "reason": "Speculative, off-hand joke ('Probably another Kaseya purchase lol') with no clear negative verdict about Kaseya — just casual attribution of a rumored acquisition.",
+      "reason": "Passing speculative mention of Kaseya as a potential buyer; no evaluative stance toward the brand.",
       "tag": "Kaseya - neutral"
     },
     {
       "permalink": "https://www.reddit.com/r/DattoRMM/comments/1tyij71/comment/osrh68p/",
       "action": "apply",
-      "reason": "Bug report about Datto RMM logging incorrect source IPs; operational/troubleshooting post requesting a fix, not a brand condemnation.",
+      "reason": "Bug report about Datto RMM logging incorrect source IPs — operational troubleshooting/feature request, not a broad condemnation of the brand.",
       "tag": "Kaseya - neutral"
     }
   ],
