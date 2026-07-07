@@ -22,9 +22,9 @@
 
   // soft color blobs
   const blobs = [
-    { x: 0.2, y: 0.3, r: 0.5, c: "108,140,255", vx: 0.00006, vy: 0.00004 },
-    { x: 0.8, y: 0.2, r: 0.45, c: "180,108,255", vx: -0.00005, vy: 0.00006 },
-    { x: 0.6, y: 0.85, r: 0.55, c: "87,230,195", vx: 0.00004, vy: -0.00005 },
+    { x: 0.2, y: 0.3, r: 0.5, c: "253,185,19", vx: 0.00006, vy: 0.00004 },   // gold
+    { x: 0.8, y: 0.2, r: 0.45, c: "255,255,255", vx: -0.00005, vy: 0.00006 }, // white
+    { x: 0.6, y: 0.85, r: 0.55, c: "201,136,11", vx: 0.00004, vy: -0.00005 }, // deep amber
   ];
 
   // particles
@@ -71,7 +71,7 @@
       }
       ctx.beginPath();
       ctx.arc(px, py, 1.6 * dpr, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(180,200,255,.55)";
+      ctx.fillStyle = "rgba(253,220,140,.55)";
       ctx.fill();
     }
     const linkDist = 130 * dpr;
@@ -81,7 +81,7 @@
         const dx = (a.x - b.x) * w, dy = (a.y - b.y) * h;
         const d = Math.hypot(dx, dy);
         if (d < linkDist) {
-          ctx.strokeStyle = `rgba(108,140,255,${(1 - d / linkDist) * 0.18})`;
+          ctx.strokeStyle = `rgba(253,185,19,${(1 - d / linkDist) * 0.18})`;
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.moveTo(a.x * w, a.y * h);

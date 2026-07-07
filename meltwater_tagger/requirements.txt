@@ -6,3 +6,4 @@ httpx>=0.27
 flask>=3.0
 gunicorn>=21.2 ; sys_platform != "win32"
 waitress>=3.0
+supabase>=2.7

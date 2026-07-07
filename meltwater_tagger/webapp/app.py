@@ -1,13 +1,13 @@
 """
-Web UI for the Meltwater sentiment tagger (classification + export).
+Web UI for the Meltwater sentiment tagger — multi-user, multi-brand.
 
 Run:
     python webapp/app.py
 Then open http://127.0.0.1:5000
 
-Reuses the same fetch + classify pipeline as classify.py, so tagging logic is
-identical. This UI covers classification and Excel export; applying tags into
-Meltwater is still done by apply_tags.py.
+Auth + per-user Meltwater/Reddit credentials + run history are backed by
+Supabase (see supabase/schema.sql and .env.example). Classification reuses
+the same pipeline as classify.py, so tagging logic is identical everywhere.
 """
 
 import asyncio
@@ -16,10 +16,9 @@ import os
 import sys
 
 import pandas as pd
-from flask import Flask, jsonify, request, send_file, render_template
+from flask import Flask, jsonify, request, send_file, render_template, g
 from anthropic import AsyncAnthropic, AuthenticationError, APIStatusError
 
-# import the pipeline from the parent package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from classify import (
@@ -28,27 +27,114 @@ from classify import (
 )
 import httpx
 
+import db
+from auth import require_auth
+from fetchers import fetch_via_reddit_cookie
+from meltwater_apply import apply_results_to_meltwater
+
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
 # CDP fetch needs a local logged-in Chrome, which a cloud host doesn't have.
-# On the server set MELTWATER_ALLOW_CDP=false so the UI hides CDP and fetching
-# uses the Reddit API / anonymous path instead.
 ALLOW_CDP = os.environ.get("MELTWATER_ALLOW_CDP", "true").lower() == "true"
 
 
 def run_async(coro):
-    """Run an async coroutine from a sync Flask handler (Proactor loop on Windows)."""
     return asyncio.run(coro)
 
 
+# --- pages -------------------------------------------------------------------
+
 @app.route("/")
 def index():
-    return render_template("index.html", allow_cdp=ALLOW_CDP)
+    return render_template("index.html", allow_cdp=ALLOW_CDP,
+                            supabase_url=db.SUPABASE_URL, supabase_anon_key=db.SUPABASE_ANON_KEY)
 
+
+@app.route("/login")
+def login_page():
+    return render_template("login.html", supabase_url=db.SUPABASE_URL, supabase_anon_key=db.SUPABASE_ANON_KEY)
+
+
+@app.route("/profile")
+def profile_page():
+    return render_template("profile.html", supabase_url=db.SUPABASE_URL, supabase_anon_key=db.SUPABASE_ANON_KEY)
+
+
+@app.route("/history")
+def history_page():
+    return render_template("history.html", supabase_url=db.SUPABASE_URL, supabase_anon_key=db.SUPABASE_ANON_KEY)
+
+
+# --- brands --------------------------------------------------------------
+
+@app.route("/api/brands", methods=["GET"])
+@require_auth
+def get_brands():
+    try:
+        return jsonify({"brands": db.list_brands()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/brands", methods=["POST"])
+@require_auth
+def upsert_brand_route():
+    data = request.get_json(force=True)
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Brand name is required"}), 400
+    brand = db.upsert_brand(
+        name,
+        roll_up_terms=data.get("roll_up_terms"),
+        meltwater_topic_url=data.get("meltwater_topic_url"),
+    )
+    return jsonify({"brand": brand})
+
+
+# --- profile: meltwater + reddit creds ---------------------------------------
+
+@app.route("/api/profile/meltwater", methods=["GET"])
+@require_auth
+def get_meltwater_profile():
+    creds = db.get_meltwater_creds(g.user.id)
+    return jsonify({"credentials": creds})
+
+
+@app.route("/api/profile/meltwater", methods=["POST"])
+@require_auth
+def set_meltwater_profile():
+    data = request.get_json(force=True)
+    email = (data.get("email") or "").strip()
+    password = data.get("password") or None
+    if not email:
+        return jsonify({"error": "Meltwater email is required"}), 400
+    db.upsert_meltwater_creds(g.user.id, email, password)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/profile/reddit", methods=["GET"])
+@require_auth
+def get_reddit_profile():
+    session = db.get_reddit_session(g.user.id)
+    return jsonify({"session": session})
+
+
+@app.route("/api/profile/reddit", methods=["POST"])
+@require_auth
+def set_reddit_profile():
+    data = request.get_json(force=True)
+    cookie = (data.get("cookie_value") or "").strip()
+    if not cookie:
+        return jsonify({"error": "Cookie value is required"}), 400
+    db.upsert_reddit_cookie(g.user.id, cookie)
+    return jsonify({"ok": True})
+
+
+# --- classification --------------------------------------------------------
 
 @app.route("/api/extract", methods=["POST"])
+@require_auth
 def extract():
-    """Parse an uploaded Excel and return the URLs from its URL column."""
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["file"]
@@ -67,22 +153,23 @@ def extract():
 
 
 @app.route("/api/classify", methods=["POST"])
+@require_auth
 def classify():
     data = request.get_json(force=True)
     urls = [u.strip() for u in data.get("urls", []) if u and u.strip()]
     brand = (data.get("brand") or "").strip()
-    fetch_mode = data.get("fetch_mode", "cdp")  # 'cdp' or 'anon'
+    fetch_mode = data.get("fetch_mode", "cdp" if ALLOW_CDP else "reddit_cookie")
     if not ALLOW_CDP and fetch_mode == "cdp":
-        fetch_mode = "anon"  # server has no local Chrome
+        fetch_mode = "reddit_cookie"
     if not urls:
         return jsonify({"error": "No URLs provided"}), 400
     if not brand:
-        return jsonify({"error": "Please specify the run brand (e.g. Kaseya)"}), 400
+        return jsonify({"error": "Please choose a brand"}), 400
 
     try:
-        results = run_async(_classify_urls(urls, brand, fetch_mode))
+        results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id))
     except AuthenticationError:
-        return jsonify({"error": "Invalid or missing ANTHROPIC_API_KEY (check your .env)."}), 400
+        return jsonify({"error": "Invalid or missing ANTHROPIC_API_KEY (server config)."}), 400
     except APIStatusError as e:
         msg = str(getattr(e, "message", e))
         if "credit" in msg.lower() or "billing" in msg.lower():
@@ -91,15 +178,25 @@ def classify():
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
-    return jsonify({"run_brand": brand, "results": results})
+    run_record = None
+    if db.is_configured():
+        try:
+            run_record = db.save_run(g.user.id, brand, results, status="classified")
+        except Exception:
+            pass  # history is best-effort; don't fail the classify response over it
+
+    return jsonify({"run_brand": brand, "results": results,
+                     "run_id": run_record["id"] if run_record else None})
 
 
-async def _classify_urls(urls, brand, fetch_mode):
+async def _classify_urls(urls, brand, fetch_mode, user_id):
     posts = [{"permalink": u, "excerpt": ""} for u in urls]
 
-    # 1) fetch full text
     if fetch_mode == "cdp":
         posts = await fetch_via_cdp(posts)
+    elif fetch_mode == "reddit_cookie":
+        cookie = db.get_reddit_cookie(user_id) if db.is_configured() else None
+        posts = await fetch_via_reddit_cookie(posts, cookie)
     else:
         sem = asyncio.Semaphore(config.FETCH_CONCURRENCY)
         async with httpx.AsyncClient() as http:
@@ -109,7 +206,6 @@ async def _classify_urls(urls, brand, fetch_mode):
                 return p
             posts = await asyncio.gather(*[_f(p) for p in posts])
 
-    # 2) classify in parallel
     anthropic = AsyncAnthropic()
     sem = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
     decisions = await asyncio.gather(
@@ -119,9 +215,7 @@ async def _classify_urls(urls, brand, fetch_mode):
     out = []
     for d in decisions:
         tag = d.get("tag") or ""
-        sentiment = ""
-        if tag and " - " in tag:
-            sentiment = tag.split(" - ", 1)[1]
+        sentiment = tag.split(" - ", 1)[1] if tag and " - " in tag else ""
         out.append({
             "permalink": d["permalink"],
             "action": d.get("action"),
@@ -129,12 +223,14 @@ async def _classify_urls(urls, brand, fetch_mode):
             "sentiment": sentiment or ("—" if d.get("action") != "apply" else ""),
             "flag_brand": d.get("flag_brand", ""),
             "reason": d.get("reason", ""),
-            "has_text": bool(next((p.get("text") for p in posts if p["permalink"] == d["permalink"]), "")),
         })
     return out
 
 
+# --- export ------------------------------------------------------------------
+
 @app.route("/api/export", methods=["POST"])
+@require_auth
 def export():
     data = request.get_json(force=True)
     results = data.get("results", [])
@@ -150,11 +246,64 @@ def export():
     buf = io.BytesIO()
     df.to_excel(buf, index=False)
     buf.seek(0)
-    fname = f"tagging_{brand}.xlsx"
-    return send_file(
-        buf, as_attachment=True, download_name=fname,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    return send_file(buf, as_attachment=True, download_name=f"tagging_{brand}.xlsx",
+                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# --- apply to meltwater --------------------------------------------------------
+
+@app.route("/api/apply", methods=["POST"])
+@require_auth
+def apply_to_meltwater():
+    data = request.get_json(force=True)
+    results = data.get("results", [])
+    brand_name = (data.get("run_brand") or "").strip()
+    run_id = data.get("run_id")
+    if not results:
+        return jsonify({"error": "No results to apply."}), 400
+
+    creds = db.get_meltwater_creds_full(g.user.id)
+    if not creds:
+        return jsonify({"error": "Add your Meltwater login on your Profile page first."}), 400
+
+    brand = db.get_brand(brand_name) if brand_name else None
+    topic_url = brand.get("meltwater_topic_url") if brand else None
+    if not topic_url:
+        return jsonify({"error": f"'{brand_name}' has no Meltwater topic URL configured yet. "
+                                  "Set it once on the Profile page under Brand settings."}), 400
+
+    try:
+        report = run_async(apply_results_to_meltwater(
+            creds["meltwater_email"], creds["meltwater_password"], topic_url, results
+        ))
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    if run_id and db.is_configured() and report.get("ok"):
+        try:
+            db.update_run_status(run_id, "applied")
+        except Exception:
+            pass
+
+    status_code = 200 if report.get("ok") else 400
+    return jsonify(report), status_code
+
+
+# --- history -------------------------------------------------------------
+
+@app.route("/api/history", methods=["GET"])
+@require_auth
+def history_list():
+    return jsonify({"runs": db.list_runs(g.user.id)})
+
+
+@app.route("/api/history/<run_id>", methods=["GET"])
+@require_auth
+def history_detail(run_id):
+    run = db.get_run(g.user.id, run_id)
+    if not run:
+        return jsonify({"error": "Run not found"}), 404
+    return jsonify({"run": run})
 
 
 if __name__ == "__main__":
