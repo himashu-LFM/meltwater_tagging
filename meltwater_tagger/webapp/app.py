@@ -98,6 +98,29 @@ def upsert_brand_route():
     return jsonify({"brand": brand})
 
 
+@app.route("/api/brands/<int:brand_id>", methods=["PUT"])
+@require_auth
+def update_brand_route(brand_id):
+    data = request.get_json(force=True)
+    name = data.get("name")
+    if name is not None and not name.strip():
+        return jsonify({"error": "Brand name cannot be empty"}), 400
+    brand = db.update_brand(
+        brand_id,
+        name=name.strip() if name else None,
+        roll_up_terms=data.get("roll_up_terms"),
+        meltwater_topic_url=data.get("meltwater_topic_url"),
+    )
+    return jsonify({"brand": brand})
+
+
+@app.route("/api/brands/<int:brand_id>", methods=["DELETE"])
+@require_auth
+def delete_brand_route(brand_id):
+    db.delete_brand(brand_id)
+    return jsonify({"ok": True})
+
+
 # --- profile: meltwater + reddit creds ---------------------------------------
 
 @app.route("/api/profile/meltwater", methods=["GET"])

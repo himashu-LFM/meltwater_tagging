@@ -1,0 +1,39 @@
+/* Cursor glow — soft gold halo that trails the pointer */
+.cursor-glow{
+  position:fixed;top:0;left:0;width:300px;height:300px;border-radius:50%;
+  pointer-events:none;z-index:0;mix-blend-mode:screen;
+  background:radial-gradient(circle,rgba(253,185,19,.12),transparent 60%);
+  will-change:transform;
+}
+
+/* Full-screen particle burst layer (above content, never blocks clicks) */
+.fx-canvas{position:fixed;inset:0;pointer-events:none;z-index:9998}
+
+/* Click ripple inside buttons */
+.btn{position:relative;overflow:hidden}
+.ripple{position:absolute;border-radius:50%;transform:scale(0);pointer-events:none;
+  background:rgba(255,255,255,.35);animation:ripple .6s ease-out}
+@keyframes ripple{to{transform:scale(2.4);opacity:0}}
+
+/* Cards get smooth tilt transitions + a lift on hover */
+.card.glass,.auth-card{transition:transform .18s ease-out,box-shadow .3s ease}
+.card.glass:hover,.auth-card:hover{box-shadow:0 28px 70px rgba(0,0,0,.6),
+  0 0 0 1px rgba(253,185,19,.15)}
+
+/* Buttons ease back from magnetic pull */
+.btn{transition:transform .18s cubic-bezier(.2,.8,.2,1),box-shadow .3s}
+
+/* Primary button idle breathing glow */
+.btn.primary{box-shadow:0 6px 20px rgba(253,185,19,.18)}
+.btn.primary:hover{box-shadow:0 14px 36px rgba(253,185,19,.4)}
+
+/* Stat chips pop in and glow on hover */
+.stat{transition:transform .2s,border-color .2s,color .2s}
+.stat:hover{transform:translateY(-2px);border-color:rgba(253,185,19,.4);color:var(--txt)}
+
+/* Sentiment chips get a gentle hover lift */
+.chip{transition:transform .18s,box-shadow .25s}
+tbody tr:hover .chip{transform:scale(1.06)}
+
+/* Content should sit above the cursor glow */
+.wrap,.topbar,.auth-shell,.page-nav{position:relative;z-index:1}

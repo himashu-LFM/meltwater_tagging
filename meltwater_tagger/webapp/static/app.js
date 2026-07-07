@@ -182,6 +182,7 @@ $("applyBtn").addEventListener("click", async () => {
     statusEl.className = "apply-status " + (r.ok ? "ok" : "err");
     if (r.ok) {
       statusEl.textContent = `✓ ${data.message} (${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed)`;
+      if (window.FX && window.FX.celebrate) window.FX.celebrate();
     } else {
       statusEl.textContent = data.error || data.message || "Apply failed.";
     }
