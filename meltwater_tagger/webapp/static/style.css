@@ -1,8 +1,9 @@
 :root{
-  --bg:#070a14; --card:rgba(20,26,44,.55); --stroke:rgba(140,160,220,.18);
-  --txt:#e8ecff; --muted:#9aa6c8; --accent:#6c8cff; --accent2:#b46cff;
-  --pos:#25d0a0; --neg:#ff5d73; --neu:#8aa0c8;
-  --shadow:0 20px 60px rgba(0,0,0,.45);
+  /* LF brand theme: black / white / gold, from the shutter-mark logo */
+  --bg:#0a0a0c; --card:rgba(24,24,26,.6); --stroke:rgba(255,255,255,.14);
+  --txt:#f5f5f2; --muted:#a3a3a0; --accent:#fdb913; --accent2:#c9880b;
+  --pos:#25d0a0; --neg:#ff5d73; --neu:#a3a3a0;
+  --shadow:0 20px 60px rgba(0,0,0,.55);
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -12,8 +13,8 @@ body{
 }
 #bg{position:fixed;inset:0;z-index:-2;width:100%;height:100%}
 body::after{content:"";position:fixed;inset:0;z-index:-1;
-  background:radial-gradient(1200px 600px at 70% -10%,rgba(108,140,255,.18),transparent),
-             radial-gradient(900px 500px at 10% 110%,rgba(180,108,255,.15),transparent);
+  background:radial-gradient(1200px 600px at 70% -10%,rgba(253,185,19,.14),transparent),
+             radial-gradient(900px 500px at 10% 110%,rgba(255,255,255,.06),transparent);
   pointer-events:none}
 
 /* top bar */
@@ -23,10 +24,19 @@ body::after{content:"";position:fixed;inset:0;z-index:-1;
 .logo b{font-weight:700}
 .logo-dot{width:12px;height:12px;border-radius:50%;
   background:linear-gradient(135deg,var(--accent),var(--accent2));
-  box-shadow:0 0 18px var(--accent);animation:pulse 2.4s infinite}
+  box-shadow:0 0 18px rgba(253,185,19,.6);animation:pulse 2.4s infinite}
 @keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.25);opacity:.7}}
 .pill{font-size:12px;color:var(--muted);border:1px solid var(--stroke);
   padding:6px 14px;border-radius:999px;background:rgba(255,255,255,.03)}
+.topbar .links{display:flex;gap:6px}
+.topbar .links a{color:var(--muted);text-decoration:none;font-size:14px;padding:9px 16px;
+  border-radius:10px;transition:.2s;border:1px solid transparent}
+.topbar .links a:hover,.topbar .links a.active{color:var(--txt);background:rgba(255,255,255,.06);
+  border-color:var(--stroke)}
+.apply-status{margin:10px 0 0;font-size:14px;min-height:20px}
+.apply-status.ok{color:var(--pos)}
+.apply-status.err{color:var(--neg)}
+.run-row{animation:rise .45s backwards}
 
 .wrap{max-width:1040px;margin:0 auto;padding:24px 24px 80px}
 .view{animation:rise .6s cubic-bezier(.2,.8,.2,1)}
@@ -34,7 +44,7 @@ body::after{content:"";position:fixed;inset:0;z-index:-1;
 @keyframes rise{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:none}}
 
 .title{font-size:clamp(34px,6vw,58px);margin:18px 0 8px;font-weight:800;letter-spacing:-1px}
-.grad{background:linear-gradient(100deg,var(--accent),var(--accent2) 60%,#57e6c3);
+.grad{background:linear-gradient(100deg,var(--accent),#fff 55%,var(--accent2));
   -webkit-background-clip:text;background-clip:text;color:transparent;
   background-size:200% auto;animation:shift 6s linear infinite}
 @keyframes shift{to{background-position:200% center}}
@@ -48,17 +58,17 @@ body::after{content:"";position:fixed;inset:0;z-index:-1;
 .field{flex:1;min-width:220px;display:flex;flex-direction:column;gap:8px}
 .field-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
 input,select,textarea{
-  background:rgba(10,14,26,.7);border:1px solid var(--stroke);color:var(--txt);
+  background:rgba(255,255,255,.05);border:1px solid var(--stroke);color:var(--txt);
   border-radius:12px;padding:13px 15px;font-size:15px;font-family:inherit;
   transition:border-color .25s,box-shadow .25s,transform .25s;width:100%}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);
-  box-shadow:0 0 0 4px rgba(108,140,255,.16)}
+  box-shadow:0 0 0 4px rgba(253,185,19,.18)}
 textarea{resize:vertical;line-height:1.6}
 
 /* dropzone */
 .dropzone{border:2px dashed var(--stroke);border-radius:16px;padding:28px;
   text-align:center;cursor:pointer;transition:.3s;background:rgba(255,255,255,.02);margin-bottom:18px}
-.dropzone:hover,.dropzone.drag{border-color:var(--accent);background:rgba(108,140,255,.08);
+.dropzone:hover,.dropzone.drag{border-color:var(--accent);background:rgba(253,185,19,.08);
   transform:translateY(-2px)}
 .dz-icon{font-size:30px;margin-bottom:8px;
   background:linear-gradient(135deg,var(--accent),var(--accent2));
@@ -75,7 +85,7 @@ textarea{resize:vertical;line-height:1.6}
   padding:13px 26px;border-radius:12px;color:#fff;font-family:inherit;overflow:hidden;
   transition:transform .2s,box-shadow .3s}
 .btn.primary{background:linear-gradient(120deg,var(--accent),var(--accent2))}
-.btn.primary:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(108,140,255,.45)}
+.btn.primary:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(253,185,19,.35)}
 .btn.primary:active{transform:translateY(0)}
 .btn.ghost{background:rgba(255,255,255,.06);border:1px solid var(--stroke)}
 .btn.ghost:hover{background:rgba(255,255,255,.12)}
@@ -94,7 +104,7 @@ textarea{resize:vertical;line-height:1.6}
 .orbit i{position:absolute;inset:0;border:2px solid transparent;border-radius:50%}
 .orbit i:nth-child(1){border-top-color:var(--accent);animation:spin 1s linear infinite}
 .orbit i:nth-child(2){border-right-color:var(--accent2);animation:spin 1.6s linear infinite reverse;inset:12px}
-.orbit i:nth-child(3){border-bottom-color:#57e6c3;animation:spin 2.2s linear infinite;inset:24px}
+.orbit i:nth-child(3){border-bottom-color:#fff;animation:spin 2.2s linear infinite;inset:24px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .loader-text{color:var(--muted);letter-spacing:.5px}
 
@@ -109,13 +119,13 @@ textarea{resize:vertical;line-height:1.6}
 
 .table-wrap{overflow:auto;max-height:64vh}
 table{width:100%;border-collapse:collapse;font-size:14px}
-thead th{position:sticky;top:0;background:rgba(16,22,38,.95);backdrop-filter:blur(8px);
+thead th{position:sticky;top:0;background:rgba(18,18,20,.95);backdrop-filter:blur(8px);
   text-align:left;padding:14px 16px;color:var(--muted);font-weight:600;
   text-transform:uppercase;font-size:11px;letter-spacing:1px;border-bottom:1px solid var(--stroke)}
-tbody td{padding:14px 16px;border-bottom:1px solid rgba(140,160,220,.08);vertical-align:top}
+tbody td{padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top}
 tbody tr{opacity:0;transform:translateY(8px);animation:rowin .45s forwards}
 @keyframes rowin{to{opacity:1;transform:none}}
-tbody tr:hover{background:rgba(108,140,255,.07)}
+tbody tr:hover{background:rgba(253,185,19,.06)}
 td a{color:var(--accent);text-decoration:none;word-break:break-all}
 td a:hover{text-decoration:underline}
 .reason{color:var(--muted);max-width:360px}

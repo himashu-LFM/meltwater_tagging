@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Profile — Sentiment Tagger</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <nav class="page-nav">
+    <div class="logo"><span class="logo-dot"></span> Meltwater <b>Sentiment Tagger</b></div>
+    <div class="links">
+      <a href="/">Tagger</a>
+      <a href="/history">History</a>
+      <a href="/profile" class="active">Profile</a>
+      <a href="#" id="logoutLink">Log out</a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <h1 class="section-title">Your <span class="grad">profile</span></h1>
+    <p class="section-sub" id="whoami"></p>
+
+    <div class="card glass" style="margin-bottom:22px">
+      <h3 style="margin-top:0">Meltwater login</h3>
+      <p class="section-sub" style="margin-bottom:16px">Used when you click "Apply to Meltwater" so tags get
+        written into your own Meltwater account.</p>
+      <div class="row">
+        <label class="field">
+          <span class="field-label">Meltwater email</span>
+          <input type="email" id="mwEmail" placeholder="you@company.com" />
+        </label>
+        <label class="field">
+          <span class="field-label">Meltwater password</span>
+          <input type="password" id="mwPassword" placeholder="leave blank to keep current" />
+        </label>
+      </div>
+      <button class="btn primary" id="saveMw"><span class="btn-shine"></span><span class="btn-label">Save</span></button>
+      <span class="save-msg" id="mwMsg"></span>
+    </div>
+
+    <div class="card glass" style="margin-bottom:22px">
+      <h3 style="margin-top:0">Reddit session (for cloud fetching)</h3>
+      <p class="section-sub" style="margin-bottom:16px">
+        Until we have a Reddit API key, paste your Reddit session cookie so the deployed app can
+        read full post text like a logged-in browser. In Chrome: open reddit.com while logged in →
+        DevTools (F12) → Application → Cookies → reddit.com → copy the <code>reddit_session</code> value.
+      </p>
+      <label class="field">
+        <span class="field-label">reddit_session cookie value</span>
+        <input type="text" id="redditCookie" placeholder="paste cookie value here" />
+      </label>
+      <button class="btn primary" id="saveReddit" style="margin-top:14px">
+        <span class="btn-shine"></span><span class="btn-label">Save</span>
+      </button>
+      <span class="save-msg" id="redditMsg"></span>
+    </div>
+
+    <div class="card glass">
+      <h3 style="margin-top:0">Brand settings</h3>
+      <p class="section-sub" style="margin-bottom:16px">Add a new brand, or set the Meltwater topic/saved-search
+        URL a brand's "Apply to Meltwater" should open (one-time per brand).</p>
+      <div class="row">
+        <label class="field">
+          <span class="field-label">Brand name</span>
+          <input type="text" id="brandName" placeholder="e.g. Ninja" />
+        </label>
+        <label class="field">
+          <span class="field-label">Meltwater topic URL</span>
+          <input type="text" id="brandTopicUrl" placeholder="https://app.meltwater.com/..." />
+        </label>
+      </div>
+      <button class="btn primary" id="saveBrand"><span class="btn-shine"></span><span class="btn-label">Save brand</span></button>
+      <span class="save-msg" id="brandMsg"></span>
+
+      <div id="brandList" style="margin-top:22px"></div>
+    </div>
+  </main>
+
+  <script>
+    window.__SUPABASE_URL__ = {{ supabase_url|tojson }};
+    window.__SUPABASE_ANON_KEY__ = {{ supabase_anon_key|tojson }};
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="{{ url_for('static', filename='background.js') }}"></script>
+  <script src="{{ url_for('static', filename='auth.js') }}"></script>
+  <script src="{{ url_for('static', filename='profile.js') }}"></script>
+</body>
+</html>

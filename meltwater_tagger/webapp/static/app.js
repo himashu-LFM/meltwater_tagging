@@ -1,6 +1,23 @@
 const $ = (id) => document.getElementById(id);
 
-const state = { urls: [], results: [], brand: "" };
+const state = { urls: [], results: [], brand: "", runId: null };
+
+(async () => {
+  const session = await Auth.requireAuthOrRedirect();
+  if (!session) return;
+  await loadBrands();
+})();
+
+async function loadBrands() {
+  const r = await Auth.authedFetch("/api/brands");
+  const data = await r.json();
+  const sel = $("brand");
+  if (data.brands && data.brands.length) {
+    sel.innerHTML = data.brands.map(b => `<option value="${escAttr(b.name)}">${escapeHtml(b.name)}</option>`).join("");
+  } else {
+    sel.innerHTML = `<option value="">No brands configured — add one on Profile</option>`;
+  }
+}
 
 // ---- URL counting ----
 function countUrls() {
@@ -12,7 +29,8 @@ $("urls").addEventListener("input", () => { state.urls = []; countUrls(); });
 
 // ---- fetch-mode pill ----
 $("fetchMode").addEventListener("change", (e) => {
-  $("modePill").textContent = e.target.value === "cdp" ? "CDP fetch" : "Anon fetch";
+  const labels = { cdp: "CDP fetch", reddit_cookie: "Cookie fetch", anon: "Anon fetch" };
+  $("modePill").textContent = labels[e.target.value] || e.target.value;
 });
 
 // ---- file upload / dropzone ----
@@ -32,12 +50,15 @@ async function handleFile(file) {
   const fd = new FormData();
   fd.append("file", file);
   try {
-    const r = await fetch("/api/extract", { method: "POST", body: fd });
+    const r = await Auth.authedFetch("/api/extract", { method: "POST", body: fd });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Failed to read file");
     state.urls = data.urls;
-    $("urls").value = "";               // uploaded URLs take over
-    if (data.brand && !$("brand").value) $("brand").value = data.brand;
+    $("urls").value = "";
+    if (data.brand) {
+      const opt = [...$("brand").options].find(o => o.value.toLowerCase() === data.brand.toLowerCase());
+      if (opt) $("brand").value = opt.value;
+    }
     $("dzSub").textContent = `✓ ${data.count} URLs loaded from ${file.name}`;
     countUrls();
   } catch (err) {
@@ -53,7 +74,7 @@ async function run() {
   const brand = $("brand").value.trim();
   const pasted = $("urls").value.split(/\s+/).map(s => s.trim()).filter(Boolean);
   const urls = pasted.length ? pasted : state.urls;
-  if (!brand) return ($("inputErr").textContent = "Please enter the run brand.");
+  if (!brand) return ($("inputErr").textContent = "Please choose a brand.");
   if (!urls.length) return ($("inputErr").textContent = "Upload an Excel or paste at least one URL.");
 
   state.brand = brand;
@@ -61,13 +82,14 @@ async function run() {
   cycleLoaderText();
 
   try {
-    const r = await fetch("/api/classify", {
+    const r = await Auth.authedFetch("/api/classify", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ urls, brand, fetch_mode: $("fetchMode").value }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Classification failed");
     state.results = data.results;
+    state.runId = data.run_id || null;
     renderResults(data);
     showView("resultsView");
   } catch (err) {
@@ -89,6 +111,8 @@ function cycleLoaderText() {
 function renderResults(data) {
   clearInterval(loaderTimer);
   $("resBrand").textContent = data.run_brand;
+  $("applyStatus").textContent = "";
+  $("applyStatus").className = "apply-status";
   const res = data.results;
 
   const counts = { positive: 0, negative: 0, neutral: 0, other: 0 };
@@ -125,10 +149,11 @@ function shorten(u) { return u.length > 60 ? u.slice(0, 57) + "…" : u; }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+function escAttr(s) { return escapeHtml(s); }
 
 // ---- export ----
 $("exportBtn").addEventListener("click", async () => {
-  const r = await fetch("/api/export", {
+  const r = await Auth.authedFetch("/api/export", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ results: state.results, run_brand: state.brand }),
   });
@@ -141,12 +166,46 @@ $("exportBtn").addEventListener("click", async () => {
   URL.revokeObjectURL(a.href);
 });
 
+// ---- apply to meltwater ----
+$("applyBtn").addEventListener("click", async () => {
+  const btn = $("applyBtn");
+  const statusEl = $("applyStatus");
+  btn.disabled = true;
+  statusEl.className = "apply-status";
+  statusEl.textContent = "Logging into Meltwater and applying tags — this can take a minute…";
+  try {
+    const r = await Auth.authedFetch("/api/apply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ results: state.results, run_brand: state.brand, run_id: state.runId }),
+    });
+    const data = await r.json();
+    statusEl.className = "apply-status " + (r.ok ? "ok" : "err");
+    if (r.ok) {
+      statusEl.textContent = `✓ ${data.message} (${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed)`;
+    } else {
+      statusEl.textContent = data.error || data.message || "Apply failed.";
+    }
+  } catch (err) {
+    statusEl.className = "apply-status err";
+    statusEl.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ---- nav ----
 $("backBtn").addEventListener("click", () => showView("inputView"));
 function showView(id) {
   ["inputView", "loadingView", "resultsView"].forEach(v => $(v).classList.toggle("hidden", v !== id));
 }
 
+$("logoutLink").addEventListener("click", async (e) => {
+  e.preventDefault();
+  await Auth.signOut();
+  window.location.href = "/login";
+});
+
 // sync fetch-mode pill with whatever option is selected on load
-$("modePill").textContent = $("fetchMode").value === "cdp" ? "CDP fetch" : "Anon fetch";
+const labels0 = { cdp: "CDP fetch", reddit_cookie: "Cookie fetch", anon: "Anon fetch" };
+$("modePill").textContent = labels0[$("fetchMode").value] || $("fetchMode").value;
 countUrls();

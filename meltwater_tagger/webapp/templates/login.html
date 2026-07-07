@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in — Sentiment Tagger</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <div class="auth-shell">
+    <div class="auth-brand">
+      <div class="auth-logo">
+        <span class="logo-dot"></span> Meltwater <b>Sentiment Tagger</b>
+      </div>
+      <h1 class="auth-hero">Tag social sentiment<br/><span class="grad">at the speed of thought.</span></h1>
+      <p class="auth-copy">Multi-brand, multi-analyst sentiment tagging — classify posts in
+        parallel, review in seconds, apply straight into Meltwater.</p>
+      <ul class="auth-points">
+        <li>⚡ Parallel AI classification, not one post at a time</li>
+        <li>🏷️ Any brand — Kaseya, Ninja, and whatever's next</li>
+        <li>📊 Full run history, always a click away</li>
+      </ul>
+    </div>
+
+    <div class="auth-card glass">
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Log in</button>
+        <button class="auth-tab" data-tab="signup">Sign up</button>
+      </div>
+
+      <form id="loginForm" class="auth-form">
+        <label class="field">
+          <span class="field-label">Email</span>
+          <input type="email" id="loginEmail" required autocomplete="email" />
+        </label>
+        <label class="field">
+          <span class="field-label">Password</span>
+          <input type="password" id="loginPassword" required autocomplete="current-password" />
+        </label>
+        <button type="submit" class="btn primary auth-submit">
+          <span class="btn-shine"></span><span class="btn-label">Log in</span>
+        </button>
+      </form>
+
+      <form id="signupForm" class="auth-form hidden">
+        <label class="field">
+          <span class="field-label">Work email</span>
+          <input type="email" id="signupEmail" required autocomplete="email" />
+        </label>
+        <label class="field">
+          <span class="field-label">Password</span>
+          <input type="password" id="signupPassword" required minlength="6" autocomplete="new-password" />
+        </label>
+        <button type="submit" class="btn primary auth-submit">
+          <span class="btn-shine"></span><span class="btn-label">Create account</span>
+        </button>
+      </form>
+
+      <div class="auth-msg" id="authMsg"></div>
+    </div>
+  </div>
+
+  <script>
+    window.__SUPABASE_URL__ = {{ supabase_url|tojson }};
+    window.__SUPABASE_ANON_KEY__ = {{ supabase_anon_key|tojson }};
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="{{ url_for('static', filename='background.js') }}"></script>
+  <script src="{{ url_for('static', filename='auth.js') }}"></script>
+  <script src="{{ url_for('static', filename='login.js') }}"></script>
+</body>
+</html>

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sentiment Tagger</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
 </head>
 <body>
   <canvas id="bg"></canvas>
@@ -14,6 +15,12 @@
       <span class="logo-dot"></span>
       Meltwater <b>Sentiment Tagger</b>
     </div>
+    <nav class="links">
+      <a href="/" class="active">Tagger</a>
+      <a href="/history">History</a>
+      <a href="/profile">Profile</a>
+      <a href="#" id="logoutLink">Log out</a>
+    </nav>
     <div class="pill" id="modePill">CDP fetch</div>
   </header>
 
@@ -22,19 +29,20 @@
     <section id="inputView" class="view">
       <h1 class="title">Tag posts by <span class="grad">sentiment</span></h1>
       <p class="subtitle">Upload a Meltwater export or paste post URLs. We read the URL column,
-        classify each post, and let you export the tagged results.</p>
+        classify each post, and let you export the tagged results — or apply them straight into Meltwater.</p>
 
       <div class="card glass">
         <div class="row">
           <label class="field">
-            <span class="field-label">Run brand</span>
-            <input id="brand" type="text" placeholder="e.g. Kaseya" autocomplete="off" />
+            <span class="field-label">Brand</span>
+            <select id="brand"></select>
           </label>
           <label class="field">
             <span class="field-label">Fetch mode</span>
             <select id="fetchMode">
               {% if allow_cdp %}<option value="cdp">Real Chrome (CDP) — recommended</option>{% endif %}
-              <option value="anon">Reddit API / anonymous</option>
+              <option value="reddit_cookie">Reddit session cookie</option>
+              <option value="anon">Anonymous (throttled)</option>
             </select>
           </label>
         </div>
@@ -81,12 +89,16 @@
         </div>
         <div class="results-actions">
           <button id="backBtn" class="btn ghost">← New run</button>
-          <button id="exportBtn" class="btn primary">
+          <button id="exportBtn" class="btn ghost">
+            <span class="btn-label">⬇ Export Excel</span>
+          </button>
+          <button id="applyBtn" class="btn primary">
             <span class="btn-shine"></span>
-            <span class="btn-label">Export Excel</span>
+            <span class="btn-label">🏷 Apply to Meltwater</span>
           </button>
         </div>
       </div>
+      <div class="apply-status" id="applyStatus"></div>
 
       <div class="table-wrap glass">
         <table id="resTable">
@@ -99,7 +111,13 @@
     </section>
   </main>
 
+  <script>
+    window.__SUPABASE_URL__ = {{ supabase_url|tojson }};
+    window.__SUPABASE_ANON_KEY__ = {{ supabase_anon_key|tojson }};
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="{{ url_for('static', filename='background.js') }}"></script>
+  <script src="{{ url_for('static', filename='auth.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

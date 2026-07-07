@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>History — Sentiment Tagger</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <nav class="page-nav">
+    <div class="logo"><span class="logo-dot"></span> Meltwater <b>Sentiment Tagger</b></div>
+    <div class="links">
+      <a href="/">Tagger</a>
+      <a href="/history" class="active">History</a>
+      <a href="/profile">Profile</a>
+      <a href="#" id="logoutLink">Log out</a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <h1 class="section-title">Run <span class="grad">history</span></h1>
+    <p class="section-sub">Every classification run you've done, most recent first.</p>
+
+    <div id="runList"></div>
+
+    <!-- run detail modal-ish panel -->
+    <div id="detailPanel" class="card glass hidden" style="margin-top:22px"></div>
+  </main>
+
+  <script>
+    window.__SUPABASE_URL__ = {{ supabase_url|tojson }};
+    window.__SUPABASE_ANON_KEY__ = {{ supabase_anon_key|tojson }};
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="{{ url_for('static', filename='background.js') }}"></script>
+  <script src="{{ url_for('static', filename='auth.js') }}"></script>
+  <script src="{{ url_for('static', filename='history.js') }}"></script>
+</body>
+</html>
