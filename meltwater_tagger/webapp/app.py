@@ -19,7 +19,14 @@ import pandas as pd
 from flask import Flask, jsonify, request, send_file, render_template, g
 from anthropic import AsyncAnthropic, AuthenticationError, APIStatusError
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_THIS_DIR)
+# Under gunicorn (module import "webapp.app:app"), webapp/'s own folder is NOT
+# auto-added to sys.path the way it is when running "python webapp/app.py"
+# directly — so bare imports like "import db" would fail. Add both explicitly.
+sys.path.insert(0, _PROJECT_DIR)
+sys.path.insert(0, _THIS_DIR)
+
 import config
 from classify import (
     fetch_full_text, fetch_via_cdp, classify_post, _find_col,
