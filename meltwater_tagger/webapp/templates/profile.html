@@ -6,6 +6,7 @@
   <title>Profile — Sentiment Tagger</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
   <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='fx.css') }}" />
 </head>
 <body>
   <canvas id="bg"></canvas>
@@ -74,6 +75,7 @@
         </label>
       </div>
       <button class="btn primary" id="saveBrand"><span class="btn-shine"></span><span class="btn-label">Save brand</span></button>
+      <button class="btn ghost hidden" id="cancelEditBrand" style="margin-left:8px">Cancel</button>
       <span class="save-msg" id="brandMsg"></span>
 
       <div id="brandList" style="margin-top:22px"></div>
@@ -89,5 +91,6 @@
   <script src="{{ url_for('static', filename='three-bg.js') }}"></script>
   <script src="{{ url_for('static', filename='auth.js') }}"></script>
   <script src="{{ url_for('static', filename='profile.js') }}"></script>
+  <script src="{{ url_for('static', filename='fx.js') }}"></script>
 </body>
 </html>

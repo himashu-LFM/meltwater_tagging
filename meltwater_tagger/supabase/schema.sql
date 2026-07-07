@@ -100,6 +100,9 @@ create policy "brands insertable by signed-in users" on brands
 create policy "brands updatable by signed-in users" on brands
   for update using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
+create policy "brands deletable by signed-in users" on brands
+  for delete using (auth.role() = 'authenticated');
+
 -- ---------------------------------------------------------------------------
 -- NOTE on secrets: meltwater_credentials.meltwater_password and
 -- reddit_sessions.cookie_value are stored as plain text columns here to keep

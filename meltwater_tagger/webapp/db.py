@@ -76,6 +76,26 @@ def upsert_brand(name: str, roll_up_terms: list[str] | None = None,
     return r.data[0] if r.data else payload
 
 
+def update_brand(brand_id: int, name: str | None = None, roll_up_terms: list[str] | None = None,
+                  meltwater_topic_url: str | None = None) -> dict:
+    """Update an existing brand by id (lets you rename or change its topic URL)."""
+    payload = {}
+    if name is not None:
+        payload["name"] = name
+    if roll_up_terms is not None:
+        payload["roll_up_terms"] = roll_up_terms
+    if meltwater_topic_url is not None:
+        payload["meltwater_topic_url"] = meltwater_topic_url
+    if not payload:
+        return {}
+    r = get_client().table("brands").update(payload).eq("id", brand_id).execute()
+    return r.data[0] if r.data else payload
+
+
+def delete_brand(brand_id: int):
+    get_client().table("brands").delete().eq("id", brand_id).execute()
+
+
 # --- Meltwater credentials ----------------------------------------------------
 
 def get_meltwater_creds(user_id: str) -> dict | None:
