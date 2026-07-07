@@ -90,6 +90,16 @@ create policy "own runs" on tagging_runs
 create policy "brands readable by signed-in users" on brands
   for select using (auth.role() = 'authenticated');
 
+-- brands is a shared, org-wide taxonomy -- any signed-in analyst can add a
+-- brand or update its Meltwater topic URL. (The Flask backend always uses the
+-- service_role key, which bypasses RLS entirely -- these two policies are a
+-- safety net for direct/anon access and for correctness if that ever changes.)
+create policy "brands insertable by signed-in users" on brands
+  for insert with check (auth.role() = 'authenticated');
+
+create policy "brands updatable by signed-in users" on brands
+  for update using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
 -- ---------------------------------------------------------------------------
 -- NOTE on secrets: meltwater_credentials.meltwater_password and
 -- reddit_sessions.cookie_value are stored as plain text columns here to keep
