@@ -96,6 +96,35 @@ def delete_brand(brand_id: int):
     get_client().table("brands").delete().eq("id", brand_id).execute()
 
 
+# --- Per-brand tag list + rules ----------------------------------------------
+
+def get_brand_tags(brand_id: int) -> list[dict]:
+    r = (get_client().table("brand_tags").select("*")
+         .eq("brand_id", brand_id).order("sentiment").execute())
+    return r.data or []
+
+
+def upsert_brand_tag(brand_id: int, sentiment: str, tag_label: str, rule: str | None):
+    get_client().table("brand_tags").upsert(
+        {"brand_id": brand_id, "sentiment": sentiment, "tag_label": tag_label, "rule": rule},
+        on_conflict="brand_id,sentiment",
+    ).execute()
+
+
+def brand_config(brand_name: str) -> dict:
+    """Assemble the classification config for a brand: labels + rules + roll-up
+    terms. Returns empty structures when nothing is configured (default path)."""
+    brand = get_brand(brand_name)
+    if not brand:
+        return {"labels": {}, "rules": {}, "roll_up_terms": []}
+    tags = get_brand_tags(brand["id"])
+    return {
+        "labels": {t["sentiment"]: t["tag_label"] for t in tags if t.get("tag_label")},
+        "rules": {t["sentiment"]: t.get("rule") for t in tags if t.get("rule")},
+        "roll_up_terms": brand.get("roll_up_terms") or [],
+    }
+
+
 # --- Meltwater credentials ----------------------------------------------------
 
 def get_meltwater_creds(user_id: str) -> dict | None:

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Brands — Sentiment Tagger</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='fx.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='toasts.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='modal.css') }}" />
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <nav class="page-nav">
+    <div class="logo"><span class="logo-dot"></span> Meltwater <b>Sentiment Tagger</b></div>
+    <div class="links">
+      <a href="/">Tagger</a>
+      <a href="/brands" class="active">Brands</a>
+      <a href="/history">History</a>
+      <a href="/profile">Profile</a>
+      <a href="#" id="logoutLink">Log out</a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <h1 class="section-title">Brand <span class="grad">studio</span></h1>
+    <p class="section-sub">Everything specific to a brand lives here — its tags, the exact Meltwater
+      tag labels, per-tag rules the classifier must follow, roll-up products, and the topic URL.
+      Leave a rule blank to use the default tagging logic for that sentiment.</p>
+
+    <div class="studio">
+      <!-- brand list -->
+      <aside class="studio-list glass">
+        <div class="studio-list-head">
+          <span class="brand-list-label" style="margin:0">Brands</span>
+          <button class="mini-btn" id="addBrandBtn">+ Add</button>
+        </div>
+        <div id="brandList"></div>
+      </aside>
+
+      <!-- brand config -->
+      <section class="studio-config glass" id="configPane">
+        <div id="configEmpty" class="studio-empty">Select a brand, or add a new one.</div>
+
+        <div id="configForm" class="hidden">
+          <div class="config-head">
+            <input type="text" id="cfgName" class="cfg-title-input" />
+            <button class="mini-btn danger" id="deleteBrandBtn">Delete brand</button>
+          </div>
+
+          <div class="row" style="margin-top:8px">
+            <label class="field">
+              <span class="field-label">Meltwater topic URL</span>
+              <input type="text" id="cfgTopicUrl" placeholder="https://app.meltwater.com/..." />
+            </label>
+            <label class="field">
+              <span class="field-label">Roll-up products (comma-separated)</span>
+              <input type="text" id="cfgRollup" placeholder="datto, it glue, autotask" />
+            </label>
+          </div>
+
+          <div class="field-label" style="margin:22px 0 12px">Tags &amp; rules</div>
+          <div id="tagCards"></div>
+
+          <div style="margin-top:20px">
+            <button class="btn primary" id="saveConfigBtn">
+              <span class="btn-shine"></span><span class="btn-label">Save brand config</span>
+            </button>
+            <span class="save-msg" id="cfgMsg"></span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    window.__SUPABASE_URL__ = {{ supabase_url|tojson }};
+    window.__SUPABASE_ANON_KEY__ = {{ supabase_anon_key|tojson }};
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="{{ url_for('static', filename='three-bg.js') }}"></script>
+  <script src="{{ url_for('static', filename='auth.js') }}"></script>
+  <script src="{{ url_for('static', filename='toasts.js') }}"></script>
+  <script src="{{ url_for('static', filename='modal.js') }}"></script>
+  <script src="{{ url_for('static', filename='brands.js') }}"></script>
+  <script src="{{ url_for('static', filename='fx.js') }}"></script>
+</body>
+</html>

@@ -38,6 +38,7 @@ import db
 from auth import require_auth
 from fetchers import fetch_via_reddit_cookie
 from meltwater_apply import apply_results_to_meltwater
+import classify_web
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
@@ -70,6 +71,11 @@ def profile_page():
 @app.route("/history")
 def history_page():
     return render_template("history.html", supabase_url=db.SUPABASE_URL, supabase_anon_key=db.SUPABASE_ANON_KEY)
+
+
+@app.route("/brands")
+def brands_page():
+    return render_template("brands.html", supabase_url=db.SUPABASE_URL, supabase_anon_key=db.SUPABASE_ANON_KEY)
 
 
 # --- brands --------------------------------------------------------------
@@ -118,6 +124,30 @@ def update_brand_route(brand_id):
 @require_auth
 def delete_brand_route(brand_id):
     db.delete_brand(brand_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/brands/<int:brand_id>/tags", methods=["GET"])
+@require_auth
+def get_brand_tags_route(brand_id):
+    return jsonify({"tags": db.get_brand_tags(brand_id)})
+
+
+@app.route("/api/brands/<int:brand_id>/tags", methods=["POST"])
+@require_auth
+def save_brand_tags_route(brand_id):
+    """Save the three sentiment tag labels + rules for a brand in one call."""
+    data = request.get_json(force=True)
+    tags = data.get("tags", [])
+    for t in tags:
+        sentiment = (t.get("sentiment") or "").lower()
+        if sentiment not in ("positive", "negative", "neutral"):
+            continue
+        label = (t.get("tag_label") or "").strip()
+        rule = (t.get("rule") or "").strip() or None
+        if not label:
+            continue  # a tag must have a label
+        db.upsert_brand_tag(brand_id, sentiment, label, rule)
     return jsonify({"ok": True})
 
 
@@ -236,10 +266,15 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
                 return p
             posts = await asyncio.gather(*[_f(p) for p in posts])
 
+    # Brand config (custom tag labels + per-tag rules). Empty when nothing is
+    # configured -> classify_web falls back to the default behaviour exactly.
+    brand_cfg = db.brand_config(brand) if db.is_configured() else {"labels": {}, "rules": {}, "roll_up_terms": []}
+
     anthropic = AsyncAnthropic()
     sem = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
     decisions = await asyncio.gather(
-        *[classify_post(anthropic, brand, p["permalink"], p.get("text", ""), sem) for p in posts]
+        *[classify_web.classify_post(anthropic, config.MODEL, brand, p["permalink"],
+                                     p.get("text", ""), sem, brand_cfg) for p in posts]
     )
 
     out = []

@@ -20,17 +20,19 @@ function setMsg(text, ok) {
 
 $("loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  setMsg("Signing in…", true);
+  const t = Toast.loading("Signing you in…");
   const { error } = await Auth.signIn($("loginEmail").value.trim(), $("loginPassword").value);
-  if (error) return setMsg(error.message, false);
-  window.location.href = "/";
+  if (error) { t.error(error.message); return setMsg(error.message, false); }
+  t.success("Welcome back! Redirecting…");
+  setTimeout(() => (window.location.href = "/"), 500);
 });
 
 $("signupForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  setMsg("Creating your account…", true);
+  const t = Toast.loading("Creating your account…");
   const { error } = await Auth.signUp($("signupEmail").value.trim(), $("signupPassword").value);
-  if (error) return setMsg(error.message, false);
+  if (error) { t.error(error.message); return setMsg(error.message, false); }
+  t.success("Account created — check your email to confirm, then log in.", "Almost there");
   setMsg("Account created — check your email to confirm, then log in.", true);
 });
 
