@@ -25,6 +25,31 @@ insert into brands (name, roll_up_terms) values
 on conflict (name) do nothing;
 
 -- ---------------------------------------------------------------------------
+-- 1b) Per-brand tag list + rules. Each brand has up to three sentiment tags,
+--     each with the EXACT Meltwater tag label and an optional analyst-authored
+--     rule the classifier must follow for that brand. When a brand has no rows
+--     here (or empty rules), classification falls back to the default behaviour
+--     — so accuracy is never affected unless a rule is deliberately added.
+-- ---------------------------------------------------------------------------
+create table if not exists brand_tags (
+  id serial primary key,
+  brand_id int not null references brands(id) on delete cascade,
+  sentiment text not null check (sentiment in ('positive','negative','neutral')),
+  tag_label text not null,              -- exact Meltwater tag, e.g. 'Kaseya - negative'
+  rule text,                            -- optional per-tag guidance for the classifier
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique (brand_id, sentiment)
+);
+
+alter table brand_tags enable row level security;
+
+create policy "brand_tags readable by signed-in users" on brand_tags
+  for select using (auth.role() = 'authenticated');
+create policy "brand_tags writable by signed-in users" on brand_tags
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- ---------------------------------------------------------------------------
 -- 2) Per-user Meltwater credentials — each analyst has their own Meltwater
 --    login. Editable later from their profile page. One row per user.
 --    NOTE: password is stored using Supabase Vault / pgsodium in production;

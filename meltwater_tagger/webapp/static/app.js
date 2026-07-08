@@ -92,9 +92,12 @@ async function run() {
     state.runId = data.run_id || null;
     renderResults(data);
     showView("resultsView");
+    const applied = data.results.filter(x => x.tag).length;
+    Toast.success(`Classified ${data.results.length} posts · ${applied} tagged.`, "Classification done");
   } catch (err) {
     showView("inputView");
     $("inputErr").textContent = err.message;
+    Toast.error(err.message, "Classification failed");
   }
 }
 
@@ -157,38 +160,35 @@ $("exportBtn").addEventListener("click", async () => {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ results: state.results, run_brand: state.brand }),
   });
-  if (!r.ok) return alert("Export failed");
+  if (!r.ok) return Toast.error("Export failed. Please try again.");
   const blob = await r.blob();
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = `tagging_${state.brand}.xlsx`;
   a.click();
   URL.revokeObjectURL(a.href);
+  Toast.success(`Exported ${state.results.length} rows to Excel.`, "Download ready");
 });
 
 // ---- apply to meltwater ----
 $("applyBtn").addEventListener("click", async () => {
   const btn = $("applyBtn");
-  const statusEl = $("applyStatus");
   btn.disabled = true;
-  statusEl.className = "apply-status";
-  statusEl.textContent = "Logging into Meltwater and applying tags — this can take a minute…";
+  const t = Toast.loading("Logging into Meltwater and applying tags — this can take a minute…", "Applying tags");
   try {
     const r = await Auth.authedFetch("/api/apply", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ results: state.results, run_brand: state.brand, run_id: state.runId }),
     });
     const data = await r.json();
-    statusEl.className = "apply-status " + (r.ok ? "ok" : "err");
     if (r.ok) {
-      statusEl.textContent = `✓ ${data.message} (${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed)`;
+      t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
       if (window.FX && window.FX.celebrate) window.FX.celebrate();
     } else {
-      statusEl.textContent = data.error || data.message || "Apply failed.";
+      t.error(data.error || data.message || "Apply failed.");
     }
   } catch (err) {
-    statusEl.className = "apply-status err";
-    statusEl.textContent = err.message;
+    t.error(err.message);
   } finally {
     btn.disabled = false;
   }

@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
   <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
   <link rel="stylesheet" href="{{ url_for('static', filename='fx.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='toasts.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='modal.css') }}" />
 </head>
 <body>
   <canvas id="bg"></canvas>
@@ -15,6 +17,7 @@
     <div class="logo"><span class="logo-dot"></span> Meltwater <b>Sentiment Tagger</b></div>
     <div class="links">
       <a href="/">Tagger</a>
+      <a href="/brands">Brands</a>
       <a href="/history">History</a>
       <a href="/profile" class="active">Profile</a>
       <a href="#" id="logoutLink">Log out</a>
@@ -61,24 +64,12 @@
     </div>
 
     <div class="card glass">
-      <h3 style="margin-top:0">Brand settings</h3>
-      <p class="section-sub" style="margin-bottom:16px">Add a new brand, or set the Meltwater topic/saved-search
-        URL a brand's "Apply to Meltwater" should open (one-time per brand).</p>
-      <div class="row">
-        <label class="field">
-          <span class="field-label">Brand name</span>
-          <input type="text" id="brandName" placeholder="e.g. Ninja" />
-        </label>
-        <label class="field">
-          <span class="field-label">Meltwater topic URL</span>
-          <input type="text" id="brandTopicUrl" placeholder="https://app.meltwater.com/..." />
-        </label>
-      </div>
-      <button class="btn primary" id="saveBrand"><span class="btn-shine"></span><span class="btn-label">Save brand</span></button>
-      <button class="btn ghost hidden" id="cancelEditBrand" style="margin-left:8px">Cancel</button>
-      <span class="save-msg" id="brandMsg"></span>
-
-      <div id="brandList" style="margin-top:22px"></div>
+      <h3 style="margin-top:0">Brands, tags &amp; rules</h3>
+      <p class="section-sub" style="margin-bottom:16px">Brand-specific configuration — tag labels,
+        per-tag rules, roll-up products and Meltwater topic URLs — now lives on its own page.</p>
+      <a href="/brands" class="btn primary" style="text-decoration:none;display:inline-block">
+        <span class="btn-shine"></span><span class="btn-label">Open Brand Studio →</span>
+      </a>
     </div>
   </main>
 
@@ -90,6 +81,8 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
   <script src="{{ url_for('static', filename='three-bg.js') }}"></script>
   <script src="{{ url_for('static', filename='auth.js') }}"></script>
+  <script src="{{ url_for('static', filename='toasts.js') }}"></script>
+  <script src="{{ url_for('static', filename='modal.js') }}"></script>
   <script src="{{ url_for('static', filename='profile.js') }}"></script>
   <script src="{{ url_for('static', filename='fx.js') }}"></script>
 </body>
