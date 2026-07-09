@@ -10,7 +10,23 @@ const $ = (id) => document.getElementById(id);
 
   const rs = await (await Auth.authedFetch("/api/profile/reddit")).json();
   if (rs.session) $("redditCookie").placeholder = "•••••••• (saved — paste a new value to replace)";
+
+  refreshRedditStatus();
 })();
+
+async function refreshRedditStatus() {
+  const pill = $("redditStatus"), txt = $("redditStatusText");
+  pill.className = "status-pill checking";
+  txt.textContent = "checking…";
+  try {
+    const data = await (await Auth.authedFetch("/api/profile/reddit/status")).json();
+    if (data.state === "active") { pill.className = "status-pill active"; txt.textContent = "Session active"; }
+    else if (data.state === "expired") { pill.className = "status-pill expired"; txt.textContent = "Expired — please update"; }
+    else { pill.className = "status-pill none"; txt.textContent = "Not set"; }
+  } catch {
+    pill.className = "status-pill none"; txt.textContent = "Unknown";
+  }
+}
 
 $("saveMw").addEventListener("click", async () => {
   const email = $("mwEmail").value.trim();
@@ -31,8 +47,11 @@ $("saveReddit").addEventListener("click", async () => {
     body: JSON.stringify({ cookie_value }),
   });
   const data = await r.json();
-  if (r.ok) { Toast.success("Reddit session cookie saved.", "Saved"); $("redditCookie").value = ""; }
-  else Toast.error(data.error || "Could not save the Reddit cookie.");
+  if (r.ok) {
+    Toast.success("Reddit session cookie saved.", "Saved");
+    $("redditCookie").value = "";
+    refreshRedditStatus();
+  } else Toast.error(data.error || "Could not save the Reddit cookie.");
 });
 
 $("logoutLink").addEventListener("click", async (e) => {

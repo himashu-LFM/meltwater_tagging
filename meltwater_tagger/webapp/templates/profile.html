@@ -47,11 +47,17 @@
     </div>
 
     <div class="card glass" style="margin-bottom:22px">
-      <h3 style="margin-top:0">Reddit session (for cloud fetching)</h3>
-      <p class="section-sub" style="margin-bottom:16px">
+      <div class="reddit-head">
+        <h3 style="margin:0">Reddit session (for cloud fetching)</h3>
+        <span class="status-pill checking" id="redditStatus">
+          <span class="status-dot"></span><span id="redditStatusText">checking…</span>
+        </span>
+      </div>
+      <p class="section-sub" style="margin:12px 0 16px">
         Until we have a Reddit API key, paste your Reddit session cookie so the deployed app can
         read full post text like a logged-in browser. In Chrome: open reddit.com while logged in →
         DevTools (F12) → Application → Cookies → reddit.com → copy the <code>reddit_session</code> value.
+        <b>You only set this once</b> — refresh it only if the status shows expired.
       </p>
       <label class="field">
         <span class="field-label">reddit_session cookie value</span>

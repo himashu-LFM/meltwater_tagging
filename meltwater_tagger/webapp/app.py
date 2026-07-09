@@ -190,6 +190,32 @@ def set_reddit_profile():
     return jsonify({"ok": True})
 
 
+@app.route("/api/profile/reddit/status", methods=["GET"])
+@require_auth
+def reddit_status():
+    """Tests the saved cookie against Reddit so analysts know if it's still
+    valid before a run. Reflects the real fetch path (same server, same cookie)."""
+    cookie = db.get_reddit_cookie(g.user.id) if db.is_configured() else None
+    if not cookie:
+        return jsonify({"state": "none"})
+    ok = run_async(_check_reddit_cookie(cookie))
+    return jsonify({"state": "active" if ok else "expired"})
+
+
+async def _check_reddit_cookie(cookie: str) -> bool:
+    try:
+        async with httpx.AsyncClient(
+            cookies={"reddit_session": cookie},
+            headers={"User-Agent": config.BROWSER_UA},
+        ) as c:
+            r = await c.get("https://www.reddit.com/api/me.json", follow_redirects=True, timeout=15)
+            if r.status_code == 200:
+                return bool((r.json() or {}).get("data", {}).get("name"))
+    except Exception:
+        pass
+    return False
+
+
 # --- classification --------------------------------------------------------
 
 @app.route("/api/extract", methods=["POST"])
