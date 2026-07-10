@@ -60,12 +60,24 @@ async function showDetail(id) {
       <td>${escapeHtml(res.tag || "—")}</td><td class="reason">${escapeHtml(res.reason || "")}</td>
       <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td></tr>`;
   }).join("");
+  const applyCount = (data.run.results || []).filter(r => r.action === "apply").length;
   panel.innerHTML = `
     <div class="results-head" style="margin-top:0">
-      <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
-      <button class="btn primary" id="histExportBtn">
-        <span class="btn-shine"></span><span class="btn-label">⬇ Export Excel</span>
-      </button>
+      <div>
+        <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
+        <div class="stats" style="margin-top:8px">
+          <span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${escapeHtml(data.run.status)}</span>
+          <span class="stat">${applyCount} taggable</span>
+        </div>
+      </div>
+      <div class="results-actions">
+        <button class="btn ghost" id="histExportBtn">
+          <span class="btn-label">⬇ Export Excel</span>
+        </button>
+        <button class="btn primary" id="histApplyBtn">
+          <span class="btn-shine"></span><span class="btn-label">🏷 Apply to Meltwater</span>
+        </button>
+      </div>
     </div>
     <div class="table-wrap" style="margin-top:14px">
       <table><thead><tr><th>#</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th></tr></thead>
@@ -73,7 +85,38 @@ async function showDetail(id) {
     </div>`;
 
   $("histExportBtn").addEventListener("click", () => exportRun(data.run));
+  $("histApplyBtn").addEventListener("click", () => applyRun(data.run));
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function applyRun(run) {
+  const applyCount = (run.results || []).filter(r => r.action === "apply").length;
+  if (!applyCount) return Toast.info("Nothing to apply — no posts in this run were tagged.", "Nothing to do");
+
+  const ok = await Modal.confirm({
+    title: `Apply ${applyCount} tag(s) to Meltwater?`,
+    message: `This logs into your saved Meltwater account and applies the tags from this ${run.brand_name} run (${new Date(run.created_at).toLocaleDateString()}).`,
+    okText: "Apply now",
+  });
+  if (!ok) return;
+
+  const t = Toast.loading("Logging into Meltwater and applying tags — this can take a minute…", "Applying tags");
+  try {
+    const r = await Auth.authedFetch("/api/apply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ results: run.results, run_brand: run.brand_name, run_id: run.id }),
+    });
+    const data = await r.json();
+    if (r.ok) {
+      t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
+      if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      loadRuns();  // refresh status chip in the list
+    } else {
+      t.error(data.error || data.message || "Apply failed.");
+    }
+  } catch (err) {
+    t.error(err.message);
+  }
 }
 
 async function exportRun(run) {
