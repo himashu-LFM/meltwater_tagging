@@ -82,12 +82,13 @@ def tag_name(sentiment: str, brand: str) -> str:
     """
     Build the exact tag string as it appears in Meltwater.
 
-    Account convention (confirmed with Ritu): brand first, lowercase sentiment,
-    spaces around the dash -> 'Kaseya - positive', 'Ninja - negative'.
-    Phase 2 matches this string character-for-character against the tag in the
-    Meltwater modal, so the format must match the account's tags exactly.
+    Account convention (CONFIRMED from the live Tag-content modal, 2026-07-10):
+    sentiment FIRST, capitalized, spaces around the dash ->
+    'Negative - Kaseya', 'Neutral - Ninja'. Phase 2 matches this string
+    character-for-character against the tag in the Meltwater modal, so the
+    format must match the account's tags exactly.
     """
-    return f"{brand} - {sentiment.lower()}"
+    return f"{sentiment.capitalize()} - {brand}"
 
 
 def is_valid_tag(sentiment: str, brand: str) -> bool:

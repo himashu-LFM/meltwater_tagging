@@ -30,6 +30,7 @@ async function loadRuns() {
           <span class="stat">⚪ ${run.neutral_count}</span>
           <span class="chip ${run.status === 'applied' ? 'positive' : 'neutral'}">${run.status}</span>
           <button class="mini-btn" data-export="${run.id}">⬇ Export</button>
+          <button class="mini-btn" data-delete="${run.id}" data-brand="${escAttr(run.brand_name)}">🗑 Delete</button>
         </div>
       </div>
     </div>`).join("");
@@ -45,6 +46,28 @@ async function loadRuns() {
       if (d.run) exportRun(d.run);
     });
   });
+  document.querySelectorAll("[data-delete]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.delete;
+      const ok = await Modal.confirm({
+        title: `Delete this ${btn.dataset.brand} run?`,
+        message: "This permanently removes the run and its results. This can't be undone.",
+        okText: "Delete run",
+        danger: true,
+      });
+      if (!ok) return;
+      const r = await Auth.authedFetch(`/api/history/${id}`, { method: "DELETE" });
+      if (r.ok) {
+        Toast.info("Run deleted.", "Removed");
+        $("detailPanel").classList.add("hidden");
+        loadRuns();
+      } else {
+        const d = await r.json();
+        Toast.error(d.error || "Could not delete this run.");
+      }
+    });
+  });
 }
 
 async function showDetail(id) {
@@ -58,7 +81,8 @@ async function showDetail(id) {
     const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
     return `<tr><td>${idx + 1}</td><td><span class="chip ${cls}">${escapeHtml(s || res.action)}</span></td>
       <td>${escapeHtml(res.tag || "—")}</td><td class="reason">${escapeHtml(res.reason || "")}</td>
-      <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td></tr>`;
+      <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td>
+      <td>${res.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td></tr>`;
   }).join("");
   const applyCount = (data.run.results || []).filter(r => r.action === "apply").length;
   panel.innerHTML = `
@@ -80,7 +104,7 @@ async function showDetail(id) {
       </div>
     </div>
     <div class="table-wrap" style="margin-top:14px">
-      <table><thead><tr><th>#</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th></tr></thead>
+      <table><thead><tr><th>#</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Applied</th></tr></thead>
       <tbody>${rows}</tbody></table>
     </div>`;
 
@@ -111,6 +135,7 @@ async function applyRun(run) {
       t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
       if (window.FX && window.FX.celebrate) window.FX.celebrate();
       loadRuns();  // refresh status chip in the list
+      showDetail(run.id);  // re-fetch so per-post "Applied" chips reflect what was actually confirmed
     } else {
       t.error(data.error || data.message || "Apply failed.");
     }
@@ -143,6 +168,7 @@ async function exportRun(run) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+function escAttr(s) { return escapeHtml(s); }
 
 $("logoutLink").addEventListener("click", async (e) => {
   e.preventDefault();

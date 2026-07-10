@@ -96,6 +96,29 @@ def delete_brand(brand_id: int):
     get_client().table("brands").delete().eq("id", brand_id).execute()
 
 
+# --- Per-user topic URL override ---------------------------------------------
+
+def get_user_topic_url(user_id: str, brand_id: int) -> str | None:
+    r = (get_client().table("user_brand_topics").select("topic_url")
+         .eq("user_id", user_id).eq("brand_id", brand_id).limit(1).execute())
+    return r.data[0]["topic_url"] if r.data else None
+
+
+def upsert_user_topic_url(user_id: str, brand_id: int, topic_url: str):
+    get_client().table("user_brand_topics").upsert(
+        {"user_id": user_id, "brand_id": brand_id, "topic_url": topic_url},
+        on_conflict="user_id,brand_id",
+    ).execute()
+
+
+def resolve_topic_url(user_id: str, brand: dict) -> str | None:
+    """A user's own topic URL for this brand takes priority over the shared
+    org default, since Meltwater accounts often have differently-named saved
+    searches for the same brand."""
+    override = get_user_topic_url(user_id, brand["id"])
+    return override or brand.get("meltwater_topic_url")
+
+
 # --- Per-brand tag list + rules ----------------------------------------------
 
 def get_brand_tags(brand_id: int) -> list[dict]:
@@ -146,6 +169,26 @@ def upsert_meltwater_creds(user_id: str, email: str, password: str | None):
     if password:  # allow updating just the email without re-entering password
         payload["meltwater_password"] = password
     get_client().table("meltwater_credentials").upsert(payload, on_conflict="user_id").execute()
+
+
+# --- Meltwater Auth0 session (Local Storage token cache) --------------------
+
+def get_meltwater_session(user_id: str) -> str | None:
+    r = (get_client().table("meltwater_sessions").select("storage_value")
+         .eq("user_id", user_id).limit(1).execute())
+    return r.data[0]["storage_value"] if r.data else None
+
+
+def get_meltwater_session_meta(user_id: str) -> dict | None:
+    r = (get_client().table("meltwater_sessions").select("updated_at")
+         .eq("user_id", user_id).limit(1).execute())
+    return r.data[0] if r.data else None
+
+
+def upsert_meltwater_session(user_id: str, storage_value: str):
+    get_client().table("meltwater_sessions").upsert(
+        {"user_id": user_id, "storage_value": storage_value}, on_conflict="user_id"
+    ).execute()
 
 
 # --- Reddit session cookie ----------------------------------------------------
@@ -201,6 +244,19 @@ def save_run(user_id: str, brand_name: str, results: list[dict], status: str = "
 
 def update_run_status(run_id: str, status: str):
     get_client().table("tagging_runs").update({"status": status}).eq("id", run_id).execute()
+
+
+def update_run_after_apply(run_id: str, results: list[dict], status: str):
+    """Persist the per-post 'applied' flags (set by the caller from the real
+    apply report) alongside the run status, so History always reflects what
+    Meltwater actually confirmed -- not just that the button was clicked."""
+    get_client().table("tagging_runs").update(
+        {"status": status, "results": results}
+    ).eq("id", run_id).execute()
+
+
+def delete_run(user_id: str, run_id: str):
+    get_client().table("tagging_runs").delete().eq("user_id", user_id).eq("id", run_id).execute()
 
 
 def list_runs(user_id: str, limit: int = 50) -> list[dict]:

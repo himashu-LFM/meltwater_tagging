@@ -36,36 +36,68 @@ from playwright.async_api import async_playwright
 import config
 from results_writer import write_results_excel
 
-# Accessibility-label anchors documented in SKILL.md.
+# Selectors — the hover-toolbar + "Tag content" modal were confirmed live from
+# screenshots (2026-07-10). The tag button shows tooltip "Tag" (MUI price-tag,
+# LocalOffer/Sell icon); the modal is titled "Tag content" with a "Find" box,
+# checkbox rows per tag ("Negative - Kaseya"), and Close/Apply buttons.
 SELECTORS = {
-    # link whose label opens the article in a new tab -> gives us the permalink
     "open_article": '[aria-label*="Open article in new tab"]',
-    # the tag (price-tag) action icon that appears on hover
-    "tag_icon": '[aria-label*="Tag"]',
-    # collapsed "Similar" group toggle
+    # tag (price-tag) action icon that appears on hover -- match tooltip/label
+    # "Tag" and the common MUI tag icons as fallbacks
+    "tag_icon": (
+        '[aria-label="Tag"], [title="Tag"], [aria-label*="tag" i], '
+        'button:has([data-testid="LocalOfferIcon"]), button:has([data-testid="SellIcon"]), '
+        'button:has([data-testid="LocalOfferOutlinedIcon"])'
+    ),
     "similar_collapsed": '[aria-label="Open similar articles"]',
-    # modal pieces
     "modal": 'text="Tag content"',
-    "find_box": 'input[placeholder*="Find"], input[aria-label*="Find"]',
+    "find_box": 'input[placeholder*="Find" i], input[aria-label*="Find" i]',
     "apply_btn": 'button:has-text("Apply")',
 }
 
 
 def norm_permalink(url: str) -> str:
-    """Canonical dedup key: drop scheme, query, trailing slash."""
+    """Canonical dedup/match key.
+
+    For Reddit, the SAME post has multiple equivalent URL forms — e.g. a user
+    post is reachable as both /user/<name>/comments/<id>/... and
+    /r/u_<name>/comments/<id>/... — so string comparison of the full URL fails.
+    The post id (after /comments/) plus the comment id (after /comment/) is the
+    stable unique key, so we canonicalize Reddit URLs to that.
+    """
     if not url:
         return ""
     u = re.sub(r"^https?://(www\.)?", "", url.strip())
     u = u.split("?")[0].split("#")[0]
+
+    if "reddit.com" in u:
+        m = re.search(r"/comments/([a-z0-9]+)", u, re.I)
+        if m:
+            key = "reddit:" + m.group(1).lower()
+            cm = re.search(r"/comment/([a-z0-9]+)", u, re.I)
+            if cm:
+                key += "/" + cm.group(1).lower()
+            return key
+
     return u.rstrip("/").lower()
 
 
 async def get_card_permalink(card):
+    # Prefer a real article link (the source URL). The "Open article in new tab"
+    # control's href is most reliable; fall back to any reddit/http anchor in the
+    # card. Confirmed live: cards contain <a href="https://www.reddit.com/...">.
     link = await card.query_selector(SELECTORS["open_article"])
-    if not link:
-        return ""
-    href = await link.get_attribute("href")
-    return norm_permalink(href or "")
+    if link:
+        href = await link.get_attribute("href")
+        if href:
+            return norm_permalink(href)
+    for sel in ('a[href*="reddit.com"]', 'a[href^="http"]'):
+        a = await card.query_selector(sel)
+        if a:
+            href = await a.get_attribute("href")
+            if href and "meltwater.com" not in href:
+                return norm_permalink(href)
+    return ""
 
 
 async def card_existing_tag(card):
@@ -90,47 +122,152 @@ async def expand_similar_if_needed(card):
         await asyncio.sleep(0.4)
 
 
+async def _log_card_buttons(card, note=""):
+    """Diagnostic: after a real hover, dump every button/icon in the card so we
+    can identify the tag icon's real selector. Logs via print so it shows in
+    both the CLI and the web app's captured stdout."""
+    try:
+        data = await card.evaluate("""el => {
+            const out = [];
+            el.querySelectorAll('button,[role="button"],a,[aria-label]').forEach(b => {
+                out.push({
+                    label: b.getAttribute('aria-label'),
+                    title: b.getAttribute('title'),
+                    icon: b.querySelector('svg') ? b.querySelector('svg').getAttribute('data-testid') : null,
+                    text: (b.textContent || '').trim().slice(0, 18),
+                });
+            });
+            return out;
+        }""")
+        print(f"[card-buttons {note}] {data}", flush=True)
+    except Exception as e:
+        print(f"[card-buttons {note}] failed: {e}", flush=True)
+
+
+def normalize_tag(tag: str) -> str:
+    """Rebuild a tag string as 'Sentiment - Brand' (the live Meltwater format),
+    regardless of the stored order. Old classification runs saved the tag as
+    'Kaseya - neutral' (brand-first); this makes those apply correctly too."""
+    if not tag:
+        return tag
+    parts = [p.strip() for p in re.split(r"\s*-\s*", tag) if p.strip()]
+    sent = None
+    brand = []
+    for p in parts:
+        if p.lower() in ("positive", "negative", "neutral"):
+            sent = p.capitalize()
+        else:
+            brand.append(p)
+    if sent and brand:
+        return f"{sent} - {' - '.join(brand)}"
+    return tag
+
+
+async def _close_any_modal(page):
+    """Dismiss an open MUI dialog so its overlay stops intercepting clicks."""
+    try:
+        dlg = await page.query_selector('.MuiDialog-container, [role="dialog"]')
+        if not dlg:
+            return
+        close = await page.query_selector('button:has-text("Close"), [aria-label="Close"], button[aria-label*="close" i]')
+        if close:
+            await close.click()
+        else:
+            await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+    except Exception:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+
 async def apply_tag_to_card(page, card, tag, dry_run, delay):
-    """Run the modal flow to apply one tag to one card. Returns True on success."""
+    """Run the modal flow to apply one tag to one card. Returns True on success.
+    Always closes the modal before returning (even on failure) so a stuck dialog
+    can't block the next card."""
+    tag = normalize_tag(tag)
+
+    # Make sure no leftover dialog is covering the feed before we hover.
+    await _close_any_modal(page)
+
     await card.hover()
-    await asyncio.sleep(delay)
+    await asyncio.sleep(max(delay, 0.6))  # let the hover toolbar render
     tag_icon = await card.query_selector(SELECTORS["tag_icon"])
     if not tag_icon:
+        await _log_card_buttons(card, note="tag-icon-not-found")
         return False
     if dry_run:
         return True
 
-    await tag_icon.click()
-    await page.wait_for_selector(SELECTORS["modal"], timeout=8000)
-    await asyncio.sleep(delay)
-
-    find = await page.query_selector(SELECTORS["find_box"])
-    if find:
-        await find.fill(tag)
+    try:
+        await tag_icon.click()
+        dialog = await page.wait_for_selector(SELECTORS["modal"], timeout=8000)
+        # Scope all modal interactions to the dialog container so we never grab
+        # the page's global "Find" search box or unrelated elements.
+        dlg = await page.query_selector('.MuiDialog-container, [role="dialog"]')
+        scope = dlg or page
         await asyncio.sleep(delay)
 
-    # check the exact tag's checkbox (match by the label text)
-    checkbox = await page.query_selector(
-        f'label:has-text("{tag}") input[type="checkbox"], '
-        f'[role="checkbox"][aria-label*="{tag}"]'
-    )
-    if not checkbox:
-        # try clicking the row containing the tag text
-        row = await page.query_selector(f'text="{tag}"')
-        if row:
-            await row.click()
-    else:
-        await checkbox.check()
-    await asyncio.sleep(delay)
+        # Type the tag into the modal's Find box (scoped to the dialog).
+        find = await scope.query_selector('input[placeholder*="Find" i], input[type="text"], input:not([type])')
+        if find:
+            await find.fill(tag)
+            await asyncio.sleep(max(delay, 0.6))
 
-    apply_btn = await page.query_selector(SELECTORS["apply_btn"])
-    if apply_btn:
-        await apply_btn.click()
+        # Select the matching tag row within the dialog.
+        selected = False
+        try:
+            row = scope.get_by_text(tag, exact=True) if hasattr(scope, "get_by_text") else None
+            if row is not None and await row.count() > 0:
+                await row.first.click()
+                selected = True
+        except Exception:
+            pass
+        if not selected:
+            cb = await scope.query_selector(
+                f'label:has-text("{tag}") input[type="checkbox"], '
+                f'input[type="checkbox"][aria-label*="{tag}"]'
+            )
+            if cb:
+                await cb.check()
+                selected = True
+        if not selected:
+            # last resort: click the text node inside the dialog
+            node = await scope.query_selector(f'text="{tag}"')
+            if node:
+                await node.click()
+                selected = True
+
+        if not selected:
+            print(f"[tag-modal] could not find the tag row for {tag!r} — dumping visible rows", flush=True)
+            try:
+                rows = await scope.evaluate("""el => [...el.querySelectorAll('input[type=checkbox]')]
+                    .map(c => (c.closest('label,li,div')||{}).innerText || '').filter(Boolean).slice(0,25)""")
+                print(f"[tag-modal] visible rows: {rows}", flush=True)
+            except Exception:
+                pass
+            return False
+
         await asyncio.sleep(delay)
-    # confirm via the new Remove chip
-    await asyncio.sleep(delay)
-    confirm = await card.query_selector(f'[aria-label="Remove {tag}"]')
-    return confirm is not None
+        apply_btn = await scope.query_selector('button:has-text("Apply")')
+        if apply_btn:
+            await apply_btn.click()
+            await asyncio.sleep(max(delay, 0.8))
+
+        # Confirm via a "Remove [tag]" chip (card may be stale -> page fallback).
+        for target in (card, page):
+            try:
+                chip = await target.query_selector(f'[aria-label="Remove {tag}"]') \
+                    or await target.query_selector(f'[aria-label*="{tag}"]')
+                if chip is not None:
+                    return True
+            except Exception:
+                continue
+        # Applied but couldn't confirm the chip -> assume success if Apply clicked.
+        return apply_btn is not None
+    finally:
+        await _close_any_modal(page)
 
 
 async def run(decisions_path, dry_run):

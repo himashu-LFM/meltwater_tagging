@@ -143,7 +143,8 @@ function renderResults(data) {
       <td><span class="chip ${cls}">${escapeHtml(chipText || "—")}</span></td>
       <td>${escapeHtml(r.tag || "—")}</td>
       <td class="reason">${escapeHtml(r.reason || "")}</td>
-      <td><a href="${encodeURI(r.permalink)}" target="_blank" rel="noopener">${escapeHtml(shorten(r.permalink))}</a></td>`;
+      <td><a href="${encodeURI(r.permalink)}" target="_blank" rel="noopener">${escapeHtml(shorten(r.permalink))}</a></td>
+      <td>${r.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td>`;
     body.appendChild(tr);
   });
 }
@@ -184,6 +185,9 @@ $("applyBtn").addEventListener("click", async () => {
     if (r.ok) {
       t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
       if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      const confirmed = new Set([...(data.applied||[]), ...(data.skipped_already||[])].map(x => x.permalink));
+      state.results.forEach(r2 => { if (confirmed.has(r2.permalink)) r2.applied = true; });
+      renderResults({ run_brand: state.brand, results: state.results });
     } else {
       t.error(data.error || data.message || "Apply failed.");
     }

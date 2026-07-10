@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}" />
   <title>Profile — Sentiment Tagger</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
   <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
@@ -14,7 +15,7 @@
   <canvas id="bg"></canvas>
 
   <nav class="page-nav">
-    <div class="logo"><span class="logo-dot"></span> Meltwater <b>Sentiment Tagger</b></div>
+    <div class="logo"><span class="logo-icon logo-icon-sm"><svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="48" fill="#0a0a0c"/><g fill="#f5f5f2"><path d="M50 50 L50 6 A44 44 0 0 1 88 28 Z"/><path d="M50 50 L88 28 A44 44 0 0 1 88 72 Z" opacity="0.72"/><path d="M50 50 L88 72 A44 44 0 0 1 50 94 Z"/><path d="M50 50 L50 94 A44 44 0 0 1 12 72 Z" opacity="0.72"/><path d="M50 50 L12 72 A44 44 0 0 1 12 28 Z"/><path d="M50 50 L12 28 A44 44 0 0 1 50 6 Z" opacity="0.72"/></g><polygon points="50,38 61,57 39,57" fill="url(#logoGoldGrad)"/><defs><linearGradient id="logoGoldGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#fdb913"/><stop offset="100%" stop-color="#c9880b"/></linearGradient></defs></svg></span> Meltwater <b>Sentiment Tagger</b></div>
     <div class="links">
       <a href="/">Tagger</a>
       <a href="/brands">Brands</a>
@@ -28,10 +29,68 @@
     <h1 class="section-title">Your <span class="grad">profile</span></h1>
     <p class="section-sub" id="whoami"></p>
 
+    <!--
+      Meltwater session (Local Storage token injection) — disabled as the
+      primary path. Live testing confirmed Meltwater does additional
+      server-side session validation beyond the cached Auth0 token, so a
+      pasted session value is rejected even when technically unexpired.
+      Login automation below is now the primary and only supported method.
+      Markup kept here in case the underlying issue is resolved later.
+
+    <div class="card glass" style="margin-bottom:22px">
+      <div class="reddit-head">
+        <h3 style="margin:0">Meltwater session <span style="color:var(--muted);font-weight:400">(recommended)</span></h3>
+        <span class="status-pill checking" id="mwSessionStatus">
+          <span class="status-dot"></span><span id="mwSessionStatusText">checking…</span>
+        </span>
+      </div>
+      <p class="section-sub" style="margin:12px 0 16px">
+        More reliable than login automation — skips the whole login form. <b>One-time setup:</b>
+        drag this button to your browser's bookmarks bar (if it's hidden, press
+        <code>Ctrl+Shift+B</code> to show it):
+      </p>
+      <div style="text-align:center;margin:0 0 16px">
+        <a href="#" id="bookmarkletLink" class="btn ghost bookmarklet-btn"
+           onclick="return false;" draggable="true"
+           style="text-decoration:none;display:inline-block;cursor:grab">
+          🔖 Grab Meltwater Session
+        </a>
+      </div>
+      <p class="section-sub" style="margin:0 0 16px">
+        Then, whenever your session needs refreshing (the status pill above will say "Expired"):
+        make sure you're logged into <code>app.meltwater.com</code> in this tab, click that
+        bookmark, and it copies everything needed to your clipboard automatically — no DevTools,
+        no typing. Just paste (Ctrl+V) into the box below and click Save. Valid for ~24 hours each time.
+      </p>
+      <details style="margin:0 0 16px">
+        <summary style="cursor:pointer;color:var(--muted);font-size:13px">Bookmark won't drag? Click for manual setup / advanced console method</summary>
+        <p class="section-sub" style="margin:10px 0">
+          Right-click your bookmarks bar → <b>Add page</b> → paste this as the URL (name it anything):
+        </p>
+        <pre id="bookmarkletCode" style="background:rgba(255,255,255,.05);border:1px solid var(--stroke);
+                    border-radius:10px;padding:12px 14px;font-size:11px;overflow-x:auto;margin:0 0 12px;
+                    white-space:pre-wrap;word-break:break-all"></pre>
+        <p class="section-sub" style="margin:0">
+          Or, in DevTools (F12) → Console tab on the app.meltwater.com tab, run:
+          <code style="display:block;margin-top:8px;font-size:11px;word-break:break-all">copy(localStorage.getItem(Object.keys(localStorage).find(k =&gt; k.startsWith('@@auth0spajs@@'))))</code>
+        </p>
+      </details>
+      <label class="field">
+        <span class="field-label">Local Storage value</span>
+        <textarea id="mwSessionValue" rows="3" placeholder="paste the long @@auth0spajs@@ value here"></textarea>
+      </label>
+      <button class="btn primary" id="saveMwSession" style="margin-top:14px">
+        <span class="btn-shine"></span><span class="btn-label">Save session</span>
+      </button>
+      <span class="save-msg" id="mwSessionMsg"></span>
+    </div>
+    -->
+
     <div class="card glass" style="margin-bottom:22px">
       <h3 style="margin-top:0">Meltwater login</h3>
-      <p class="section-sub" style="margin-bottom:16px">Used when you click "Apply to Meltwater" so tags get
-        written into your own Meltwater account.</p>
+      <p class="section-sub" style="margin-bottom:16px">
+        We log in to your Meltwater account automatically to apply tags — the same login flow you use.
+      </p>
       <div class="row">
         <label class="field">
           <span class="field-label">Meltwater email</span>
@@ -39,7 +98,11 @@
         </label>
         <label class="field">
           <span class="field-label">Meltwater password</span>
-          <input type="password" id="mwPassword" placeholder="leave blank to keep current" />
+          <div class="pw-field">
+            <input type="password" id="mwPassword" placeholder="leave blank to keep current" readonly />
+            <button type="button" class="pw-eye" id="mwPwToggle" title="Show password">👁</button>
+            <button type="button" class="pw-edit" id="mwPwEdit" title="Edit password">✎ Edit</button>
+          </div>
         </label>
       </div>
       <button class="btn primary" id="saveMw"><span class="btn-shine"></span><span class="btn-label">Save</span></button>

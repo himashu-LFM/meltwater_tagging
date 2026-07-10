@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}" />
   <title>Sign in — Sentiment Tagger</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
   <link rel="stylesheet" href="{{ url_for('static', filename='auth-page.css') }}" />
@@ -15,8 +16,11 @@
 
   <div class="auth-shell">
     <div class="auth-brand">
+      <div class="logo-icon-hero-wrap">
+        <span class="logo-icon logo-icon-hero"><svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="48" fill="#0a0a0c"/><g fill="#f5f5f2"><path d="M50 50 L50 6 A44 44 0 0 1 88 28 Z"/><path d="M50 50 L88 28 A44 44 0 0 1 88 72 Z" opacity="0.72"/><path d="M50 50 L88 72 A44 44 0 0 1 50 94 Z"/><path d="M50 50 L50 94 A44 44 0 0 1 12 72 Z" opacity="0.72"/><path d="M50 50 L12 72 A44 44 0 0 1 12 28 Z"/><path d="M50 50 L12 28 A44 44 0 0 1 50 6 Z" opacity="0.72"/></g><polygon points="50,38 61,57 39,57" fill="url(#logoGoldGradHero)"/><defs><linearGradient id="logoGoldGradHero" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#fdb913"/><stop offset="100%" stop-color="#c9880b"/></linearGradient></defs></svg></span>
+      </div>
       <div class="auth-logo">
-        <span class="logo-dot"></span> Meltwater <b>Sentiment Tagger</b>
+        <span class="logo-icon logo-icon-sm"><svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="48" fill="#0a0a0c"/><g fill="#f5f5f2"><path d="M50 50 L50 6 A44 44 0 0 1 88 28 Z"/><path d="M50 50 L88 28 A44 44 0 0 1 88 72 Z" opacity="0.72"/><path d="M50 50 L88 72 A44 44 0 0 1 50 94 Z"/><path d="M50 50 L50 94 A44 44 0 0 1 12 72 Z" opacity="0.72"/><path d="M50 50 L12 72 A44 44 0 0 1 12 28 Z"/><path d="M50 50 L12 28 A44 44 0 0 1 50 6 Z" opacity="0.72"/></g><polygon points="50,38 61,57 39,57" fill="url(#logoGoldGrad)"/><defs><linearGradient id="logoGoldGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#fdb913"/><stop offset="100%" stop-color="#c9880b"/></linearGradient></defs></svg></span> Meltwater <b>Sentiment Tagger</b>
       </div>
       <h1 class="auth-hero">Tag social sentiment<br/><span class="grad">at the speed of thought.</span></h1>
       <p class="auth-copy">Multi-brand, multi-analyst sentiment tagging — classify posts in

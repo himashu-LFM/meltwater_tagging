@@ -109,3 +109,8 @@
 .tag-label-input{flex:1;font-size:14px}
 .tag-rule-input{width:100%;resize:vertical;line-height:1.55;font-size:14px}
 .tag-card .chip{text-transform:capitalize}
+
+/* per-user topic URL override box */
+.my-topic-box{margin:18px 0 4px;padding:16px 18px;border-radius:14px;
+  border:1px solid rgba(253,185,19,.25);background:rgba(253,185,19,.05)}
+.my-topic-box .row{align-items:flex-end}
