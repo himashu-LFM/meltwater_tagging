@@ -23,18 +23,27 @@ async function loadRuns() {
           <div style="font-weight:700;font-size:16px">${escapeHtml(run.brand_name)}</div>
           <div style="color:var(--muted);font-size:13px">${new Date(run.created_at).toLocaleString()}</div>
         </div>
-        <div class="stats">
+        <div class="stats" style="align-items:center">
           <span class="stat">${run.total_posts} posts</span>
           <span class="stat">🟢 ${run.positive_count}</span>
           <span class="stat">🔴 ${run.negative_count}</span>
           <span class="stat">⚪ ${run.neutral_count}</span>
           <span class="chip ${run.status === 'applied' ? 'positive' : 'neutral'}">${run.status}</span>
+          <button class="mini-btn" data-export="${run.id}">⬇ Export</button>
         </div>
       </div>
     </div>`).join("");
 
   document.querySelectorAll(".run-row").forEach(row => {
     row.addEventListener("click", () => showDetail(row.dataset.id));
+  });
+  document.querySelectorAll("[data-export]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();  // don't also open the detail panel
+      const r = await Auth.authedFetch(`/api/history/${btn.dataset.export}`);
+      const d = await r.json();
+      if (d.run) exportRun(d.run);
+    });
   });
 }
 
@@ -52,12 +61,40 @@ async function showDetail(id) {
       <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td></tr>`;
   }).join("");
   panel.innerHTML = `
-    <h3 style="margin-top:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
+    <div class="results-head" style="margin-top:0">
+      <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
+      <button class="btn primary" id="histExportBtn">
+        <span class="btn-shine"></span><span class="btn-label">⬇ Export Excel</span>
+      </button>
+    </div>
     <div class="table-wrap" style="margin-top:14px">
       <table><thead><tr><th>#</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th></tr></thead>
       <tbody>${rows}</tbody></table>
     </div>`;
+
+  $("histExportBtn").addEventListener("click", () => exportRun(data.run));
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function exportRun(run) {
+  const t = Toast.loading("Preparing your Excel…");
+  try {
+    const r = await Auth.authedFetch("/api/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ results: run.results || [], run_brand: run.brand_name }),
+    });
+    if (!r.ok) { t.error("Export failed. Please try again."); return; }
+    const blob = await r.blob();
+    const stamp = new Date(run.created_at).toISOString().slice(0, 10);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `tagging_${run.brand_name}_${stamp}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    t.success(`Exported ${(run.results || []).length} rows.`, "Download ready");
+  } catch (err) {
+    t.error(err.message);
+  }
 }
 
 function escapeHtml(s) {
