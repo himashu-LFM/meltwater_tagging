@@ -26,6 +26,26 @@ body::after{content:"";position:fixed;inset:0;z-index:-1;
   background:linear-gradient(135deg,var(--accent),var(--accent2));
   box-shadow:0 0 18px rgba(253,185,19,.6);animation:pulse 2.4s infinite}
 @keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.25);opacity:.7}}
+
+/* flat 2D aperture logo (SVG) — simple, on-brand, subtly animated */
+.logo-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+.logo-icon svg{display:block;overflow:visible}
+.logo-icon-sm{width:32px;height:32px}
+.logo-icon-sm svg{width:32px;height:32px;
+  filter:drop-shadow(0 0 6px rgba(253,185,19,.35));
+  transition:filter .3s,transform .3s}
+.logo-icon-sm:hover svg{filter:drop-shadow(0 0 12px rgba(253,185,19,.6));transform:rotate(12deg)}
+
+.logo-icon-hero-wrap{display:flex;justify-content:center;margin:4px 0 22px;
+  animation:logoIn .7s cubic-bezier(.2,1.1,.3,1) backwards}
+@keyframes logoIn{from{opacity:0;transform:scale(.7) rotate(-25deg)}to{opacity:1;transform:none}}
+.logo-icon-hero{width:120px;height:120px}
+.logo-icon-hero svg{width:120px;height:120px;
+  filter:drop-shadow(0 16px 40px rgba(253,185,19,.3));
+  animation:logoBreathe 5s ease-in-out infinite}
+@keyframes logoBreathe{0%,100%{transform:scale(1) rotate(0deg)}50%{transform:scale(1.035) rotate(2deg)}}
+@media (max-width:900px){.logo-icon-hero-wrap{margin:0 0 14px}.logo-icon-hero,.logo-icon-hero svg{width:90px;height:90px}}
+@media (prefers-reduced-motion: reduce){.logo-icon-hero svg{animation:none}.logo-icon-hero-wrap{animation:none}}
 .pill{font-size:12px;color:var(--muted);border:1px solid var(--stroke);
   padding:6px 14px;border-radius:999px;background:rgba(255,255,255,.03)}
 .topbar .links{display:flex;gap:6px}
@@ -33,9 +53,16 @@ body::after{content:"";position:fixed;inset:0;z-index:-1;
   border-radius:10px;transition:.2s;border:1px solid transparent}
 .topbar .links a:hover,.topbar .links a.active{color:var(--txt);background:rgba(255,255,255,.06);
   border-color:var(--stroke)}
-.apply-status{margin:10px 0 0;font-size:14px;min-height:20px}
+.apply-status{margin:10px 0 0;font-size:14px;min-height:20px;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .apply-status.ok{color:var(--pos)}
 .apply-status.err{color:var(--neg)}
+.apply-time{color:var(--muted);font-size:11px;margin-left:4px}
+
+/* buttons mid-work / nothing-to-do states */
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:grayscale(.4)}
+.btn.busy .btn-label{animation:busyPulse 1.2s ease-in-out infinite}
+@keyframes busyPulse{0%,100%{opacity:1}50%{opacity:.55}}
 .run-row{animation:rise .45s backwards}
 
 .wrap{max-width:1040px;margin:0 auto;padding:24px 24px 80px}
@@ -73,6 +100,15 @@ select{
   background-repeat:no-repeat;background-position:right 15px center}
 select:hover{border-color:rgba(253,185,19,.4)}
 select option{background:#141416;color:var(--txt);padding:10px}
+
+/* password field with eye-toggle + edit button */
+.pw-field{display:flex;align-items:center;gap:8px;position:relative}
+.pw-field input{flex:1;min-width:0}
+.pw-field input[readonly]{color:var(--muted);cursor:default}
+.pw-eye,.pw-edit{flex:none;background:none;border:1px solid var(--stroke);cursor:pointer;
+  color:var(--muted);font-size:12px;padding:8px 10px;border-radius:10px;transition:.2s;white-space:nowrap}
+.pw-eye:hover,.pw-edit:hover{color:var(--accent);border-color:var(--accent);background:rgba(253,185,19,.1)}
+.pw-field .hidden{display:none}
 
 /* dropzone */
 .dropzone{border:2px dashed var(--stroke);border-radius:16px;padding:28px;

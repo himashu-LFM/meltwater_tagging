@@ -37,8 +37,11 @@ import httpx
 import db
 from auth import require_auth
 from fetchers import fetch_via_reddit_cookie
-from meltwater_apply import apply_results_to_meltwater
+from meltwater_apply import apply_results_to_meltwater, apply_via_session, decode_session_expiry
 import classify_web
+from logging_setup import get_logger
+
+log = get_logger("app")
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
@@ -84,8 +87,11 @@ def brands_page():
 @require_auth
 def get_brands():
     try:
-        return jsonify({"brands": db.list_brands()})
+        brands = db.list_brands()
+        log.info("listed %d brands for user=%s", len(brands), g.user.id)
+        return jsonify({"brands": brands})
     except Exception as e:
+        log.exception("GET /api/brands failed for user=%s", g.user.id)
         return jsonify({"error": str(e)}), 500
 
 
@@ -95,13 +101,19 @@ def upsert_brand_route():
     data = request.get_json(force=True)
     name = (data.get("name") or "").strip()
     if not name:
+        log.warning("POST /api/brands rejected: missing name (user=%s)", g.user.id)
         return jsonify({"error": "Brand name is required"}), 400
-    brand = db.upsert_brand(
-        name,
-        roll_up_terms=data.get("roll_up_terms"),
-        meltwater_topic_url=data.get("meltwater_topic_url"),
-    )
-    return jsonify({"brand": brand})
+    try:
+        brand = db.upsert_brand(
+            name,
+            roll_up_terms=data.get("roll_up_terms"),
+            meltwater_topic_url=data.get("meltwater_topic_url"),
+        )
+        log.info("brand upserted: name=%r id=%s (user=%s)", name, brand.get("id"), g.user.id)
+        return jsonify({"brand": brand})
+    except Exception as e:
+        log.exception("POST /api/brands failed: name=%r (user=%s)", name, g.user.id)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/brands/<int:brand_id>", methods=["PUT"])
@@ -123,7 +135,29 @@ def update_brand_route(brand_id):
 @app.route("/api/brands/<int:brand_id>", methods=["DELETE"])
 @require_auth
 def delete_brand_route(brand_id):
-    db.delete_brand(brand_id)
+    try:
+        db.delete_brand(brand_id)
+        log.info("brand deleted: id=%s (user=%s)", brand_id, g.user.id)
+        return jsonify({"ok": True})
+    except Exception as e:
+        log.exception("DELETE /api/brands/%s failed (user=%s)", brand_id, g.user.id)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/brands/<int:brand_id>/my-topic-url", methods=["GET"])
+@require_auth
+def get_my_topic_url(brand_id):
+    return jsonify({"topic_url": db.get_user_topic_url(g.user.id, brand_id)})
+
+
+@app.route("/api/brands/<int:brand_id>/my-topic-url", methods=["POST"])
+@require_auth
+def set_my_topic_url(brand_id):
+    data = request.get_json(force=True)
+    topic_url = (data.get("topic_url") or "").strip()
+    if not topic_url:
+        return jsonify({"error": "Topic URL is required"}), 400
+    db.upsert_user_topic_url(g.user.id, brand_id, topic_url)
     return jsonify({"ok": True})
 
 
@@ -167,9 +201,78 @@ def set_meltwater_profile():
     email = (data.get("email") or "").strip()
     password = data.get("password") or None
     if not email:
+        log.warning("POST /api/profile/meltwater rejected: missing email (user=%s)", g.user.id)
         return jsonify({"error": "Meltwater email is required"}), 400
-    db.upsert_meltwater_creds(g.user.id, email, password)
-    return jsonify({"ok": True})
+    try:
+        db.upsert_meltwater_creds(g.user.id, email, password)
+        # never log the password value itself
+        log.info("Meltwater creds saved for user=%s (password_changed=%s)", g.user.id, bool(password))
+        return jsonify({"ok": True})
+    except Exception as e:
+        log.exception("POST /api/profile/meltwater failed (user=%s)", g.user.id)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/profile/meltwater-session", methods=["GET"])
+@require_auth
+def get_meltwater_session_profile():
+    meta = db.get_meltwater_session_meta(g.user.id)
+    return jsonify({"session": meta})
+
+
+@app.route("/api/profile/meltwater-session", methods=["POST"])
+@require_auth
+def set_meltwater_session_profile():
+    data = request.get_json(force=True)
+    value = (data.get("storage_value") or "").strip()
+    if not value:
+        log.warning("POST /api/profile/meltwater-session rejected: empty value (user=%s)", g.user.id)
+        return jsonify({"error": "Paste the Local Storage value first"}), 400
+
+    # A truncated copy (Chrome's DevTools grid shows a shortened preview by
+    # default) is invalid JSON and would silently break injection later --
+    # catch it here with an actionable message instead.
+    import json as _json
+    try:
+        parsed = _json.loads(value)
+    except Exception:
+        log.warning("POST /api/profile/meltwater-session rejected: not valid JSON, "
+                     "likely a truncated copy (user=%s, len=%d)", g.user.id, len(value))
+        return jsonify({"error": (
+            f"That doesn't look like the complete value (got {len(value)} characters, but it's not "
+            "valid JSON — it's been cut off somewhere). Chrome's Local Storage grid and its "
+            "right-click 'Copy value' can both truncate very long values. Use the Console command "
+            "on the Profile page instead — it copies the exact full value with no truncation."
+        )}), 400
+    if not (isinstance(parsed, dict) and parsed.get("body", {}).get("access_token")):
+        log.warning("POST /api/profile/meltwater-session rejected: missing access_token (user=%s)", g.user.id)
+        return jsonify({"error": "That value parsed as JSON but doesn't contain an access_token — "
+                                  "make sure you copied the @@auth0spajs@@ row, not a different key."}), 400
+
+    exp = decode_session_expiry(value)
+    try:
+        db.upsert_meltwater_session(g.user.id, value)
+        log.info("Meltwater session saved for user=%s, expires=%s", g.user.id, exp)
+        return jsonify({"ok": True, "expires_at": exp})
+    except Exception as e:
+        log.exception("POST /api/profile/meltwater-session failed (user=%s)", g.user.id)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/profile/meltwater-session/status", methods=["GET"])
+@require_auth
+def meltwater_session_status():
+    value = db.get_meltwater_session(g.user.id) if db.is_configured() else None
+    if not value:
+        return jsonify({"state": "none"})
+    exp = decode_session_expiry(value)
+    if not exp:
+        return jsonify({"state": "unknown"})
+    import time
+    remaining = exp - time.time()
+    if remaining <= 0:
+        return jsonify({"state": "expired", "expires_at": exp})
+    return jsonify({"state": "active", "expires_at": exp, "seconds_remaining": int(remaining)})
 
 
 @app.route("/api/profile/reddit", methods=["GET"])
@@ -185,9 +288,16 @@ def set_reddit_profile():
     data = request.get_json(force=True)
     cookie = (data.get("cookie_value") or "").strip()
     if not cookie:
+        log.warning("POST /api/profile/reddit rejected: missing cookie (user=%s)", g.user.id)
         return jsonify({"error": "Cookie value is required"}), 400
-    db.upsert_reddit_cookie(g.user.id, cookie)
-    return jsonify({"ok": True})
+    try:
+        db.upsert_reddit_cookie(g.user.id, cookie)
+        # never log the cookie value itself
+        log.info("Reddit session cookie saved for user=%s", g.user.id)
+        return jsonify({"ok": True})
+    except Exception as e:
+        log.exception("POST /api/profile/reddit failed (user=%s)", g.user.id)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/profile/reddit/status", methods=["GET"])
@@ -197,8 +307,10 @@ def reddit_status():
     valid before a run. Reflects the real fetch path (same server, same cookie)."""
     cookie = db.get_reddit_cookie(g.user.id) if db.is_configured() else None
     if not cookie:
+        log.info("reddit status check: no cookie saved (user=%s)", g.user.id)
         return jsonify({"state": "none"})
     ok = run_async(_check_reddit_cookie(cookie))
+    log.info("reddit status check: %s (user=%s)", "active" if ok else "expired", g.user.id)
     return jsonify({"state": "active" if ok else "expired"})
 
 
@@ -209,10 +321,11 @@ async def _check_reddit_cookie(cookie: str) -> bool:
             headers={"User-Agent": config.BROWSER_UA},
         ) as c:
             r = await c.get("https://www.reddit.com/api/me.json", follow_redirects=True, timeout=15)
+            log.debug("reddit cookie check response: status=%s", r.status_code)
             if r.status_code == 200:
                 return bool((r.json() or {}).get("data", {}).get("name"))
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("reddit cookie check failed: %s: %s", type(e).__name__, e)
     return False
 
 
@@ -222,19 +335,24 @@ async def _check_reddit_cookie(cookie: str) -> bool:
 @require_auth
 def extract():
     if "file" not in request.files:
+        log.warning("POST /api/extract rejected: no file uploaded (user=%s)", g.user.id)
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["file"]
+    log.info("extracting URLs from upload: filename=%r (user=%s)", f.filename, g.user.id)
     try:
         df = pd.read_excel(f)
     except Exception as e:
+        log.exception("could not parse uploaded Excel: filename=%r (user=%s)", f.filename, g.user.id)
         return jsonify({"error": f"Could not read Excel: {e}"}), 400
 
     url_col = _find_col(df, PERMALINK_HINTS)
     if not url_col:
+        log.warning("no URL column found in %r — columns=%s", f.filename, list(df.columns))
         return jsonify({"error": f"No URL column found. Columns: {list(df.columns)}"}), 400
 
     urls = [str(u).strip() for u in df[url_col].dropna() if str(u).strip().lower() != "nan"]
     brand = infer_brand(df, _find_col(df, TOPIC_HINTS)) or ""
+    log.info("extracted %d URLs from %r, inferred brand=%r (user=%s)", len(urls), f.filename, brand, g.user.id)
     return jsonify({"urls": urls, "brand": brand, "count": len(urls)})
 
 
@@ -248,28 +366,41 @@ def classify():
     if not ALLOW_CDP and fetch_mode == "cdp":
         fetch_mode = "reddit_cookie"
     if not urls:
+        log.warning("POST /api/classify rejected: no URLs (user=%s)", g.user.id)
         return jsonify({"error": "No URLs provided"}), 400
     if not brand:
+        log.warning("POST /api/classify rejected: no brand (user=%s)", g.user.id)
         return jsonify({"error": "Please choose a brand"}), 400
 
+    log.info("classify start: brand=%r urls=%d fetch_mode=%r model=%s (user=%s)",
+              brand, len(urls), fetch_mode, config.MODEL, g.user.id)
     try:
         results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id))
     except AuthenticationError:
+        log.error("classify failed: invalid/missing ANTHROPIC_API_KEY (user=%s)", g.user.id)
         return jsonify({"error": "Invalid or missing ANTHROPIC_API_KEY (server config)."}), 400
     except APIStatusError as e:
         msg = str(getattr(e, "message", e))
         if "credit" in msg.lower() or "billing" in msg.lower():
+            log.error("classify failed: Anthropic credit balance exhausted (user=%s)", g.user.id)
             return jsonify({"error": "Anthropic API has no credit balance — add credits and retry."}), 400
+        log.exception("classify failed: Anthropic API error (user=%s)", g.user.id)
         return jsonify({"error": f"Anthropic API error: {msg}"}), 400
     except Exception as e:
+        log.exception("classify failed: unexpected error (brand=%r, user=%s)", brand, g.user.id)
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    applied = sum(1 for r in results if r.get("tag"))
+    log.info("classify done: brand=%r total=%d tagged=%d (user=%s)",
+              brand, len(results), applied, g.user.id)
 
     run_record = None
     if db.is_configured():
         try:
             run_record = db.save_run(g.user.id, brand, results, status="classified")
+            log.info("run saved to history: id=%s (user=%s)", run_record.get("id"), g.user.id)
         except Exception:
-            pass  # history is best-effort; don't fail the classify response over it
+            log.exception("failed to save run to history (non-fatal, user=%s)", g.user.id)
 
     return jsonify({"run_brand": brand, "results": results,
                      "run_id": run_record["id"] if run_record else None})
@@ -278,10 +409,13 @@ def classify():
 async def _classify_urls(urls, brand, fetch_mode, user_id):
     posts = [{"permalink": u, "excerpt": ""} for u in urls]
 
+    log.info("fetch start: mode=%r posts=%d", fetch_mode, len(posts))
     if fetch_mode == "cdp":
         posts = await fetch_via_cdp(posts)
     elif fetch_mode == "reddit_cookie":
         cookie = db.get_reddit_cookie(user_id) if db.is_configured() else None
+        if not cookie:
+            log.warning("fetch_mode=reddit_cookie but no cookie saved for user=%s — fetch will be empty", user_id)
         posts = await fetch_via_reddit_cookie(posts, cookie)
     else:
         sem = asyncio.Semaphore(config.FETCH_CONCURRENCY)
@@ -292,9 +426,18 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
                 return p
             posts = await asyncio.gather(*[_f(p) for p in posts])
 
+    got_text = sum(1 for p in posts if p.get("text"))
+    log.info("fetch done: mode=%r got_text=%d/%d", fetch_mode, got_text, len(posts))
+    if got_text < len(posts) * 0.5:
+        log.warning("fetch got text for less than half the posts (mode=%r) — "
+                     "classifications for the rest will be unreliable", fetch_mode)
+
     # Brand config (custom tag labels + per-tag rules). Empty when nothing is
     # configured -> classify_web falls back to the default behaviour exactly.
     brand_cfg = db.brand_config(brand) if db.is_configured() else {"labels": {}, "rules": {}, "roll_up_terms": []}
+    n_rules = len(brand_cfg.get("rules") or {})
+    log.info("brand config resolved: brand=%r custom_labels=%d rules=%d",
+              brand, len(brand_cfg.get("labels") or {}), n_rules)
 
     anthropic = AsyncAnthropic()
     sem = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
@@ -302,6 +445,11 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
         *[classify_web.classify_post(anthropic, config.MODEL, brand, p["permalink"],
                                      p.get("text", ""), sem, brand_cfg) for p in posts]
     )
+
+    errors = [d for d in decisions if "classification error" in (d.get("reason") or "")]
+    if errors:
+        log.warning("%d/%d posts had a classification error, e.g.: %s",
+                     len(errors), len(decisions), errors[0].get("reason"))
 
     out = []
     for d in decisions:
@@ -350,31 +498,76 @@ def apply_to_meltwater():
     results = data.get("results", [])
     brand_name = (data.get("run_brand") or "").strip()
     run_id = data.get("run_id")
+    applyable = sum(1 for r in results if r.get("action") == "apply" and r.get("tag"))
+    log.info("apply start: brand=%r results=%d applyable=%d run_id=%s (user=%s)",
+              brand_name, len(results), applyable, run_id, g.user.id)
+
     if not results:
+        log.warning("apply rejected: no results provided (user=%s)", g.user.id)
         return jsonify({"error": "No results to apply."}), 400
 
-    creds = db.get_meltwater_creds_full(g.user.id)
+    # Prefer email/password login automation (the same mechanism a real user
+    # goes through, so it's the most likely to keep working as Meltwater's app
+    # evolves). Session injection is kept as a fallback only for accounts with
+    # no login saved -- live testing showed Meltwater's app does more
+    # server-side session validation than a locally-cached token satisfies, so
+    # it isn't reliable as a standalone method.
+    creds = db.get_meltwater_creds_full(g.user.id) if db.is_configured() else None
+    session_value = None
     if not creds:
-        return jsonify({"error": "Add your Meltwater login on your Profile page first."}), 400
+        session_value = db.get_meltwater_session(g.user.id) if db.is_configured() else None
+        if not session_value:
+            log.warning("apply rejected: no Meltwater session or credentials saved (user=%s)", g.user.id)
+            return jsonify({"error": "Add your Meltwater login on your Profile page first."}), 400
 
     brand = db.get_brand(brand_name) if brand_name else None
-    topic_url = brand.get("meltwater_topic_url") if brand else None
+    topic_url = db.resolve_topic_url(g.user.id, brand) if brand else None
     if not topic_url:
-        return jsonify({"error": f"'{brand_name}' has no Meltwater topic URL configured yet. "
-                                  "Set it once on the Profile page under Brand settings."}), 400
+        log.warning("apply rejected: no topic URL resolved for brand=%r (user=%s)", brand_name, g.user.id)
+        return jsonify({"error": f"No Meltwater topic URL configured for '{brand_name}' for your "
+                                  "account. Open Brand Studio -> select the brand -> 'My Meltwater "
+                                  "topic URL' and paste the exact saved-search URL from YOUR "
+                                  "Meltwater account (topic names often differ per account)."}), 400
+    log.info("apply: resolved topic_url for brand=%r via=%s (user=%s)",
+              brand_name, "session" if session_value else "login", g.user.id)
 
     try:
-        report = run_async(apply_results_to_meltwater(
-            creds["meltwater_email"], creds["meltwater_password"], topic_url, results
-        ))
+        if session_value:
+            report = run_async(apply_via_session(session_value, topic_url, results))
+        else:
+            report = run_async(apply_results_to_meltwater(
+                creds["meltwater_email"], creds["meltwater_password"], topic_url, results
+            ))
     except Exception as e:
+        log.exception("apply failed: unexpected error (brand=%r, user=%s)", brand_name, g.user.id)
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
-    if run_id and db.is_configured() and report.get("ok"):
+    applied_links = {a["permalink"] for a in report.get("applied", [])}
+    already_links = {a["permalink"] for a in report.get("skipped_already", [])}
+    confirmed_links = applied_links | already_links  # both mean "tagged in Meltwater right now"
+
+    if report.get("ok"):
+        log.info("apply done: brand=%r applied=%d failed=%d already_tagged=%d (user=%s)",
+                  brand_name, len(applied_links), len(report.get("failed", [])),
+                  len(already_links), g.user.id)
+    else:
+        log.error("apply did not succeed: brand=%r message=%r (user=%s)",
+                   brand_name, report.get("message"), g.user.id)
+
+    if run_id and db.is_configured():
         try:
-            db.update_run_status(run_id, "applied")
+            # Mark each individual post as applied only if Meltwater actually
+            # confirmed it (applied now, or already tagged) -- never just
+            # because the button was clicked. Posts not touched keep whatever
+            # applied state they already had from a previous attempt.
+            for r in results:
+                if r.get("permalink") in confirmed_links:
+                    r["applied"] = True
+            any_confirmed = any(r.get("applied") for r in results)
+            new_status = "applied" if any_confirmed else "classified"
+            db.update_run_after_apply(run_id, results, new_status)
         except Exception:
-            pass
+            log.exception("failed to persist apply results (non-fatal, run_id=%s)", run_id)
 
     status_code = 200 if report.get("ok") else 400
     return jsonify(report), status_code
@@ -395,6 +588,15 @@ def history_detail(run_id):
     if not run:
         return jsonify({"error": "Run not found"}), 404
     return jsonify({"run": run})
+
+
+@app.route("/api/history/<run_id>", methods=["DELETE"])
+@require_auth
+def history_delete(run_id):
+    if not db.is_configured():
+        return jsonify({"error": "History storage is not configured."}), 400
+    db.delete_run(g.user.id, run_id)
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":

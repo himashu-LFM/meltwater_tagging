@@ -49,6 +49,12 @@ async function selectBrand(id) {
   $("cfgRollup").value = (selected.roll_up_terms || []).join(", ");
   $("cfgMsg").textContent = "";
 
+  // load my personal topic URL override
+  $("myTopicUrl").value = "";
+  Auth.authedFetch(`/api/brands/${id}/my-topic-url`).then(r => r.json()).then(d => {
+    $("myTopicUrl").value = d.topic_url || "";
+  });
+
   // load tags/rules
   const r = await Auth.authedFetch(`/api/brands/${id}/tags`);
   const data = await r.json();
@@ -57,11 +63,13 @@ async function selectBrand(id) {
 
   $("tagCards").innerHTML = SENTIMENTS.map(s => {
     const t = byS[s] || {};
-    const defLabel = `${selected.name} - ${s}`;
+    const cap = s.charAt(0).toUpperCase() + s.slice(1);
+    const defLabel = `${cap} - ${selected.name}`;
     return `
       <div class="tag-card">
         <div class="tag-card-head">
           <span class="chip ${s}">${s}</span>
+          ${t.rule ? '<span class="chip flag" title="A custom rule guides this sentiment">⚙ rule active</span>' : ''}
           <input type="text" class="tag-label-input" data-s="${s}"
                  value="${escAttr(t.tag_label || defLabel)}" placeholder="${escAttr(defLabel)}" />
         </div>
@@ -107,6 +115,19 @@ $("deleteBrandBtn").addEventListener("click", async () => {
   Toast.info(`Brand "${name}" deleted.`, "Removed");
 });
 
+$("saveMyTopicBtn").addEventListener("click", async () => {
+  if (!selected) return;
+  const topic_url = $("myTopicUrl").value.trim();
+  if (!topic_url) return Toast.error("Paste your Meltwater topic URL first.");
+  const r = await Auth.authedFetch(`/api/brands/${selected.id}/my-topic-url`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic_url }),
+  });
+  const data = await r.json();
+  if (r.ok) Toast.success("Apply to Meltwater will now use your personal topic URL for this brand.", "Saved");
+  else Toast.error(data.error || "Could not save your topic URL.");
+});
+
 $("saveConfigBtn").addEventListener("click", async () => {
   if (!selected) return;
   const name = $("cfgName").value.trim();
@@ -124,7 +145,7 @@ $("saveConfigBtn").addEventListener("click", async () => {
   const tags = SENTIMENTS.map(s => ({
     sentiment: s,
     tag_label: document.querySelector(`.tag-label-input[data-s="${s}"]`).value.trim()
-               || `${name} - ${s}`,
+               || `${s.charAt(0).toUpperCase() + s.slice(1)} - ${name}`,
     rule: document.querySelector(`.tag-rule-input[data-s="${s}"]`).value.trim(),
   }));
   const r2 = await Auth.authedFetch(`/api/brands/${selected.id}/tags`, {

@@ -28,8 +28,10 @@ async function loadRuns() {
           <span class="stat">🟢 ${run.positive_count}</span>
           <span class="stat">🔴 ${run.negative_count}</span>
           <span class="stat">⚪ ${run.neutral_count}</span>
-          <span class="chip ${run.status === 'applied' ? 'positive' : 'neutral'}">${run.status}</span>
+          ${run.applied_count ? `<span class="stat">🏷 ${run.applied_count} taggable</span>` : ""}
+          <span class="chip ${run.status === 'applied' ? 'positive' : 'neutral'}">${run.status === 'applied' ? '✓ applied' : run.status}</span>
           <button class="mini-btn" data-export="${run.id}">⬇ Export</button>
+          <button class="mini-btn danger" data-delete="${run.id}" data-brand="${escAttr(run.brand_name)}">🗑 Delete</button>
         </div>
       </div>
     </div>`).join("");
@@ -45,6 +47,28 @@ async function loadRuns() {
       if (d.run) exportRun(d.run);
     });
   });
+  document.querySelectorAll("[data-delete]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.delete;
+      const ok = await Modal.confirm({
+        title: `Delete this ${btn.dataset.brand} run?`,
+        message: "This permanently removes the run and its results. This can't be undone.",
+        okText: "Delete run",
+        danger: true,
+      });
+      if (!ok) return;
+      const r = await Auth.authedFetch(`/api/history/${id}`, { method: "DELETE" });
+      if (r.ok) {
+        Toast.info("Run deleted.", "Removed");
+        $("detailPanel").classList.add("hidden");
+        loadRuns();
+      } else {
+        const d = await r.json();
+        Toast.error(d.error || "Could not delete this run.");
+      }
+    });
+  });
 }
 
 async function showDetail(id) {
@@ -58,16 +82,20 @@ async function showDetail(id) {
     const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
     return `<tr><td>${idx + 1}</td><td><span class="chip ${cls}">${escapeHtml(s || res.action)}</span></td>
       <td>${escapeHtml(res.tag || "—")}</td><td class="reason">${escapeHtml(res.reason || "")}</td>
-      <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td></tr>`;
+      <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td>
+      <td>${res.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td></tr>`;
   }).join("");
   const applyCount = (data.run.results || []).filter(r => r.action === "apply").length;
+  const doneCount = (data.run.results || []).filter(r => r.applied).length;
   panel.innerHTML = `
     <div class="results-head" style="margin-top:0">
       <div>
         <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
         <div class="stats" style="margin-top:8px">
-          <span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${escapeHtml(data.run.status)}</span>
+          <span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${data.run.status === 'applied' ? '✓ applied' : escapeHtml(data.run.status)}</span>
           <span class="stat">${applyCount} taggable</span>
+          ${doneCount ? `<span class="chip positive">🏷 ${doneCount}/${applyCount} in Meltwater</span>` : ""}
+          ${applyCount && doneCount && doneCount < applyCount ? `<span class="chip flag">${applyCount - doneCount} remaining</span>` : ""}
         </div>
       </div>
       <div class="results-actions">
@@ -80,7 +108,7 @@ async function showDetail(id) {
       </div>
     </div>
     <div class="table-wrap" style="margin-top:14px">
-      <table><thead><tr><th>#</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th></tr></thead>
+      <table><thead><tr><th>#</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Applied</th></tr></thead>
       <tbody>${rows}</tbody></table>
     </div>`;
 
@@ -100,6 +128,8 @@ async function applyRun(run) {
   });
   if (!ok) return;
 
+  const btn = $("histApplyBtn");
+  if (btn) { btn.disabled = true; btn.querySelector(".btn-label").textContent = "⏳ Applying…"; }
   const t = Toast.loading("Logging into Meltwater and applying tags — this can take a minute…", "Applying tags");
   try {
     const r = await Auth.authedFetch("/api/apply", {
@@ -108,14 +138,26 @@ async function applyRun(run) {
     });
     const data = await r.json();
     if (r.ok) {
-      t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
-      if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      const appliedNow = (data.applied || []).length;
+      if (appliedNow) {
+        t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
+        if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      } else {
+        t.info("No new tags were applied — open the run to see per-post status.", "Nothing applied");
+      }
+      if ((data.unreached || []).length) {
+        Toast.info(`${data.unreached.length} post(s) weren't found in the Meltwater feed — check the topic's date range covers them.`, "Some posts not found");
+      }
       loadRuns();  // refresh status chip in the list
+      showDetail(run.id);  // re-fetch so per-post "Applied" chips reflect what was actually confirmed
     } else {
       t.error(data.error || data.message || "Apply failed.");
     }
   } catch (err) {
     t.error(err.message);
+  } finally {
+    const b = $("histApplyBtn");
+    if (b) { b.disabled = false; b.querySelector(".btn-label").textContent = "🏷 Apply to Meltwater"; }
   }
 }
 
@@ -143,6 +185,7 @@ async function exportRun(run) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+function escAttr(s) { return escapeHtml(s); }
 
 $("logoutLink").addEventListener("click", async (e) => {
   e.preventDefault();

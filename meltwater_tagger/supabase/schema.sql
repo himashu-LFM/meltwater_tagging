@@ -50,6 +50,26 @@ create policy "brand_tags writable by signed-in users" on brand_tags
   for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 -- ---------------------------------------------------------------------------
+-- 1c) Per-user override of a brand's Meltwater topic URL. brands.meltwater_topic_url
+--     is a shared/org default, but each analyst's Meltwater account may have a
+--     differently-named saved search for the same brand -- this lets a user's
+--     own URL take priority for "Apply to Meltwater" without touching the
+--     shared default other analysts rely on.
+-- ---------------------------------------------------------------------------
+create table if not exists user_brand_topics (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  brand_id int not null references brands(id) on delete cascade,
+  topic_url text not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, brand_id)
+);
+
+alter table user_brand_topics enable row level security;
+
+create policy "own topic overrides" on user_brand_topics
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ---------------------------------------------------------------------------
 -- 2) Per-user Meltwater credentials — each analyst has their own Meltwater
 --    login. Editable later from their profile page. One row per user.
 --    NOTE: password is stored using Supabase Vault / pgsodium in production;
@@ -61,6 +81,26 @@ create table if not exists meltwater_credentials (
   meltwater_password text not null,   -- see encryption note below before going live
   updated_at timestamptz not null default now()
 );
+
+-- ---------------------------------------------------------------------------
+-- 2b) Per-user Meltwater Auth0 session (Local Storage token cache) --
+--     preferred over email/password login automation: Meltwater's Auth0 SPA
+--     caches its access/id token in the browser's Local Storage under a fixed
+--     key (same for every user of this Meltwater tenant); only the VALUE is
+--     user-specific. Injecting it lets Playwright skip the whole login
+--     form/passkey flow entirely. Valid ~24h (or indefinitely if a
+--     refresh_token is present in the cached value), then needs re-pasting.
+-- ---------------------------------------------------------------------------
+create table if not exists meltwater_sessions (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  storage_value text not null,   -- the raw @@auth0spajs@@::... Local Storage value
+  updated_at timestamptz not null default now()
+);
+
+alter table meltwater_sessions enable row level security;
+
+create policy "own meltwater session" on meltwater_sessions
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- ---------------------------------------------------------------------------
 -- 3) Per-user Reddit session cookie — fallback fetch method until the Reddit

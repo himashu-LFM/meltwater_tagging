@@ -123,12 +123,19 @@ function renderResults(data) {
     const s = (r.sentiment || "").toLowerCase();
     if (counts[s] !== undefined) counts[s]++; else counts.other++;
   });
+  const appliedCount = res.filter(r => r.applied).length;
   $("stats").innerHTML =
     `<span class="stat">${res.length} posts</span>` +
     `<span class="stat">🟢 ${counts.positive} positive</span>` +
     `<span class="stat">🔴 ${counts.negative} negative</span>` +
     `<span class="stat">⚪ ${counts.neutral} neutral</span>` +
-    `<span class="stat">⚑ ${counts.other} flagged/other</span>`;
+    `<span class="stat">⚑ ${counts.other} flagged/other</span>` +
+    (appliedCount ? `<span class="chip positive">🏷 ${appliedCount} in Meltwater</span>` : "");
+
+  // No taggable posts -> nothing Apply could do; make that obvious up front.
+  const taggable = res.some(r => r.action === "apply" && r.tag);
+  $("applyBtn").disabled = !taggable;
+  $("applyBtn").title = taggable ? "" : "No taggable posts in this run";
 
   const body = $("resBody");
   body.innerHTML = "";
@@ -143,7 +150,8 @@ function renderResults(data) {
       <td><span class="chip ${cls}">${escapeHtml(chipText || "—")}</span></td>
       <td>${escapeHtml(r.tag || "—")}</td>
       <td class="reason">${escapeHtml(r.reason || "")}</td>
-      <td><a href="${encodeURI(r.permalink)}" target="_blank" rel="noopener">${escapeHtml(shorten(r.permalink))}</a></td>`;
+      <td><a href="${encodeURI(r.permalink)}" target="_blank" rel="noopener">${escapeHtml(shorten(r.permalink))}</a></td>
+      <td>${r.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td>`;
     body.appendChild(tr);
   });
 }
@@ -156,24 +164,51 @@ function escAttr(s) { return escapeHtml(s); }
 
 // ---- export ----
 $("exportBtn").addEventListener("click", async () => {
-  const r = await Auth.authedFetch("/api/export", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ results: state.results, run_brand: state.brand }),
-  });
-  if (!r.ok) return Toast.error("Export failed. Please try again.");
-  const blob = await r.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `tagging_${state.brand}.xlsx`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-  Toast.success(`Exported ${state.results.length} rows to Excel.`, "Download ready");
+  const t = Toast.loading("Preparing your Excel…");
+  try {
+    const r = await Auth.authedFetch("/api/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ results: state.results, run_brand: state.brand }),
+    });
+    if (!r.ok) return t.error("Export failed. Please try again.");
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `tagging_${state.brand}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    t.success(`Exported ${state.results.length} rows to Excel.`, "Download ready");
+  } catch (err) {
+    t.error(err.message);
+  }
 });
 
 // ---- apply to meltwater ----
+function applySummaryChips(data) {
+  // A compact, always-visible recap under the results header — so the outcome
+  // stays on screen after the toast fades.
+  const applied = (data.applied || []).length;
+  const already = (data.skipped_already || []).length;
+  const failed = (data.failed || []).length;
+  const unreached = (data.unreached || []).length;
+  const bits = [];
+  if (applied)   bits.push(`<span class="chip positive">✓ ${applied} applied</span>`);
+  if (already)   bits.push(`<span class="chip neutral">⏭ ${already} already tagged</span>`);
+  if (failed)    bits.push(`<span class="chip negative">✗ ${failed} failed</span>`);
+  if (unreached) bits.push(`<span class="chip flag">🔍 ${unreached} not found in feed</span>`);
+  if (!bits.length) bits.push(`<span class="chip neutral">Nothing needed applying</span>`);
+  $("applyStatus").innerHTML = bits.join(" ") +
+    `<span class="apply-time">${new Date().toLocaleTimeString()}</span>`;
+  $("applyStatus").className = "apply-status";
+}
+
 $("applyBtn").addEventListener("click", async () => {
   const btn = $("applyBtn");
+  const label = btn.querySelector(".btn-label");
+  const origLabel = label.textContent;
   btn.disabled = true;
+  btn.classList.add("busy");
+  label.textContent = "⏳ Applying…";
   const t = Toast.loading("Logging into Meltwater and applying tags — this can take a minute…", "Applying tags");
   try {
     const r = await Auth.authedFetch("/api/apply", {
@@ -182,8 +217,20 @@ $("applyBtn").addEventListener("click", async () => {
     });
     const data = await r.json();
     if (r.ok) {
-      t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
-      if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      const applied = (data.applied || []).length;
+      if (applied) {
+        t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
+        if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      } else {
+        t.info("No new tags were applied — see the summary chips for details.", "Nothing applied");
+      }
+      const confirmed = new Set([...(data.applied||[]), ...(data.skipped_already||[])].map(x => x.permalink));
+      state.results.forEach(r2 => { if (confirmed.has(r2.permalink)) r2.applied = true; });
+      renderResults({ run_brand: state.brand, results: state.results });
+      applySummaryChips(data);
+      if ((data.unreached || []).length) {
+        Toast.info(`${data.unreached.length} post(s) weren't found in the Meltwater feed — check the topic's date range covers them.`, "Some posts not found");
+      }
     } else {
       t.error(data.error || data.message || "Apply failed.");
     }
@@ -191,6 +238,8 @@ $("applyBtn").addEventListener("click", async () => {
     t.error(err.message);
   } finally {
     btn.disabled = false;
+    btn.classList.remove("busy");
+    label.textContent = origLabel;
   }
 });
 

@@ -13,9 +13,14 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_THIS_DIR))
+sys.path.insert(0, _THIS_DIR)
 from prompts import SYSTEM_PROMPT, POST_TEMPLATE, DECISION_SCHEMA
 from taxonomy import normalize_brand, SENTIMENTS
+from logging_setup import get_logger
+
+log = get_logger("classify_web")
 
 _SENT_LOWER = [s.lower() for s in SENTIMENTS]
 
@@ -41,8 +46,9 @@ def build_system_prompt(run_brand: str, rules: dict) -> str:
 
 
 def _label_for(run_brand: str, sentiment: str, labels: dict) -> str:
-    """Custom label if configured, else the default 'Brand - sentiment' format."""
-    return labels.get(sentiment) or f"{run_brand} - {sentiment}"
+    """Custom label if configured, else the default 'Sentiment - Brand' format
+    (confirmed live in Meltwater: 'Negative - Kaseya', 'Neutral - Ninja')."""
+    return labels.get(sentiment) or f"{sentiment.capitalize()} - {run_brand}"
 
 
 def resolve(run_brand: str, permalink: str, d: dict, cfg: dict) -> dict:
@@ -103,6 +109,7 @@ async def classify_post(anthropic, model, run_brand, permalink, text, sem, cfg):
             raw = next(b.text for b in resp.content if b.type == "text")
             decision = json.loads(raw)
         except Exception as e:
+            log.error("classification failed for %s: %s: %s", permalink, type(e).__name__, e)
             return {"permalink": permalink, "action": "review",
                     "reason": f"classification error: {e}", "tag": None}
     return resolve(run_brand, permalink, decision, cfg)
