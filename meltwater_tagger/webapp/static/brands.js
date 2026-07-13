@@ -69,6 +69,7 @@ async function selectBrand(id) {
       <div class="tag-card">
         <div class="tag-card-head">
           <span class="chip ${s}">${s}</span>
+          ${t.rule ? '<span class="chip flag" title="A custom rule guides this sentiment">⚙ rule active</span>' : ''}
           <input type="text" class="tag-label-input" data-s="${s}"
                  value="${escAttr(t.tag_label || defLabel)}" placeholder="${escAttr(defLabel)}" />
         </div>

@@ -53,9 +53,16 @@ body::after{content:"";position:fixed;inset:0;z-index:-1;
   border-radius:10px;transition:.2s;border:1px solid transparent}
 .topbar .links a:hover,.topbar .links a.active{color:var(--txt);background:rgba(255,255,255,.06);
   border-color:var(--stroke)}
-.apply-status{margin:10px 0 0;font-size:14px;min-height:20px}
+.apply-status{margin:10px 0 0;font-size:14px;min-height:20px;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .apply-status.ok{color:var(--pos)}
 .apply-status.err{color:var(--neg)}
+.apply-time{color:var(--muted);font-size:11px;margin-left:4px}
+
+/* buttons mid-work / nothing-to-do states */
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:grayscale(.4)}
+.btn.busy .btn-label{animation:busyPulse 1.2s ease-in-out infinite}
+@keyframes busyPulse{0%,100%{opacity:1}50%{opacity:.55}}
 .run-row{animation:rise .45s backwards}
 
 .wrap{max-width:1040px;margin:0 auto;padding:24px 24px 80px}

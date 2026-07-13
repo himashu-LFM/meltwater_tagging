@@ -28,9 +28,10 @@ async function loadRuns() {
           <span class="stat">🟢 ${run.positive_count}</span>
           <span class="stat">🔴 ${run.negative_count}</span>
           <span class="stat">⚪ ${run.neutral_count}</span>
-          <span class="chip ${run.status === 'applied' ? 'positive' : 'neutral'}">${run.status}</span>
+          ${run.applied_count ? `<span class="stat">🏷 ${run.applied_count} taggable</span>` : ""}
+          <span class="chip ${run.status === 'applied' ? 'positive' : 'neutral'}">${run.status === 'applied' ? '✓ applied' : run.status}</span>
           <button class="mini-btn" data-export="${run.id}">⬇ Export</button>
-          <button class="mini-btn" data-delete="${run.id}" data-brand="${escAttr(run.brand_name)}">🗑 Delete</button>
+          <button class="mini-btn danger" data-delete="${run.id}" data-brand="${escAttr(run.brand_name)}">🗑 Delete</button>
         </div>
       </div>
     </div>`).join("");
@@ -85,13 +86,16 @@ async function showDetail(id) {
       <td>${res.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td></tr>`;
   }).join("");
   const applyCount = (data.run.results || []).filter(r => r.action === "apply").length;
+  const doneCount = (data.run.results || []).filter(r => r.applied).length;
   panel.innerHTML = `
     <div class="results-head" style="margin-top:0">
       <div>
         <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
         <div class="stats" style="margin-top:8px">
-          <span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${escapeHtml(data.run.status)}</span>
+          <span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${data.run.status === 'applied' ? '✓ applied' : escapeHtml(data.run.status)}</span>
           <span class="stat">${applyCount} taggable</span>
+          ${doneCount ? `<span class="chip positive">🏷 ${doneCount}/${applyCount} in Meltwater</span>` : ""}
+          ${applyCount && doneCount && doneCount < applyCount ? `<span class="chip flag">${applyCount - doneCount} remaining</span>` : ""}
         </div>
       </div>
       <div class="results-actions">
@@ -124,6 +128,8 @@ async function applyRun(run) {
   });
   if (!ok) return;
 
+  const btn = $("histApplyBtn");
+  if (btn) { btn.disabled = true; btn.querySelector(".btn-label").textContent = "⏳ Applying…"; }
   const t = Toast.loading("Logging into Meltwater and applying tags — this can take a minute…", "Applying tags");
   try {
     const r = await Auth.authedFetch("/api/apply", {
@@ -132,8 +138,16 @@ async function applyRun(run) {
     });
     const data = await r.json();
     if (r.ok) {
-      t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
-      if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      const appliedNow = (data.applied || []).length;
+      if (appliedNow) {
+        t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
+        if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      } else {
+        t.info("No new tags were applied — open the run to see per-post status.", "Nothing applied");
+      }
+      if ((data.unreached || []).length) {
+        Toast.info(`${data.unreached.length} post(s) weren't found in the Meltwater feed — check the topic's date range covers them.`, "Some posts not found");
+      }
       loadRuns();  // refresh status chip in the list
       showDetail(run.id);  // re-fetch so per-post "Applied" chips reflect what was actually confirmed
     } else {
@@ -141,6 +155,9 @@ async function applyRun(run) {
     }
   } catch (err) {
     t.error(err.message);
+  } finally {
+    const b = $("histApplyBtn");
+    if (b) { b.disabled = false; b.querySelector(".btn-label").textContent = "🏷 Apply to Meltwater"; }
   }
 }
 

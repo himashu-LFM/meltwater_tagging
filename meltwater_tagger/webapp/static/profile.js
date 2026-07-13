@@ -33,19 +33,39 @@ const BOOKMARKLET_SRC = `(function(){
   const mw = await (await Auth.authedFetch("/api/profile/meltwater")).json();
   if (mw.credentials) $("mwEmail").value = mw.credentials.meltwater_email || "";
   lockPasswordField(!!(mw.credentials && mw.credentials.meltwater_email));
+  setMwLoginStatus(!!(mw.credentials && mw.credentials.meltwater_email), mw.credentials && mw.credentials.updated_at);
 
   const rs = await (await Auth.authedFetch("/api/profile/reddit")).json();
   if (rs.session) $("redditCookie").placeholder = "•••••••• (saved — paste a new value to replace)";
 
-  const mws = await (await Auth.authedFetch("/api/profile/meltwater-session")).json();
-  if (mws.session) $("mwSessionValue").placeholder = "•••••••• (saved — paste a new value to replace)";
+  // Session-injection card is currently disabled in the HTML — only touch its
+  // elements if they exist (kept for if the card is ever re-enabled).
+  if ($("mwSessionValue")) {
+    const mws = await (await Auth.authedFetch("/api/profile/meltwater-session")).json();
+    if (mws.session) $("mwSessionValue").placeholder = "•••••••• (saved — paste a new value to replace)";
+    refreshMwSessionStatus();
+  }
 
   refreshRedditStatus();
-  refreshMwSessionStatus();
 })();
+
+function setMwLoginStatus(saved, updatedAt) {
+  const pill = $("mwLoginStatus"), txt = $("mwLoginStatusText");
+  if (!pill) return;
+  if (saved) {
+    pill.className = "status-pill active";
+    txt.textContent = updatedAt
+      ? `Saved — ${new Date(updatedAt).toLocaleDateString()}`
+      : "Saved";
+  } else {
+    pill.className = "status-pill none";
+    txt.textContent = "Not set — Apply to Meltwater won't work yet";
+  }
+}
 
 async function refreshMwSessionStatus() {
   const pill = $("mwSessionStatus"), txt = $("mwSessionStatusText");
+  if (!pill) return;
   pill.className = "status-pill checking";
   txt.textContent = "checking…";
   try {
@@ -124,11 +144,15 @@ $("saveMw").addEventListener("click", async () => {
     body: JSON.stringify({ email, password }),
   });
   const data = await r.json();
-  if (r.ok) { Toast.success("Meltwater login saved.", "Credentials updated"); lockPasswordField(!!email); }
+  if (r.ok) {
+    Toast.success("Meltwater login saved.", "Credentials updated");
+    lockPasswordField(!!email);
+    setMwLoginStatus(!!email, new Date().toISOString());
+  }
   else Toast.error(data.error || "Could not save your Meltwater login.");
 });
 
-$("saveMwSession").addEventListener("click", async () => {
+if ($("saveMwSession")) $("saveMwSession").addEventListener("click", async () => {
   const storage_value = $("mwSessionValue").value.trim();
   if (!storage_value) return Toast.error("Paste the Local Storage value first.");
   const r = await Auth.authedFetch("/api/profile/meltwater-session", {
