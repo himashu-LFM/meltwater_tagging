@@ -77,13 +77,25 @@ async function showDetail(id) {
   const panel = $("detailPanel");
   panel.classList.remove("hidden");
   if (!data.run) { panel.innerHTML = "Not found."; return; }
+  const taggable = (res) => res.action === "apply" && res.tag;
   const rows = (data.run.results || []).map((res, idx) => {
     const s = (res.sentiment || "").toLowerCase();
     const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
-    return `<tr><td>${idx + 1}</td><td><span class="chip ${cls}">${escapeHtml(s || res.action)}</span></td>
+    // Prefer the stored type; for older runs (saved before content_type existed)
+    // derive it from the URL — a comment URL is unmistakable, so this is exact.
+    const ctype = (res.content_type || deriveContentType(res.permalink)).toLowerCase();
+    const typeChip = ctype === "comment"
+      ? '<span class="chip type-comment">💬 Comment</span>'
+      : '<span class="chip type-post">📄 Post</span>';
+    const canTag = taggable(res) && !res.applied;
+    const actionCell = res.applied
+      ? '<span class="chip positive">✓ Applied</span>'
+      : (canTag ? `<button class="mini-btn" data-tag-idx="${idx}">🏷 Tag this post</button>` : "—");
+    return `<tr><td>${idx + 1}</td><td>${typeChip}</td>
+      <td><span class="chip ${cls}">${escapeHtml(s || res.action)}</span></td>
       <td>${escapeHtml(res.tag || "—")}</td><td class="reason">${escapeHtml(res.reason || "")}</td>
       <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td>
-      <td>${res.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td></tr>`;
+      <td>${actionCell}</td></tr>`;
   }).join("");
   const applyCount = (data.run.results || []).filter(r => r.action === "apply").length;
   const doneCount = (data.run.results || []).filter(r => r.applied).length;
@@ -108,13 +120,73 @@ async function showDetail(id) {
       </div>
     </div>
     <div class="table-wrap" style="margin-top:14px">
-      <table><thead><tr><th>#</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Applied</th></tr></thead>
+      <table><thead><tr><th>#</th><th>Type</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Status</th></tr></thead>
       <tbody>${rows}</tbody></table>
     </div>`;
 
   $("histExportBtn").addEventListener("click", () => exportRun(data.run));
   $("histApplyBtn").addEventListener("click", () => applyRun(data.run));
+  panel.querySelectorAll("[data-tag-idx]").forEach(btn => {
+    btn.addEventListener("click", () => applySinglePost(data.run, +btn.dataset.tagIdx, btn));
+  });
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function applySinglePost(run, idx, btn) {
+  const res = (run.results || [])[idx];
+  if (!res) return;
+
+  // Guard against firing this while a bulk (or another single) apply is
+  // already running for the same run -- two concurrent Playwright sessions
+  // logging into the same Meltwater account at once is asking for trouble.
+  if (document.querySelector('[data-tag-idx][disabled], #histApplyBtn:disabled')) {
+    return Toast.info("An apply is already in progress for this run — wait for it to finish.", "Please wait");
+  }
+
+  const ok = await Modal.confirm({
+    title: "Tag this one post?",
+    message: `This logs into your saved Meltwater account and applies "${res.tag}" to just this post.`,
+    okText: "Tag it",
+  });
+  if (!ok) return;
+
+  document.querySelectorAll("[data-tag-idx]").forEach(b => b.disabled = true);
+  const histBtn = $("histApplyBtn");
+  if (histBtn) histBtn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = "⏳ Tagging…";
+
+  const t = Toast.loading("Logging into Meltwater and applying this tag…", "Applying tag");
+  try {
+    const r = await Auth.authedFetch("/api/apply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ results: [res], run_brand: run.brand_name, run_id: run.id }),
+    });
+    const data = await r.json();
+    if (r.ok) {
+      const appliedNow = (data.applied || []).length;
+      const alreadyDone = (data.skipped_already || []).length;
+      if (appliedNow || alreadyDone) {
+        t.success(appliedNow ? `Tagged with "${res.tag}".` : "Already tagged in Meltwater.", "Applied to Meltwater");
+        if (appliedNow && window.FX && window.FX.celebrate) window.FX.celebrate();
+      } else if ((data.unreached || []).length) {
+        t.error("This post wasn't found in the Meltwater feed — check the topic's date range covers it.", "Not found");
+      } else {
+        t.error(data.message || "Could not tag this post.", "Apply failed");
+      }
+      loadRuns();
+      showDetail(run.id);  // re-fetch so this row's real status reflects what Meltwater confirmed
+    } else {
+      t.error(data.error || data.message || "Apply failed.");
+      btn.textContent = origText;
+    }
+  } catch (err) {
+    t.error(err.message);
+    btn.textContent = origText;
+  } finally {
+    document.querySelectorAll("[data-tag-idx]").forEach(b => b.disabled = false);
+    if (histBtn) histBtn.disabled = false;
+  }
 }
 
 async function applyRun(run) {
@@ -186,6 +258,20 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function escAttr(s) { return escapeHtml(s); }
+
+// Mirrors classify.py reddit_ids: a Reddit URL is a comment if it has a
+// /comment/<id> segment OR a trailing base36 id after the title slug.
+function deriveContentType(url) {
+  if (!url || url.indexOf("reddit.com") === -1) return "post";
+  const clean = String(url).split("?")[0].split("#")[0];
+  const m = clean.match(/\/comments\/([a-z0-9]+)/i);
+  if (!m) return "post";
+  if (/\/comment\/[a-z0-9]+/i.test(clean)) return "comment";
+  const after = clean.slice(m.index + m[0].length);
+  const segs = after.split("/").filter(Boolean);
+  if (segs.length >= 2 && /^[a-z0-9]{4,}$/i.test(segs[segs.length - 1])) return "comment";
+  return "post";
+}
 
 $("logoutLink").addEventListener("click", async (e) => {
   e.preventDefault();

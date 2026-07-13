@@ -102,12 +102,59 @@ Judge by evaluative stance, not by keywords or by whether a problem is "confirme
 # Per-post user message template
 POST_TEMPLATE = """Run brand: {run_brand}
 Permalink: {permalink}
+Mention type: POST
 
 --- FULL POST TEXT ---
 {text}
 --- END POST TEXT ---
 
-Classify this post."""
+Classify this POST based on the post's own content."""
+
+# Per-comment user message template. The parent post is given as CONTEXT ONLY —
+# the sentiment tag applies to the COMMENT itself, exactly as it appears as its
+# own mention in Meltwater.
+COMMENT_TEMPLATE = """Run brand: {run_brand}
+Permalink: {permalink}
+Mention type: COMMENT
+
+--- PARENT POST (context only — do NOT tag this, use it only to understand what the comment refers to) ---
+{post_text}
+--- END PARENT POST ---
+
+--- COMMENT TO CLASSIFY (tag THIS specific comment) ---
+{comment_text}
+--- END COMMENT ---
+
+Classify the COMMENT above. Judge the COMMENT's own sentiment toward the brand; the parent post is context only."""
+
+# Appended to the system prompt so the model judges posts and comments correctly.
+# Neutral for posts is unchanged; this only adds explicit comment handling and
+# the reason-prefix requirement.
+CONTENT_TYPE_GUIDANCE = """
+
+## MENTION TYPE — POST vs COMMENT (read carefully)
+Each mention is either a POST or a COMMENT, stated in the message.
+
+- POST: judge sentiment on the POST's OWN content (its title and body) using all
+  the rules above. Do not let replies/comments in the thread change the verdict.
+
+- COMMENT: judge sentiment on the COMMENT's OWN content. The specific comment is
+  what gets tagged in Meltwater, NOT the whole thread. The parent post is given
+  ONLY as context to understand what the comment is referring to.
+  * Apply the exact same NEGATIVE / NEUTRAL / POSITIVE bar as above, to the
+    comment's evaluative stance about the brand.
+  * The comment does NOT inherit the post's sentiment. If the parent post is
+    negative but the comment itself only discusses neutral/operational things
+    (no positive or negative verdict about the brand), the comment is NEUTRAL.
+    Likewise, a neutral post with a strongly evaluative comment is judged by the
+    comment. Judge ONLY the comment's own words.
+
+## REASON FORMAT (required)
+Begin `reason` with "Post: " or "Comment: " to make the mention type explicit,
+then give a precise, specific one-line justification citing what in THAT text
+(post body, or the comment's own words) drove the sentiment — e.g.
+"Comment: neutral — asks which RMM others use; no verdict on the brand (parent
+post is a Kaseya complaint, but that doesn't carry to this comment)." """
 
 # JSON schema for the structured output (one decision per post).
 DECISION_SCHEMA = {
@@ -132,7 +179,13 @@ DECISION_SCHEMA = {
         },
         "reason": {
             "type": "string",
-            "description": "One-line justification, e.g. 'Datto EDR update broke Teams (confirmed).'",
+            "description": (
+                "One-line justification that MUST start with 'Post: ' or "
+                "'Comment: ' to state the mention type, then cite the specific "
+                "text that drove the sentiment. For a comment, judge the "
+                "comment's own words (post is context only). E.g. "
+                "'Comment: neutral — asks which RMM others use, no verdict on brand.'"
+            ),
         },
     },
     "required": ["primary_brand", "sentiment", "action", "reason"],

@@ -29,7 +29,7 @@ sys.path.insert(0, _THIS_DIR)
 
 import config
 from classify import (
-    fetch_full_text, fetch_via_cdp, classify_post, _find_col,
+    fetch_full_text, fetch_and_enrich, fetch_via_cdp, classify_post, _find_col,
     PERMALINK_HINTS, infer_brand, TOPIC_HINTS,
 )
 import httpx
@@ -50,7 +50,33 @@ ALLOW_CDP = os.environ.get("MELTWATER_ALLOW_CDP", "true").lower() == "true"
 
 
 def run_async(coro):
-    return asyncio.run(coro)
+    """Run an async coroutine to completion from Flask's sync context.
+
+    On Windows, Playwright's subprocess transport can emit a harmless
+    'RuntimeError: Event loop is closed' from its __del__ during teardown, AFTER
+    the work has already finished successfully. It doesn't affect results but it
+    looks alarming in the logs, so we install an exception handler that swallows
+    exactly that message and lets everything else through unchanged."""
+    loop = asyncio.new_event_loop()
+
+    def _ignore_closed(lp, context):
+        exc = context.get("exception")
+        msg = context.get("message", "") or (str(exc) if exc else "")
+        if "Event loop is closed" in msg:
+            return  # benign Windows Proactor teardown noise
+        lp.default_exception_handler(context)
+
+    loop.set_exception_handler(_ignore_closed)
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 # --- pages -------------------------------------------------------------------
@@ -422,7 +448,7 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
         async with httpx.AsyncClient() as http:
             async def _f(p):
                 async with sem:
-                    p["text"] = await fetch_full_text(http, p["permalink"], p["excerpt"])
+                    await fetch_and_enrich(http, p)
                 return p
             posts = await asyncio.gather(*[_f(p) for p in posts])
 
@@ -442,8 +468,12 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
     anthropic = AsyncAnthropic()
     sem = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
     decisions = await asyncio.gather(
-        *[classify_web.classify_post(anthropic, config.MODEL, brand, p["permalink"],
-                                     p.get("text", ""), sem, brand_cfg) for p in posts]
+        *[classify_web.classify_post(
+            anthropic, config.MODEL, brand, p["permalink"], p.get("text", ""), sem, brand_cfg,
+            content_type=p.get("content_type", "post"),
+            post_text=p.get("post_text", ""),
+            comment_text=p.get("comment_text", ""),
+        ) for p in posts]
     )
 
     errors = [d for d in decisions if "classification error" in (d.get("reason") or "")]
@@ -462,6 +492,7 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
             "sentiment": sentiment or ("—" if d.get("action") != "apply" else ""),
             "flag_brand": d.get("flag_brand", ""),
             "reason": d.get("reason", ""),
+            "content_type": d.get("content_type", "post"),
         })
     return out
 
@@ -476,10 +507,12 @@ def export():
     brand = data.get("run_brand", "run")
     rows = [{
         "permalink": r.get("permalink"),
+        "type": (r.get("content_type") or "post").capitalize(),
         "tag": r.get("tag", ""),
         "sentiment": r.get("sentiment", ""),
         "action": r.get("action", ""),
         "reason": r.get("reason", ""),
+        "applied": "Yes" if r.get("applied") else "",
     } for r in results]
     df = pd.DataFrame(rows)
     buf = io.BytesIO()
@@ -540,6 +573,22 @@ def apply_to_meltwater():
             ))
     except Exception as e:
         log.exception("apply failed: unexpected error (brand=%r, user=%s)", brand_name, g.user.id)
+        msg = str(e)
+        if "Executable doesn't exist" in msg and "playwright install" in msg:
+            # Deployment/build issue, not a data or login problem -- give the
+            # analyst something actionable instead of a raw stack trace, and
+            # log the real cause clearly for whoever manages the deploy.
+            log.error("apply: Playwright's Chromium browser is not installed on this "
+                       "server. The Render build step (render-build.sh) must run "
+                       "'python -m playwright install --with-deps chromium' successfully. "
+                       "Trigger a 'Clear build cache & deploy' on Render to fix this.")
+            return jsonify({"error": (
+                "The server that applies tags to Meltwater isn't fully set up yet "
+                "(a required browser component is missing). This is a deployment "
+                "issue, not something wrong with your data — please let whoever "
+                "manages the deployment know, or try again in a few minutes if a "
+                "deploy is in progress."
+            )}), 500
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
     applied_links = {a["permalink"] for a in report.get("applied", [])}
@@ -556,16 +605,21 @@ def apply_to_meltwater():
 
     if run_id and db.is_configured():
         try:
-            # Mark each individual post as applied only if Meltwater actually
-            # confirmed it (applied now, or already tagged) -- never just
-            # because the button was clicked. Posts not touched keep whatever
-            # applied state they already had from a previous attempt.
-            for r in results:
+            # IMPORTANT: always merge into the run's FULL stored results, fetched
+            # fresh from the DB -- never persist back just the `results` this
+            # request happened to submit. A caller may legitimately send only a
+            # subset (e.g. applying a single post from History), and writing
+            # that subset back as-if it were the whole run would silently wipe
+            # out every other row in the run.
+            full_run = db.get_run(g.user.id, run_id)
+            full_results = full_run["results"] if full_run and full_run.get("results") else results
+            for r in full_results:
                 if r.get("permalink") in confirmed_links:
                     r["applied"] = True
-            any_confirmed = any(r.get("applied") for r in results)
-            new_status = "applied" if any_confirmed else "classified"
-            db.update_run_after_apply(run_id, results, new_status)
+            any_confirmed = any(r.get("applied") for r in full_results)
+            prior_status = full_run.get("status") if full_run else None
+            new_status = "applied" if any_confirmed else (prior_status or "classified")
+            db.update_run_after_apply(run_id, full_results, new_status)
         except Exception:
             log.exception("failed to persist apply results (non-fatal, run_id=%s)", run_id)
 

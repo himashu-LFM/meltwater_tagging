@@ -23,6 +23,7 @@ from playwright.async_api import async_playwright
 from apply_tags import (
     SELECTORS, norm_permalink, get_card_permalink, card_existing_tag,
     expand_similar_if_needed, apply_tag_to_card,
+    build_post_fallback, resolve_target, reddit_post_id, log_card_links,
 )
 import config
 from logging_setup import get_logger
@@ -358,10 +359,25 @@ async def _scroll_feed(page):
 async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
     """Shared feed-walking loop used by both the login-based and
     session-based apply paths. Assumes `page` is already on the topic feed
-    and authenticated."""
+    and authenticated.
+
+    `to_apply` maps a canonical permalink key -> {"tag", "orig"} where "orig" is
+    the analyst's exact source URL (so the report can be matched back to the
+    original results row on the frontend)."""
     applied, skipped_already, failed = [], [], []
-    handled = set()   # permalinks we've reached a FINAL decision on
+    handled = set()   # target KEYS we've reached a FINAL decision on
     delay = config.ACTION_DELAY_MS / 1000.0
+
+    # Post-id fallback: lets a comment-URL target still match when Meltwater
+    # surfaced the parent post (or vice versa), safely (single-target posts only).
+    post_fallback = build_post_fallback(to_apply)
+    # Post ids we care about — used to trigger a DOM diagnostic on cards that
+    # belong to a targeted post but that we couldn't pin to a specific comment
+    # target (the "many comments on one post" case). Bounded so bulk runs don't
+    # flood the logs.
+    target_post_ids = {reddit_post_id(k) for k in to_apply if reddit_post_id(k)}
+    diag_dumps = 0
+    MAX_DIAG_DUMPS = 8
 
     # The feed is a heavy virtualized React app -- give it real time to render
     # results before we start scanning, and diagnose the DOM if nothing shows.
@@ -388,39 +404,63 @@ async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
                 continue  # detached mid-read; ignore, it'll re-render
             if permalink:
                 seen_any.add(permalink)
-            if not permalink or permalink not in to_apply or permalink in handled:
+            if not permalink:
                 continue
-            tag = to_apply[permalink]
+            target_key, val = resolve_target(permalink, to_apply, post_fallback)
+            if target_key is None:
+                # Card belongs to a targeted post but we couldn't tie it to a
+                # specific comment target -> dump its DOM so we can find the
+                # right discriminator (comment URL / Document ID).
+                pid = reddit_post_id(permalink)
+                if pid and pid in target_post_ids and diag_dumps < MAX_DIAG_DUMPS:
+                    log.info("apply: card %s is on targeted post %s but matched no "
+                             "specific target — dumping DOM", permalink, pid)
+                    try:
+                        await log_card_links(card, note=permalink)
+                    except Exception:
+                        pass
+                    diag_dumps += 1
+                continue
+            if target_key in handled:
+                continue
+            tag = val["tag"]
+            orig = val["orig"]
+            if target_key != permalink:
+                log.info("apply: card %s matched target %s via post-id fallback",
+                          permalink, target_key)
             try:
-                try:
-                    await expand_similar_if_needed(card)
-                except Exception:
-                    pass  # "Similar" expansion is best-effort, never fatal
-
+                # Check the card's OWN visible tags BEFORE expanding "Similar" --
+                # expanding pulls a duplicate mention's DOM (and its tags) into the
+                # card, which otherwise causes a false "already tagged" skip.
                 existing = None
                 try:
                     existing = await card_existing_tag(card)
                 except Exception:
                     pass
                 if existing:
-                    log.info("apply: %s already tagged (%s) — skipping", permalink, existing)
-                    skipped_already.append({"permalink": permalink, "existing_tags": existing})
-                    handled.add(permalink)
+                    log.info("apply: %s already tagged (%s) — skipping", orig, existing)
+                    skipped_already.append({"permalink": orig, "existing_tags": existing})
+                    handled.add(target_key)
                     continue
+
+                try:
+                    await expand_similar_if_needed(card)
+                except Exception:
+                    pass  # "Similar" expansion is best-effort, never fatal
 
                 ok = await apply_tag_to_card(page, card, tag, dry_run=False, delay=delay)
                 if ok:
-                    log.info("apply: tagged %s -> %s", permalink, tag)
-                    applied.append({"permalink": permalink, "tag": tag})
+                    log.info("apply: tagged %s -> %s", orig, tag)
+                    applied.append({"permalink": orig, "tag": tag})
                 else:
                     log.warning("apply: could not tag %s -> %s (see [card-buttons]/[tag-modal] logs)",
-                                 permalink, tag)
-                    failed.append({"permalink": permalink, "tag": tag})
-                handled.add(permalink)
+                                 orig, tag)
+                    failed.append({"permalink": orig, "tag": tag})
+                handled.add(target_key)
             except Exception as e:
                 # Stale/detached element mid-action -> don't mark handled, retry.
                 log.warning("apply: transient error on %s (%s: %s) — will retry",
-                             permalink, type(e).__name__, e)
+                             orig, type(e).__name__, e)
 
         # Scroll the Virtuoso list's own scroll container (page.mouse.wheel does
         # NOT move it -- it has an internal overflow scroller). Scroll by ~80%
@@ -438,7 +478,7 @@ async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
                    rounds, len(seen_any), len(handled), len(to_apply), no_new_rounds)
 
     log.info("apply: scanned %d distinct posts over %d rounds", len(seen_any), rounds)
-    unreached = [link for link in to_apply if link not in handled]
+    unreached = [to_apply[k]["orig"] for k in to_apply if k not in handled]
     if unreached:
         log.warning("apply: %d target post(s) were never found in the feed: %s",
                      len(unreached), unreached[:5])
@@ -452,6 +492,20 @@ async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
         "failed": failed,
         "unreached": unreached,
     }
+
+
+def _build_to_apply(results: list[dict]) -> dict:
+    """Canonical-key -> {"tag", "orig"} map for every applyable result. `orig`
+    keeps the analyst's exact source URL so the apply report can be matched back
+    to the original results row (per-post 'Applied' status on the frontend)."""
+    to_apply = {}
+    for r in results:
+        if r.get("action") == "apply" and r.get("tag") and r.get("permalink"):
+            key = norm_permalink(r["permalink"])
+            # First writer wins if two source rows canonicalize to the same key
+            # (e.g. duplicate URLs) — they carry the same tag anyway.
+            to_apply.setdefault(key, {"tag": r["tag"], "orig": r["permalink"]})
+    return to_apply
 
 
 def _check_apply_inputs(to_apply: dict, topic_url: str) -> dict | None:
@@ -471,7 +525,7 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
     tags posts. results: classification results, each with permalink/tag/action.
     Only entries with action == 'apply' and a non-empty tag are actually applied.
     """
-    to_apply = {norm_permalink(r["permalink"]): r["tag"] for r in results if r.get("action") == "apply" and r.get("tag")}
+    to_apply = _build_to_apply(results)
     log.info("apply_results_to_meltwater: %d posts to tag, topic_url=%s", len(to_apply), topic_url)
     bad_input = _check_apply_inputs(to_apply, topic_url)
     if bad_input:
@@ -509,7 +563,7 @@ async def apply_via_session(storage_value: str, topic_url: str, results: list[di
     Requires a value the user copied from their own browser's
     Application -> Local Storage -> app.meltwater.com -> AUTH0_STORAGE_KEY.
     """
-    to_apply = {norm_permalink(r["permalink"]): r["tag"] for r in results if r.get("action") == "apply" and r.get("tag")}
+    to_apply = _build_to_apply(results)
     log.info("apply_via_session: %d posts to tag, topic_url=%s", len(to_apply), topic_url)
     bad_input = _check_apply_inputs(to_apply, topic_url)
     if bad_input:

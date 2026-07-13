@@ -181,3 +181,5 @@ td a:hover{text-decoration:underline}
 .chip.positive{background:rgba(37,208,160,.16);color:var(--pos);border:1px solid rgba(37,208,160,.3)}
 .chip.neutral{background:rgba(138,160,200,.14);color:var(--neu);border:1px solid rgba(138,160,200,.3)}
 .chip.flag{background:rgba(255,190,80,.14);color:#ffbe50;border:1px solid rgba(255,190,80,.3)}
+.chip.type-post{background:rgba(138,160,200,.12);color:#aab6d4;border:1px solid rgba(138,160,200,.28)}
+.chip.type-comment{background:rgba(120,180,255,.14);color:#8bb8ff;border:1px solid rgba(120,180,255,.32)}

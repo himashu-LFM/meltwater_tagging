@@ -143,10 +143,15 @@ function renderResults(data) {
     const s = (r.sentiment || "").toLowerCase();
     const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
     const chipText = r.tag ? s : (r.flag_brand ? `flag → ${r.flag_brand}` : r.action);
+    const ctype = (r.content_type || deriveContentType(r.permalink)).toLowerCase();
+    const typeChip = ctype === "comment"
+      ? '<span class="chip type-comment">💬 Comment</span>'
+      : '<span class="chip type-post">📄 Post</span>';
     const tr = document.createElement("tr");
     tr.style.animationDelay = (idx * 30) + "ms";
     tr.innerHTML = `
       <td>${idx + 1}</td>
+      <td>${typeChip}</td>
       <td><span class="chip ${cls}">${escapeHtml(chipText || "—")}</span></td>
       <td>${escapeHtml(r.tag || "—")}</td>
       <td class="reason">${escapeHtml(r.reason || "")}</td>
@@ -157,6 +162,20 @@ function renderResults(data) {
 }
 
 function shorten(u) { return u.length > 60 ? u.slice(0, 57) + "…" : u; }
+// Mirrors classify.py reddit_ids: comment URL if it has /comment/<id> or a
+// trailing base36 id after the title slug. Used as a fallback when a result
+// has no stored content_type (older runs).
+function deriveContentType(url) {
+  if (!url || url.indexOf("reddit.com") === -1) return "post";
+  const clean = String(url).split("?")[0].split("#")[0];
+  const m = clean.match(/\/comments\/([a-z0-9]+)/i);
+  if (!m) return "post";
+  if (/\/comment\/[a-z0-9]+/i.test(clean)) return "comment";
+  const after = clean.slice(m.index + m[0].length);
+  const segs = after.split("/").filter(Boolean);
+  if (segs.length >= 2 && /^[a-z0-9]{4,}$/i.test(segs[segs.length - 1])) return "comment";
+  return "post";
+}
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }

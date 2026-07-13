@@ -20,7 +20,7 @@ sys.path.insert(0, _THIS_DIR)
 import httpx
 
 import config
-from classify import _reddit_text
+from classify import enrich_from_reddit_payload, set_plain_text
 from logging_setup import get_logger
 
 log = get_logger("fetchers")
@@ -30,7 +30,7 @@ async def fetch_via_reddit_cookie(posts: list[dict], cookie_value: str) -> list[
     if not cookie_value:
         log.warning("fetch_via_reddit_cookie: no cookie provided — using Meltwater excerpts only for %d posts", len(posts))
         for p in posts:
-            p["text"] = p.get("excerpt", "")
+            set_plain_text(p, p.get("excerpt", ""))
         return posts
 
     cookies = {"reddit_session": cookie_value}
@@ -46,19 +46,20 @@ async def fetch_via_reddit_cookie(posts: list[dict], cookie_value: str) -> list[
                     if "reddit.com" in url:
                         r = await client.get(url.rstrip("/") + "/.json", follow_redirects=True, timeout=20)
                         if r.status_code == 200:
-                            p["text"] = _reddit_text(r.json()) or p.get("excerpt", "")
+                            enrich_from_reddit_payload(p, r.json(), p.get("excerpt", ""))
                         else:
                             log.warning("reddit cookie fetch got status=%s for %s", r.status_code, url)
                             failures += 1
-                            p["text"] = p.get("excerpt", "")
+                            set_plain_text(p, p.get("excerpt", ""))
                     else:
                         r = await client.get(url, follow_redirects=True, timeout=20)
                         text = re.sub(r"<[^>]+>", " ", r.text) if r.status_code == 200 else ""
-                        p["text"] = re.sub(r"\s+", " ", text).strip()[: config.MAX_POST_CHARS] or p.get("excerpt", "")
+                        text = re.sub(r"\s+", " ", text).strip()[: config.MAX_POST_CHARS]
+                        set_plain_text(p, text or p.get("excerpt", ""))
                 except Exception as e:
                     log.warning("reddit cookie fetch error for %s: %s: %s", url, type(e).__name__, e)
                     failures += 1
-                    p["text"] = p.get("excerpt", "")
+                    set_plain_text(p, p.get("excerpt", ""))
             return p
 
         posts = await asyncio.gather(*[one(p) for p in posts])
