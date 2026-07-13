@@ -176,6 +176,34 @@ async def fetch_full_text(client: httpx.AsyncClient, url: str, fallback: str) ->
     return fallback
 
 
+async def fetch_and_enrich(client: httpx.AsyncClient, p: dict) -> dict:
+    """Fetch a post dict's text and populate content_type / post_text /
+    comment_text / text (post vs comment aware). Used by the web anon path."""
+    url = p.get("permalink", "")
+    fallback = p.get("excerpt", "") or ""
+    try:
+        if url and "reddit.com" in url:
+            payload = await _get_reddit_json(client, url)
+            if payload:
+                enrich_from_reddit_payload(p, payload, fallback)
+                return p
+        elif url:
+            await _throttle()
+            r = await client.get(
+                url, headers={"User-Agent": config.BROWSER_UA},
+                follow_redirects=True, timeout=20,
+            )
+            if r.status_code == 200:
+                text = re.sub(r"<[^>]+>", " ", r.text)
+                text = re.sub(r"\s+", " ", text).strip()[: config.MAX_POST_CHARS]
+                set_plain_text(p, text or fallback)
+                return p
+    except Exception:
+        pass
+    set_plain_text(p, fallback)
+    return p
+
+
 def _reddit_text(payload) -> str:
     parts = []
     try:
@@ -195,6 +223,119 @@ def _reddit_text(payload) -> str:
     except Exception:
         pass
     return "\n\n".join(parts)[: config.MAX_POST_CHARS]
+
+
+def reddit_ids(url: str):
+    """(post_id, comment_id or None) from a Reddit URL. Handles both the
+    /comments/<post>/comment/<cid>/ and older /comments/<post>/<slug>/<cid>/
+    forms (mirrors norm_permalink so classification and apply agree)."""
+    if not url or not isinstance(url, str) or "reddit.com" not in url:
+        return None, None
+    clean = url.split("?")[0].split("#")[0]
+    m = re.search(r"/comments/([a-z0-9]+)", clean, re.I)
+    if not m:
+        return None, None
+    post_id = m.group(1).lower()
+    cm = re.search(r"/comment/([a-z0-9]+)", clean, re.I)
+    if cm:
+        return post_id, cm.group(1).lower()
+    after = clean[m.end():]
+    segs = [s for s in after.split("/") if s]
+    if len(segs) >= 2 and re.fullmatch(r"[a-z0-9]{4,}", segs[-1], re.I):
+        return post_id, segs[-1].lower()
+    return post_id, None
+
+
+def reddit_content_type(url: str) -> str:
+    """'comment' if the URL points at a specific comment, else 'post'
+    (non-Reddit sources are treated as standalone posts)."""
+    _, cid = reddit_ids(url)
+    return "comment" if cid else "post"
+
+
+def _reddit_post_selftext(payload) -> str:
+    """Just the parent post's title + selftext (no thread comments)."""
+    parts = []
+    try:
+        d = payload[0]["data"]["children"][0]["data"]
+        if d.get("title"):
+            parts.append(d["title"])
+        if d.get("selftext"):
+            parts.append(d["selftext"])
+    except Exception:
+        pass
+    return "\n\n".join(parts)[: config.MAX_POST_CHARS]
+
+
+def _find_comment_body(node: dict, cid: str) -> str:
+    """Depth-first search for a specific comment id's body in a Reddit comment
+    listing tree (walks nested replies)."""
+    data = node.get("data", {}) if isinstance(node, dict) else {}
+    if str(data.get("id", "")).lower() == cid and data.get("body"):
+        return data["body"]
+    replies = data.get("replies")
+    if isinstance(replies, dict):
+        for ch in replies.get("data", {}).get("children", []):
+            found = _find_comment_body(ch, cid)
+            if found:
+                return found
+    return ""
+
+
+def reddit_parts(payload, url: str):
+    """Return (post_text, comment_text, content_type) from a Reddit .json payload.
+
+    For a comment URL, comment_text is the SPECIFIC comment's body and post_text
+    is the parent post — kept separate so the classifier judges the comment on
+    its own content with the post only as context. For a post URL, comment_text
+    is empty and post_text is the post itself."""
+    post_id, cid = reddit_ids(url)
+    post_text = _reddit_post_selftext(payload)
+    comment_text = ""
+    if cid and isinstance(payload, list) and len(payload) > 1:
+        try:
+            for ch in payload[1]["data"]["children"]:
+                comment_text = _find_comment_body(ch, cid)
+                if comment_text:
+                    break
+            if not comment_text:  # fallback: the focused listing's first comment
+                first = payload[1]["data"]["children"][0]["data"]
+                comment_text = first.get("body", "") or ""
+        except Exception:
+            pass
+        comment_text = comment_text[: config.MAX_POST_CHARS]
+    return post_text, comment_text, ("comment" if cid else "post")
+
+
+def enrich_from_reddit_payload(p: dict, payload, fallback: str = "") -> None:
+    """Populate a post dict's content_type / post_text / comment_text / text
+    from a Reddit .json payload. `text` stays a sensible combined string for
+    backward compatibility (and as the classifier's fallback)."""
+    post_text, comment_text, ctype = reddit_parts(payload, p.get("permalink", ""))
+    p["content_type"] = ctype
+    p["post_text"] = post_text or fallback
+    p["comment_text"] = comment_text
+    if ctype == "comment":
+        p["text"] = (f"[PARENT POST]\n{post_text}\n\n[COMMENT]\n{comment_text}".strip()
+                     or fallback)
+    else:
+        p["text"] = post_text or fallback
+
+
+def set_plain_text(p: dict, text: str) -> None:
+    """For non-Reddit sources, or when the Reddit JSON fetch failed and only the
+    Meltwater excerpt is available. A Meltwater excerpt for a comment mention is
+    the comment's own text, so route it to comment_text in that case."""
+    text = text or ""
+    ctype = reddit_content_type(p.get("permalink", ""))
+    p["content_type"] = ctype
+    p["text"] = text
+    if ctype == "comment":
+        p["post_text"] = ""          # no separate parent text available in fallback
+        p["comment_text"] = text
+    else:
+        p["post_text"] = text
+        p["comment_text"] = ""
 
 
 # --- Classification --------------------------------------------------------
@@ -287,15 +428,15 @@ async def fetch_via_browser(posts):
                         await page.goto(url.rstrip("/") + "/.json", wait_until="domcontentloaded", timeout=30000)
                         body = await page.evaluate("() => document.body.innerText")
                         try:
-                            p["text"] = _reddit_text(json.loads(body)) or p.get("excerpt", "")
+                            enrich_from_reddit_payload(p, json.loads(body), p.get("excerpt", ""))
                         except Exception:
-                            p["text"] = p.get("excerpt", "")
+                            set_plain_text(p, p.get("excerpt", ""))
                     else:
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                         txt = await page.evaluate("() => document.body.innerText")
-                        p["text"] = (txt or "").strip()[: config.MAX_POST_CHARS] or p.get("excerpt", "")
+                        set_plain_text(p, (txt or "").strip()[: config.MAX_POST_CHARS] or p.get("excerpt", ""))
                 except Exception:
-                    p["text"] = p.get("excerpt", "")
+                    set_plain_text(p, p.get("excerpt", ""))
                 finally:
                     await page.close()
             return p
@@ -332,15 +473,15 @@ async def fetch_via_cdp(posts):
                         await page.goto(url.rstrip("/") + "/.json", wait_until="domcontentloaded", timeout=30000)
                         body = await page.evaluate("() => document.body.innerText")
                         try:
-                            p["text"] = _reddit_text(json.loads(body)) or p.get("excerpt", "")
+                            enrich_from_reddit_payload(p, json.loads(body), p.get("excerpt", ""))
                         except Exception:
-                            p["text"] = p.get("excerpt", "")
+                            set_plain_text(p, p.get("excerpt", ""))
                     else:
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                         txt = await page.evaluate("() => document.body.innerText")
-                        p["text"] = (txt or "").strip()[: config.MAX_POST_CHARS] or p.get("excerpt", "")
+                        set_plain_text(p, (txt or "").strip()[: config.MAX_POST_CHARS] or p.get("excerpt", ""))
                 except Exception:
-                    p["text"] = p.get("excerpt", "")
+                    set_plain_text(p, p.get("excerpt", ""))
                 finally:
                     await page.close()
             return p
