@@ -61,9 +61,14 @@ def run_async(coro):
 
     def _ignore_closed(lp, context):
         exc = context.get("exception")
-        msg = context.get("message", "") or (str(exc) if exc else "")
-        if "Event loop is closed" in msg:
-            return  # benign Windows Proactor teardown noise
+        # Check BOTH the context message and the exception text. httpx/anyio can
+        # tear a connection down after this per-request loop is already closed,
+        # surfacing as a GC'd task whose message is "Task exception was never
+        # retrieved" but whose exception is RuntimeError('Event loop is closed').
+        msg = context.get("message", "") or ""
+        exc_str = str(exc) if exc else ""
+        if "Event loop is closed" in msg or "Event loop is closed" in exc_str:
+            return  # benign async teardown noise
         lp.default_exception_handler(context)
 
     loop.set_exception_handler(_ignore_closed)
