@@ -1,0 +1,10 @@
+# Keep the Docker build context small and free of local-only junk.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+meltwater_tagger/.venv
+meltwater_tagger/.mw_browser_profile
+meltwater_tagger/results
+extracted_skill
+*.xlsx
