@@ -8,36 +8,39 @@
 # the browser is never installed and every /api/apply fails at runtime with
 # "Executable doesn't exist".
 #
+# NOTE: we do NOT use "--with-deps" — that shells out to apt-get via su/sudo,
+# which Render's native (non-root) build environment refuses ("su:
+# Authentication failure"), aborting the whole build. We install only the
+# browser binary (no root needed). Render's base image is expected to already
+# provide Chromium's shared libraries; the non-fatal check at the end reports
+# if any are missing so we can see it in the build log without breaking deploy.
+#
 # Use "python -m playwright" (not the bare "playwright" CLI) so the install
-# always targets the same Python environment gunicorn will run under — a bare
-# "playwright" on PATH can resolve to a different interpreter/venv on Render's
-# build image, which downloads browsers into a cache the running app never
-# looks at (this is the #1 cause of "Executable doesn't exist" at runtime).
+# always targets the same Python environment gunicorn will run under.
 set -euo pipefail
 
 pip install -r requirements.txt
 
-# Install the Chromium build Playwright needs. Prefer WITH system deps (works
-# when the build runs as root), but fall back to the browser-only install if
-# that fails — Render's native builds aren't root and can't apt-get, and a
-# failing --with-deps must NOT abort the whole build and leave us with no
-# browser at all. The Render base image already ships the common shared libs.
-python -m playwright install --with-deps chromium \
-  || python -m playwright install chromium
+# Browser-only install (no system deps, no root).
+python -m playwright install chromium
 
-# Verify the browser can ACTUALLY launch headless (exactly what apply does), so
-# a broken/mismatched install fails the BUILD loudly and early instead of every
-# apply request at runtime. Prints the resolved path for debugging.
-python - <<'PY'
-import sys
+# Non-fatal launch check: prints the resolved path and whether headless Chromium
+# actually starts. Never fails the build — so classification stays deployed even
+# if apply's browser can't launch, and the build log shows exactly what's wrong
+# (e.g. "error while loading shared libraries: libnss3.so").
+python - <<'PY' || true
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as p:
     print("Playwright chromium executable:", p.chromium.executable_path, flush=True)
     try:
-        browser = p.chromium.launch(headless=True)
-        browser.close()
+        b = p.chromium.launch(headless=True)
+        b.close()
+        print("OK: headless Chromium launches — apply should work.", flush=True)
     except Exception as e:
-        sys.exit(f"FATAL: Chromium did not launch after install: {e}")
-print("OK: headless Chromium is installed and launches.", flush=True)
+        print("WARNING: Chromium is installed but did NOT launch on this image.",
+              flush=True)
+        print("  -> apply will fail until the missing system libraries are "
+              "provided (consider the Docker/Playwright-image deploy).", flush=True)
+        print(f"  -> details: {e}", flush=True)
 PY
