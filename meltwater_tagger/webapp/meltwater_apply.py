@@ -356,6 +356,224 @@ async def _scroll_feed(page):
             pass
 
 
+async def _scroll_to_top(page):
+    """Reset the Virtuoso scroller to the top so a fresh top-to-bottom pass sees
+    the whole feed again (used between the exact-match and Similar-expansion
+    passes)."""
+    try:
+        await page.evaluate("""() => {
+            const s = document.querySelector('[data-testid="virtuoso-scroller"]')
+                || document.scrollingElement || document.documentElement;
+            if (s) s.scrollTop = 0;
+        }""")
+        await asyncio.sleep(1.0)
+    except Exception as e:
+        log.debug("apply: scroll-to-top failed (%s) — continuing", e)
+
+
+# Every individually-taggable mention (a top-level post AND each expanded
+# "Similar" sub-post) has its own "Open article in new tab" control. We use that
+# as the per-mention anchor: the smallest ancestor of a post link that contains
+# exactly one such control IS that mention's own card — which is the element we
+# must hover + tag. This is what stops a similar sub-post from being tagged on
+# its parent.
+OPEN_ARTICLE_SEL = '[aria-label*="Open article in new tab" i]'
+
+
+async def _candidate_cards(page, include_nested: bool):
+    """Elements to consider this round.
+
+    - Not expanded: the top-level virtualized list items, as-is.
+    - Expanded ("Similar" groups open): one element PER MENTION, derived by
+      climbing from each post link to the smallest ancestor that owns its own
+      "Open article in new tab" control. This yields the parent's own card AND
+      each similar sub-post's own card as separate elements, so the exact
+      sub-post gets hovered and tagged instead of its parent."""
+    top = list(await page.query_selector_all(CARD_SELECTOR))
+    if not include_nested:
+        return top
+
+    try:
+        arr = await page.evaluate_handle(
+            """(OPEN) => {
+                const seen = new Set();
+                const cards = [];
+                document.querySelectorAll('a[href]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    if (!href || href.indexOf('meltwater') !== -1) return;
+                    if (!/reddit\\.com|^https?:/i.test(href)) return;
+                    // 1) smallest ancestor that owns an "Open article" control
+                    let base = a;
+                    while (base && base !== document.body) {
+                        if (base.querySelector && base.querySelector(OPEN)) break;
+                        base = base.parentElement;
+                    }
+                    if (!base || base === document.body) return;
+                    // 2) climb UP while the element still wraps exactly ONE
+                    //    mention (one Open-article control). The largest such
+                    //    ancestor is the full mention card — body PLUS its hover
+                    //    toolbar (where the Tag icon lives) — but never the group
+                    //    container, which would hold 2+ Open-article controls.
+                    let card = base, p = base.parentElement;
+                    while (p && p !== document.body &&
+                           p.querySelectorAll(OPEN).length === 1) {
+                        card = p; p = p.parentElement;
+                    }
+                    if (!seen.has(card)) { seen.add(card); cards.push(card); }
+                });
+                return cards;
+            }""",
+            OPEN_ARTICLE_SEL,
+        )
+        props = await arr.get_properties()
+        cards = []
+        for _, h in props.items():
+            el = h.as_element()
+            if el is not None:
+                cards.append(el)
+        await arr.dispose()
+        if cards:
+            log.debug("apply[expand]: derived %d per-mention card(s) from post links", len(cards))
+            return cards
+    except Exception as e:
+        log.debug("apply[expand]: per-mention derivation failed (%s) — falling back to list items", e)
+    return top
+
+
+async def _tag_matched_card(page, card, target_key, val, delay,
+                            applied, skipped_already, failed, handled) -> None:
+    """Apply the tag to a card already matched to a target: honour an existing
+    tag (skip, never override), otherwise tag it, and record the outcome. On a
+    transient/stale-element error the target is left un-handled so a later round
+    retries it."""
+    tag = val["tag"]
+    orig = val["orig"]
+    try:
+        # Read the card's OWN visible tags first — a genuinely-applied tag shows
+        # a visible "Remove [tag]" chip.
+        existing = None
+        try:
+            existing = await card_existing_tag(card)
+        except Exception:
+            pass
+        if existing:
+            log.info("apply: %s already tagged (%s) — skipping", orig, existing)
+            skipped_already.append({"permalink": orig, "existing_tags": existing})
+            handled.add(target_key)
+            return
+
+        ok = await apply_tag_to_card(page, card, tag, dry_run=False, delay=delay)
+        if ok:
+            log.info("apply: tagged %s -> %s", orig, tag)
+            applied.append({"permalink": orig, "tag": tag})
+        else:
+            log.warning("apply: could not tag %s -> %s (see [card-buttons]/[tag-modal] logs)",
+                         orig, tag)
+            failed.append({"permalink": orig, "tag": tag})
+        handled.add(target_key)
+    except Exception as e:
+        # Stale/detached element mid-action -> don't mark handled, retry later.
+        log.warning("apply: transient error on %s (%s: %s) — will retry",
+                     orig, type(e).__name__, e)
+
+
+async def _scan_feed(page, to_apply, handled, delay, applied, skipped_already, failed,
+                     *, expand_similar, use_fallback, post_fallback, similar_pids):
+    """One disciplined top-to-bottom pass over the virtualized feed.
+
+    - expand_similar: open every collapsed "Similar articles" group in view
+      before scanning, so its sub-posts render and become matchable.
+    - use_fallback: allow the Reddit post-id fallback (comment<->post
+      granularity). When False, only an EXACT permalink match tags a card.
+
+    Records into `similar_pids` the post-id of every card that carries a
+    Similar group, so the caller can keep the post-id fallback from ever tagging
+    the parent of a grouped post."""
+    seen_any = set()
+    no_new_rounds = 0
+    rounds = 0
+    MAX_ROUNDS = 120
+    label = "expand" if expand_similar else ("fallback" if use_fallback else "exact")
+    while no_new_rounds < 4 and rounds < MAX_ROUNDS and len(handled) < len(to_apply):
+        rounds += 1
+        before_seen = len(seen_any)
+
+        if expand_similar:
+            # The collapsed-state selector never matches an already-open group,
+            # so clicking every match can only OPEN groups, never re-collapse one.
+            toggles = await page.query_selector_all(SELECTORS["similar_collapsed"])
+            if toggles:
+                log.info("apply[expand]: opening %d Similar group(s) in view", len(toggles))
+            for t in toggles:
+                try:
+                    await t.click()
+                    await asyncio.sleep(0.4)
+                except Exception:
+                    pass
+
+        cards = await _candidate_cards(page, include_nested=expand_similar)
+        for card in cards:
+            # Note Similar-group parents (before they're expanded) so the
+            # post-id fallback can never tag the parent of a grouped post.
+            try:
+                has_similar = await card.query_selector(SELECTORS["similar_collapsed"])
+            except Exception:
+                has_similar = None
+            try:
+                permalink = await get_card_permalink(card)
+            except Exception:
+                continue  # detached mid-read; ignore, it'll re-render
+            if not permalink:
+                continue
+            seen_any.add(permalink)
+            if has_similar:
+                pid = reddit_post_id(permalink)
+                if pid:
+                    similar_pids.add(pid)
+
+            target_key, val = resolve_target(
+                permalink, to_apply, post_fallback if use_fallback else {})
+            if target_key is None or target_key in handled:
+                continue
+            if target_key != permalink:
+                log.info("apply: card %s matched target %s via post-id fallback",
+                          permalink, target_key)
+            if expand_similar:
+                # Confirm WHICH element we're about to tag (its own links should
+                # be just this sub-post's — if they include a different post's,
+                # we resolved to the wrong container and the log will show it).
+                try:
+                    desc = await card.evaluate(
+                        """el => ({
+                            tag: el.tagName,
+                            testid: el.getAttribute('data-testid'),
+                            cls: (el.className || '').toString().slice(0, 60),
+                            links: [...el.querySelectorAll('a[href]')]
+                                .map(a => a.getAttribute('href'))
+                                .filter(h => h && h.indexOf('meltwater') === -1).slice(0, 6),
+                            hasTagIcon: !!el.querySelector('[aria-label=\"Tag\"],[title=\"Tag\"],'
+                                + '[data-testid=\"LocalOfferIcon\"],[data-testid=\"SellIcon\"]'),
+                        })""")
+                    log.info("apply[expand]: tagging element for %s -> %s | element=%s",
+                              val["orig"], target_key, desc)
+                except Exception:
+                    pass
+            await _tag_matched_card(page, card, target_key, val, delay,
+                                    applied, skipped_already, failed, handled)
+            if len(handled) >= len(to_apply):
+                break
+
+        await _scroll_feed(page)
+        await asyncio.sleep(1.2)
+        if len(seen_any) == before_seen:
+            no_new_rounds += 1
+        else:
+            no_new_rounds = 0
+        log.debug("apply[%s]: round %d — seen=%d handled=%d/%d no_new=%d",
+                   label, rounds, len(seen_any), len(handled), len(to_apply), no_new_rounds)
+    return seen_any
+
+
 async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
     """Shared feed-walking loop used by both the login-based and
     session-based apply paths. Assumes `page` is already on the topic feed
@@ -363,121 +581,56 @@ async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
 
     `to_apply` maps a canonical permalink key -> {"tag", "orig"} where "orig" is
     the analyst's exact source URL (so the report can be matched back to the
-    original results row on the frontend)."""
+    original results row on the frontend).
+
+    Search order (mirrors how an analyst finds a post in Meltwater):
+      1. EXACT URL match against the top-level feed.
+      2. Anything still not found -> open each post's "Similar articles" group
+         in turn and match the revealed sub-posts by exact URL. This is what
+         fixes a similar sub-post being tagged on its PARENT instead.
+      3. Only then, for posts with NO Similar group, the Reddit post-id fallback
+         (comment<->post granularity) — never for a grouped post, so the parent
+         of a Similar group is never tagged in place of the real sub-post."""
     applied, skipped_already, failed = [], [], []
     handled = set()   # target KEYS we've reached a FINAL decision on
     delay = config.ACTION_DELAY_MS / 1000.0
-
-    # Post-id fallback: lets a comment-URL target still match when Meltwater
-    # surfaced the parent post (or vice versa), safely (single-target posts only).
     post_fallback = build_post_fallback(to_apply)
-    # Post ids we care about — used to trigger a DOM diagnostic on cards that
-    # belong to a targeted post but that we couldn't pin to a specific comment
-    # target (the "many comments on one post" case). Bounded so bulk runs don't
-    # flood the logs.
-    target_post_ids = {reddit_post_id(k) for k in to_apply if reddit_post_id(k)}
-    diag_dumps = 0
-    MAX_DIAG_DUMPS = 8
+    similar_pids = set()   # post-ids of cards that expose a "Similar" group
 
     # The feed is a heavy virtualized React app -- give it real time to render
     # results before we start scanning, and diagnose the DOM if nothing shows.
     await _wait_for_feed_and_diagnose(page)
 
-    # Target-driven + virtualization-resilient: Meltwater's Virtuoso list keeps
-    # only ~3 cards in the DOM and recycles them as you scroll, so held element
-    # handles go stale ("not attached to the DOM"). We therefore (a) re-query
-    # cards fresh every round, (b) only act on cards that are actually in our
-    # to-tag list, and (c) wrap every per-card action so a stale element just
-    # gets retried on a later round instead of crashing the whole run.
-    seen_any = set()          # every permalink encountered (for scroll progress)
-    no_new_rounds = 0         # consecutive rounds where no NEW card appeared
-    rounds = 0
-    MAX_ROUNDS = 120
-    while no_new_rounds < 4 and rounds < MAX_ROUNDS and len(handled) < len(to_apply):
-        rounds += 1
-        before_seen = len(seen_any)
-        cards = await page.query_selector_all(CARD_SELECTOR)
-        for card in cards:
-            try:
-                permalink = await get_card_permalink(card)
-            except Exception:
-                continue  # detached mid-read; ignore, it'll re-render
-            if permalink:
-                seen_any.add(permalink)
-            if not permalink:
-                continue
-            target_key, val = resolve_target(permalink, to_apply, post_fallback)
-            if target_key is None:
-                # Card belongs to a targeted post but we couldn't tie it to a
-                # specific comment target -> dump its DOM so we can find the
-                # right discriminator (comment URL / Document ID).
-                pid = reddit_post_id(permalink)
-                if pid and pid in target_post_ids and diag_dumps < MAX_DIAG_DUMPS:
-                    log.info("apply: card %s is on targeted post %s but matched no "
-                             "specific target — dumping DOM", permalink, pid)
-                    try:
-                        await log_card_links(card, note=permalink)
-                    except Exception:
-                        pass
-                    diag_dumps += 1
-                continue
-            if target_key in handled:
-                continue
-            tag = val["tag"]
-            orig = val["orig"]
-            if target_key != permalink:
-                log.info("apply: card %s matched target %s via post-id fallback",
-                          permalink, target_key)
-            try:
-                # Check the card's OWN visible tags BEFORE expanding "Similar" --
-                # expanding pulls a duplicate mention's DOM (and its tags) into the
-                # card, which otherwise causes a false "already tagged" skip.
-                existing = None
-                try:
-                    existing = await card_existing_tag(card)
-                except Exception:
-                    pass
-                if existing:
-                    log.info("apply: %s already tagged (%s) — skipping", orig, existing)
-                    skipped_already.append({"permalink": orig, "existing_tags": existing})
-                    handled.add(target_key)
-                    continue
+    # --- STAGE 1: exact URL match against the top-level feed --------------------
+    seen = await _scan_feed(
+        page, to_apply, handled, delay, applied, skipped_already, failed,
+        expand_similar=False, use_fallback=False,
+        post_fallback=post_fallback, similar_pids=similar_pids)
 
-                try:
-                    await expand_similar_if_needed(card)
-                except Exception:
-                    pass  # "Similar" expansion is best-effort, never fatal
+    # --- STAGE 2: open each post's Similar group and match the sub-posts --------
+    if len(handled) < len(to_apply):
+        log.info("apply: %d target(s) not found at top level — opening Similar "
+                  "groups and re-scanning", len(to_apply) - len(handled))
+        await _scroll_to_top(page)
+        seen |= await _scan_feed(
+            page, to_apply, handled, delay, applied, skipped_already, failed,
+            expand_similar=True, use_fallback=False,
+            post_fallback=post_fallback, similar_pids=similar_pids)
 
-                ok = await apply_tag_to_card(page, card, tag, dry_run=False, delay=delay)
-                if ok:
-                    log.info("apply: tagged %s -> %s", orig, tag)
-                    applied.append({"permalink": orig, "tag": tag})
-                else:
-                    log.warning("apply: could not tag %s -> %s (see [card-buttons]/[tag-modal] logs)",
-                                 orig, tag)
-                    failed.append({"permalink": orig, "tag": tag})
-                handled.add(target_key)
-            except Exception as e:
-                # Stale/detached element mid-action -> don't mark handled, retry.
-                log.warning("apply: transient error on %s (%s: %s) — will retry",
-                             orig, type(e).__name__, e)
+    # --- STAGE 3: post-id fallback, but NEVER for a Similar-group post ----------
+    if len(handled) < len(to_apply):
+        safe_fallback = {pid: v for pid, v in post_fallback.items()
+                         if pid not in similar_pids}
+        if safe_fallback:
+            log.info("apply: %d still missing — trying comment<->post fallback for "
+                      "%d non-grouped post(s)", len(to_apply) - len(handled), len(safe_fallback))
+            await _scroll_to_top(page)
+            seen |= await _scan_feed(
+                page, to_apply, handled, delay, applied, skipped_already, failed,
+                expand_similar=False, use_fallback=True,
+                post_fallback=safe_fallback, similar_pids=similar_pids)
 
-        # Scroll the Virtuoso list's own scroll container (page.mouse.wheel does
-        # NOT move it -- it has an internal overflow scroller). Scroll by ~80%
-        # of the viewport so new cards render into the ~3-card DOM window.
-        await _scroll_feed(page)
-        await asyncio.sleep(1.2)
-
-        # Progress = new cards appeared. When no new card shows for several
-        # rounds, we've reached the bottom of the feed.
-        if len(seen_any) == before_seen:
-            no_new_rounds += 1
-        else:
-            no_new_rounds = 0
-        log.debug("apply: round %d — seen=%d handled=%d/%d no_new=%d",
-                   rounds, len(seen_any), len(handled), len(to_apply), no_new_rounds)
-
-    log.info("apply: scanned %d distinct posts over %d rounds", len(seen_any), rounds)
+    log.info("apply: scanned %d distinct posts", len(seen))
     unreached = [to_apply[k]["orig"] for k in to_apply if k not in handled]
     if unreached:
         log.warning("apply: %d target post(s) were never found in the feed: %s",
