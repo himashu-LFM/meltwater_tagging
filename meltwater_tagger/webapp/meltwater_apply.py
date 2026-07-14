@@ -99,7 +99,7 @@ async def _wait_for_feed_and_diagnose(page):
         n = len(await page.query_selector_all(CARD_SELECTOR))
         log.info("feed: card selector matched %d element(s)", n)
         if n > 0:
-            return
+            return n
     except Exception:
         log.warning("feed: no cards matched CARD_SELECTOR within timeout")
 
@@ -125,6 +125,74 @@ async def _wait_for_feed_and_diagnose(page):
                      info.get("top_testids"))
     except Exception as e:
         log.warning("feed diagnostic failed: %s: %s", type(e).__name__, e)
+    return 0
+
+
+# Controls that switch Explore from the analytics/summary view to the actual
+# mentions list. Meltwater sometimes lands on the summary dashboard (KPI / top
+# sources / geo / term cards) where there are NO result cards to tag.
+MENTIONS_TAB_RE = "mentions|documents|results|content|coverage|articles|feed"
+
+
+async def _ensure_mentions_view(page) -> int:
+    """If the mentions feed isn't showing, try to switch to it.
+
+    Explore can open on the Summary/analytics view instead of the mentions
+    list. Detect that (no result cards) and click a Mentions/Documents/Results
+    tab to reveal the list. Always logs the tab/nav candidates so the exact
+    control can be pinned if the guess is wrong. Returns the resulting card
+    count."""
+    import re as _re
+    try:
+        n = len(await page.query_selector_all(CARD_SELECTOR))
+    except Exception:
+        n = 0
+    if n > 0:
+        return n
+
+    # Diagnostic: list clickable tabs/buttons so we can identify the real one.
+    try:
+        cands = await page.evaluate("""() => {
+            const out = [];
+            document.querySelectorAll('button,[role="tab"],a[href],[data-testid]').forEach(el => {
+                const t = (el.innerText || '').trim().slice(0, 30);
+                const tid = el.getAttribute('data-testid');
+                const role = el.getAttribute('role');
+                if (t || tid) out.push({t, tid, role});
+            });
+            return out.slice(0, 80);
+        }""")
+        log.info("apply: mentions-view candidates -> %s", cands)
+    except Exception:
+        pass
+
+    name_re = _re.compile(MENTIONS_TAB_RE, _re.I)
+    for getter in ("tab", "button", "link"):
+        try:
+            loc = page.get_by_role(getter, name=name_re)
+            if await loc.count() > 0:
+                await loc.first.click()
+                log.info("apply: clicked a '%s' control matching the mentions view", getter)
+                await page.wait_for_timeout(3000)
+                break
+        except Exception as e:
+            log.debug("apply: mentions-view %s click failed: %s", getter, e)
+    # last resort: a data-testid that looks like a mentions/documents list tab
+    try:
+        el = await page.query_selector(
+            '[data-testid*="mentions" i],[data-testid*="documents" i],[data-testid*="results-tab" i]'
+        )
+        if el:
+            await el.click()
+            log.info("apply: clicked a mentions/documents data-testid control")
+            await page.wait_for_timeout(3000)
+    except Exception:
+        pass
+
+    try:
+        return len(await page.query_selector_all(CARD_SELECTOR))
+    except Exception:
+        return 0
 
 
 async def _log_frames(page, label: str):
@@ -345,15 +413,19 @@ async def _scroll_feed(page):
             const s = pick();
             const before = s.scrollTop;
             s.scrollBy(0, Math.max(400, s.clientHeight * 0.8));
-            return { before, after: s.scrollTop, tag: s.tagName, testid: s.getAttribute && s.getAttribute('data-testid') };
+            return { before, after: s.scrollTop, height: s.scrollHeight,
+                     client: s.clientHeight, tag: s.tagName,
+                     testid: s.getAttribute && s.getAttribute('data-testid') };
         }""")
         log.debug("apply: scrolled feed %s", moved)
+        return moved
     except Exception as e:
         log.debug("apply: scroll failed (%s) — falling back to mouse wheel", e)
         try:
             await page.mouse.wheel(0, 3000)
         except Exception:
             pass
+    return None
 
 
 async def _scroll_to_top(page):
@@ -385,10 +457,17 @@ async def _candidate_cards(page, include_nested: bool):
 
     - Not expanded: the top-level virtualized list items, as-is.
     - Expanded ("Similar" groups open): one element PER MENTION, derived by
-      climbing from each post link to the smallest ancestor that owns its own
-      "Open article in new tab" control. This yields the parent's own card AND
-      each similar sub-post's own card as separate elements, so the exact
-      sub-post gets hovered and tagged instead of its parent."""
+      iterating every "Open article in new tab" control (there is exactly one
+      per taggable mention) and climbing to the largest ancestor that still
+      owns only THAT control. This yields the parent's own card AND each
+      similar sub-post's own card as separate elements.
+
+      Crucially, each card is stamped with `data-mw-open-href` = the href of ITS
+      OWN open-article control. That is this mention's true source URL. Keying a
+      sub-post on its own control (instead of "deepest reddit link anywhere in
+      the card") is what stops several comments of the SAME thread — which all
+      contain the same post-level links — from collapsing onto one post-level
+      key and leaving the real sub-post unmatched."""
     top = list(await page.query_selector_all(CARD_SELECTOR))
     if not include_nested:
         return top
@@ -398,28 +477,34 @@ async def _candidate_cards(page, include_nested: bool):
             """(OPEN) => {
                 const seen = new Set();
                 const cards = [];
-                document.querySelectorAll('a[href]').forEach(a => {
-                    const href = a.getAttribute('href') || '';
-                    if (!href || href.indexOf('meltwater') !== -1) return;
-                    if (!/reddit\\.com|^https?:/i.test(href)) return;
-                    // 1) smallest ancestor that owns an "Open article" control
-                    let base = a;
-                    while (base && base !== document.body) {
-                        if (base.querySelector && base.querySelector(OPEN)) break;
-                        base = base.parentElement;
-                    }
-                    if (!base || base === document.body) return;
-                    // 2) climb UP while the element still wraps exactly ONE
-                    //    mention (one Open-article control). The largest such
-                    //    ancestor is the full mention card — body PLUS its hover
-                    //    toolbar (where the Tag icon lives) — but never the group
-                    //    container, which would hold 2+ Open-article controls.
-                    let card = base, p = base.parentElement;
+                document.querySelectorAll(OPEN).forEach(ctrl => {
+                    // climb to this mention's card: largest ancestor still
+                    // wrapping exactly THIS one open-article control (its body
+                    // plus the hover toolbar where the Tag icon lives) — never
+                    // the group container, which owns 2+ such controls.
+                    let card = ctrl, p = ctrl.parentElement;
                     while (p && p !== document.body &&
                            p.querySelectorAll(OPEN).length === 1) {
                         card = p; p = p.parentElement;
                     }
-                    if (!seen.has(card)) { seen.add(card); cards.push(card); }
+                    if (!card || card === document.body || seen.has(card)) return;
+                    seen.add(card);
+                    // This mention's OWN source url comes from ITS control
+                    // specifically. The control may be the <a> itself, sit inside
+                    // one, or wrap one.
+                    const a = (ctrl.matches && ctrl.matches('a[href]')) ? ctrl
+                        : ((ctrl.closest && ctrl.closest('a[href]'))
+                           || (ctrl.querySelector && ctrl.querySelector('a[href]')));
+                    let href = a ? (a.getAttribute('href') || '') : '';
+                    // The open-article control often resolves to a Meltwater
+                    // wrapper/redirect link, NOT the post's real source URL.
+                    // Only stamp a genuine source URL; otherwise leave it unset
+                    // so _card_key falls back to the deepest reddit link in the
+                    // (now tightly-scoped) per-mention card.
+                    if (href && href.indexOf('meltwater') !== -1) href = '';
+                    if (href) card.setAttribute('data-mw-open-href', href);
+                    else card.removeAttribute('data-mw-open-href');
+                    cards.push(card);
                 });
                 return cards;
             }""",
@@ -433,11 +518,60 @@ async def _candidate_cards(page, include_nested: bool):
                 cards.append(el)
         await arr.dispose()
         if cards:
-            log.debug("apply[expand]: derived %d per-mention card(s) from post links", len(cards))
+            log.debug("apply[expand]: derived %d per-mention card(s) from open-article controls", len(cards))
             return cards
     except Exception as e:
         log.debug("apply[expand]: per-mention derivation failed (%s) — falling back to list items", e)
     return top
+
+
+async def _dump_reddit_links(page, to_apply, handled):
+    """Definitive diagnostic: after expanding Similar groups, list every reddit
+    link present anywhere on the page and report whether each still-missing
+    target's id tokens (post id + comment id) appear at all. If a target's
+    comment id is absent from every link, Meltwater simply isn't exposing that
+    sub-post's own URL in the DOM (so no key-matching change can reach it)."""
+    missing = [k for k in to_apply if k not in handled]
+    if not missing:
+        return
+    want = []
+    for k in missing:
+        want.extend(t for t in k.replace("reddit:", "").split("/") if t)
+    try:
+        links = await page.evaluate(
+            """() => [...document.querySelectorAll('a[href]')]
+                .map(a => a.getAttribute('href'))
+                .filter(h => h && h.toLowerCase().indexOf('reddit.com') !== -1)"""
+        )
+    except Exception as e:
+        log.warning("apply[diag]: could not collect reddit links: %s", e)
+        return
+    uniq = sorted(set(links or []))
+    log.info("apply[diag]: %d reddit link(s) on expanded page; want id token(s)=%s",
+             len(uniq), want)
+    for h in uniq[:60]:
+        log.info("apply[diag]: reddit link -> %s", h)
+    present = {tok: any(tok in (h or "") for h in (links or [])) for tok in want}
+    log.info("apply[diag]: target id token present-on-page -> %s", present)
+
+
+async def _card_key(card):
+    """Canonical match key for a candidate card.
+
+    Prefer the mention's OWN open-article href stamped on the element by
+    `_candidate_cards` (so same-thread comments don't collapse to one post-level
+    key). Fall back to the deepest reddit link in the card for top-level cards,
+    which aren't stamped."""
+    href = None
+    try:
+        href = await card.get_attribute("data-mw-open-href")
+    except Exception:
+        href = None
+    if href:
+        key = norm_permalink(href)
+        if key:
+            return key
+    return await get_card_permalink(card)
 
 
 async def _tag_matched_card(page, card, target_key, val, delay,
@@ -491,25 +625,71 @@ async def _scan_feed(page, to_apply, handled, delay, applied, skipped_already, f
     the parent of a grouped post."""
     seen_any = set()
     no_new_rounds = 0
+    bottom_rounds = 0   # consecutive rounds the scroller physically could not advance
     rounds = 0
-    MAX_ROUNDS = 120
+    MAX_ROUNDS = 200
     label = "expand" if expand_similar else ("fallback" if use_fallback else "exact")
-    while no_new_rounds < 4 and rounds < MAX_ROUNDS and len(handled) < len(to_apply):
+    # Post-ids we're looking for, so the expand pass can log which group members
+    # it actually surfaces (this is how we confirm a nested comment sub-post is
+    # being keyed at comment granularity, not collapsed to its parent post).
+    target_pids = {reddit_post_id(k) for k in to_apply}
+    target_pids.discard("")
+    logged_group_keys = set()
+    # Terminate on reaching the BOTTOM of the feed, not on "no new posts for a
+    # few rounds". The expand pass keeps extending the scroll height as it opens
+    # Similar groups on the way down, so a no-new-posts heuristic quits far too
+    # early (it stopped ~27% down, before reaching groups lower in the feed).
+    while rounds < MAX_ROUNDS and len(handled) < len(to_apply):
         rounds += 1
         before_seen = len(seen_any)
 
         if expand_similar:
+            # Only open a Similar group whose PARENT shares a post-id with a
+            # still-missing target. The target comment is the parent post's URL
+            # with /comment/<id> appended, so it can only live inside that one
+            # group — opening every unrelated group just churns the DOM and
+            # risks mis-tagging. (When there are no reddit target post-ids, open
+            # all, preserving the original behaviour.)
             # The collapsed-state selector never matches an already-open group,
-            # so clicking every match can only OPEN groups, never re-collapse one.
+            # so clicking a match can only OPEN a group, never re-collapse one.
+            want_csv = ",".join(sorted(target_pids))
             toggles = await page.query_selector_all(SELECTORS["similar_collapsed"])
-            if toggles:
-                log.info("apply[expand]: opening %d Similar group(s) in view", len(toggles))
+            opened = 0
             for t in toggles:
                 try:
+                    relevant = await t.evaluate(
+                        """(node, wantCsv) => {
+                            const want = new Set(wantCsv ? wantCsv.split(',') : []);
+                            if (want.size === 0) return true;  // no reddit targets -> open all
+                            // climb to the nearest ancestor that actually has
+                            // reddit links (the parent card), and match its post-id
+                            let b = node;
+                            while (b && b !== document.body) {
+                                const links = [...b.querySelectorAll('a[href]')]
+                                    .map(a => a.getAttribute('href') || '')
+                                    .filter(h => h.toLowerCase().indexOf('reddit.com') !== -1);
+                                if (links.length) {
+                                    for (const h of links) {
+                                        const m = h.match(/\\/comments\\/([a-z0-9]+)/i);
+                                        if (m && want.has(m[1].toLowerCase())) return true;
+                                    }
+                                    return false;  // card has reddit links, none match a target
+                                }
+                                b = b.parentElement;
+                            }
+                            return false;
+                        }""",
+                        want_csv,
+                    )
+                    if not relevant:
+                        continue
                     await t.click()
                     await asyncio.sleep(0.4)
+                    opened += 1
                 except Exception:
                     pass
+            if opened:
+                log.info("apply[expand]: opened %d Similar group(s) matching a target post-id", opened)
 
         cards = await _candidate_cards(page, include_nested=expand_similar)
         for card in cards:
@@ -520,16 +700,22 @@ async def _scan_feed(page, to_apply, handled, delay, applied, skipped_already, f
             except Exception:
                 has_similar = None
             try:
-                permalink = await get_card_permalink(card)
+                permalink = await _card_key(card)
             except Exception:
                 continue  # detached mid-read; ignore, it'll re-render
             if not permalink:
                 continue
             seen_any.add(permalink)
-            if has_similar:
-                pid = reddit_post_id(permalink)
-                if pid:
-                    similar_pids.add(pid)
+            pid = reddit_post_id(permalink)
+            if has_similar and pid:
+                similar_pids.add(pid)
+            # Diagnostic: when expanding, surface every card whose post-id matches
+            # a target's, so we can see whether the specific comment sub-post
+            # (e.g. reddit:<post>/<comment>) is being keyed at comment
+            # granularity or only at post level.
+            if expand_similar and pid in target_pids and permalink not in logged_group_keys:
+                logged_group_keys.add(permalink)
+                log.info("apply[expand]: group member for target post %s -> key=%s", pid, permalink)
 
             target_key, val = resolve_target(
                 permalink, to_apply, post_fallback if use_fallback else {})
@@ -563,14 +749,33 @@ async def _scan_feed(page, to_apply, handled, delay, applied, skipped_already, f
             if len(handled) >= len(to_apply):
                 break
 
-        await _scroll_feed(page)
+        moved = await _scroll_feed(page)
         await asyncio.sleep(1.2)
         if len(seen_any) == before_seen:
             no_new_rounds += 1
         else:
             no_new_rounds = 0
-        log.debug("apply[%s]: round %d — seen=%d handled=%d/%d no_new=%d",
-                   label, rounds, len(seen_any), len(handled), len(to_apply), no_new_rounds)
+        # Bottom detection. `moved["after"] == moved["before"]` means the
+        # scroller could not advance this round — i.e. we're at the bottom
+        # (expanding a group re-opens headroom, so this only stays true once
+        # every group has been expanded and the whole feed traversed). When the
+        # scroll telemetry is unavailable (mouse-wheel fallback), fall back to
+        # the old no-new-posts heuristic so we still terminate.
+        if moved is None:
+            at_bottom = no_new_rounds >= 4
+        else:
+            at_bottom = moved.get("after") == moved.get("before")
+        bottom_rounds = bottom_rounds + 1 if at_bottom else 0
+        try:
+            top_cards = len(await page.query_selector_all(CARD_SELECTOR))
+        except Exception:
+            top_cards = -1
+        log.info("apply[%s]: round %d — top_cards=%d seen=%d handled=%d/%d no_new=%d bottom=%d scroll=%s",
+                  label, rounds, top_cards, len(seen_any), len(handled),
+                  len(to_apply), no_new_rounds, bottom_rounds, moved)
+        # Two straight rounds pinned at the bottom = feed fully traversed.
+        if bottom_rounds >= 2:
+            break
     return seen_any
 
 
@@ -599,7 +804,30 @@ async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
 
     # The feed is a heavy virtualized React app -- give it real time to render
     # results before we start scanning, and diagnose the DOM if nothing shows.
-    await _wait_for_feed_and_diagnose(page)
+    n = await _wait_for_feed_and_diagnose(page)
+    # Explore sometimes opens on the analytics/summary view (KPI / top-sources /
+    # geo / term cards) or the mentions list simply hasn't populated yet. Either
+    # way there are no result cards to tag. Try switching to the mentions view,
+    # then a reload, before giving up — this is the difference between "the post
+    # isn't here" and "we're on the wrong screen".
+    attempts = 0
+    while n == 0 and attempts < 3:
+        attempts += 1
+        n = await _ensure_mentions_view(page)
+        if n > 0:
+            log.info("apply: mentions view now shows %d card(s) after switch "
+                      "(attempt %d)", n, attempts)
+            break
+        log.warning("apply: no result cards (attempt %d/3) — reloading the topic feed", attempts)
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            log.warning("apply: feed reload failed: %s: %s", type(e).__name__, e)
+        n = await _wait_for_feed_and_diagnose(page)
+    if n == 0:
+        log.error("apply: results feed never rendered any cards — the page is not "
+                   "showing the mentions list (see feed diagnostic + mentions-view "
+                   "candidates above)")
 
     # --- STAGE 1: exact URL match against the top-level feed --------------------
     seen = await _scan_feed(
@@ -616,6 +844,10 @@ async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
             page, to_apply, handled, delay, applied, skipped_already, failed,
             expand_similar=True, use_fallback=False,
             post_fallback=post_fallback, similar_pids=similar_pids)
+        # Definitive check on what the expanded feed actually exposes for any
+        # target we still couldn't match (case a: link present but mis-keyed,
+        # vs case b: the sub-post's URL isn't in the DOM at all).
+        await _dump_reddit_links(page, to_apply, handled)
 
     # --- STAGE 3: post-id fallback, but NEVER for a Similar-group post ----------
     if len(handled) < len(to_apply):
