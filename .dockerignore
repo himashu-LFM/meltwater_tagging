@@ -1,0 +1,16 @@
+# Keep the Docker build context small and free of local-only junk.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+meltwater_tagger/.venv
+meltwater_tagger/.mw_browser_profile
+meltwater_tagger/results
+extracted_skill
+*.xlsx
+
+# Never bake secrets into the image — provide these via Render env vars instead.
+# (Harmless on Render since .env is gitignored, but protects local docker builds.)
+.env
+**/.env
+!**/.env.example
