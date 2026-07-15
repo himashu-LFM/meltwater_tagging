@@ -27,4 +27,4 @@ COPY meltwater_tagger/ ./
 # Render injects $PORT at runtime.
 ENV PORT=10000
 EXPOSE 10000
-CMD ["sh", "-c", "gunicorn webapp.app:app --timeout 600 --workers 2 --bind 0.0.0.0:$PORT"]
+CMD ["sh", "-c", "gunicorn webapp.app:app --timeout 900 --workers 2 --bind 0.0.0.0:$PORT"]
