@@ -27,4 +27,7 @@ COPY meltwater_tagger/ ./
 # Render injects $PORT at runtime.
 ENV PORT=10000
 EXPOSE 10000
-CMD ["sh", "-c", "gunicorn webapp.app:app --timeout 900 --workers 2 --bind 0.0.0.0:$PORT"]
+# One worker: apply spawns a memory-heavy headless Chromium, and two workers can
+# each spawn one and OOM a small instance. A single worker keeps peak memory
+# under control (raise this only after upgrading the instance RAM).
+CMD ["sh", "-c", "gunicorn webapp.app:app --timeout 900 --workers 1 --bind 0.0.0.0:$PORT"]
