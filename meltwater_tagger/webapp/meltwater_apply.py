@@ -131,6 +131,33 @@ CHROMIUM_LAUNCH_ARGS = [
 # feed layout / hover toolbars still work.
 _BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 
+# Third-party trackers / session-recorders / chat widgets / product-tour tools
+# that Meltwater's app loads but that are pure overhead for tagging. FullStory
+# records the entire DOM continuously, Intercom loads a whole chat app, Pendo
+# pulls many guide-tour files, the rest are analytics/RUM/surveys. Confirmed
+# from a live network capture; none touch the mentions feed or the tag modal, so
+# aborting them cuts RAM/CPU with zero functional risk. Matched as substrings of
+# the request URL. (Deliberately does NOT include any *.meltwater.io/.com data
+# endpoints — those serve the feed/tags and must load.)
+_BLOCKED_HOSTS = (
+    "fullstory.com",
+    "intercom.io",
+    "intercom.com",
+    "pendo.io",
+    "pendo-static",
+    "segment.io",
+    "segment.com",
+    "go-mpulse.net",
+    "satismeter.com",
+    "doubleclick.net",
+    "google-analytics.com",
+    "googletagmanager.com",
+    # Meltwater's own extras that tagging never needs and that are safe to drop:
+    "_vercel/insights",                 # Vercel web-analytics beacon
+    "meltwater.com/a/mira",             # Mira AI-companion route prefetch
+    "sas-web-api.notifications",        # notification counts/list
+)
+
 
 async def _new_browser_context(browser, **kwargs):
     """A browser context that presents as an ordinary desktop Chrome, not a
@@ -154,13 +181,38 @@ async def _new_browser_context(browser, **kwargs):
     # code-only lever for making the results view render where it otherwise
     # stalls/OOMs. Kept resilient: any error falls back to letting the request
     # through, so blocking can never wedge a request.
+    logged_endpoints = set()
+
     async def _route(route):
+        req = route.request
+        rtype = req.resource_type
+        url = req.url
         try:
-            if route.request.resource_type in _BLOCKED_RESOURCE_TYPES:
+            if rtype in _BLOCKED_RESOURCE_TYPES:
                 await route.abort()
                 return
         except Exception:
             pass
+        # Abort pure-overhead third-party trackers (FullStory/Intercom/Pendo/etc).
+        if any(h in url for h in _BLOCKED_HOSTS):
+            try:
+                await route.abort()
+                return
+            except Exception:
+                pass
+        # Log each unique XHR/fetch endpoint (host+path, no query) so we can see
+        # which API calls feed the mentions LIST vs the heavy analytics / AI-
+        # insight panes — then block the latter to render only what tagging needs.
+        if rtype in ("xhr", "fetch", "document"):
+            try:
+                from urllib.parse import urlsplit
+                u = urlsplit(req.url)
+                key = f"{u.netloc}{u.path}"
+                if key not in logged_endpoints:
+                    logged_endpoints.add(key)
+                    log.info("apply[net]: %s %s", req.method, key)
+            except Exception:
+                pass
         try:
             await route.continue_()
         except Exception:
