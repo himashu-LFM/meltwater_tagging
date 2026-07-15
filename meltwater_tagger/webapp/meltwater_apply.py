@@ -118,8 +118,18 @@ CHROMIUM_LAUNCH_ARGS = [
     "--disable-renderer-backgrounding",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
+    "--renderer-process-limit=1",
     "--js-flags=--max-old-space-size=512",
 ]
+
+# Resource types that are pure weight for our purpose. Tagging needs the
+# mentions LIST — text, links, and the tag buttons — none of which are images,
+# video, fonts, or the analytics charts/maps. Aborting these cuts Chromium's
+# peak RAM (decoded images + font atlases are among the largest consumers), CPU,
+# and network round-trips, which is what lets the results view finish rendering
+# on a small instance where the full page otherwise stalls. CSS is kept so the
+# feed layout / hover toolbars still work.
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 
 
 async def _new_browser_context(browser, **kwargs):
@@ -138,7 +148,73 @@ async def _new_browser_context(browser, **kwargs):
     await context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
     )
+
+    # Abort heavy, tagging-irrelevant resources (images/media/fonts) to cut
+    # Chromium's RAM/CPU/network footprint on a small instance. This is the main
+    # code-only lever for making the results view render where it otherwise
+    # stalls/OOMs. Kept resilient: any error falls back to letting the request
+    # through, so blocking can never wedge a request.
+    async def _route(route):
+        try:
+            if route.request.resource_type in _BLOCKED_RESOURCE_TYPES:
+                await route.abort()
+                return
+        except Exception:
+            pass
+        try:
+            await route.continue_()
+        except Exception:
+            pass
+
+    await context.route("**/*", _route)
     return context
+
+
+def _container_memory():
+    """(used_mb, limit_mb) for the whole container via cgroup — the number Render
+    checks against the memory limit, and it INCLUDES the Chromium child
+    processes (the real hogs), not just this Python process. Falls back to this
+    process's RSS, then to (None, None) if nothing is readable."""
+    # cgroup v2 (modern hosts)
+    for used_path, limit_path in (
+        ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+        ("/sys/fs/cgroup/memory/memory.usage_in_bytes",
+         "/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ):
+        try:
+            with open(used_path) as f:
+                used = int(f.read().strip())
+            limit = None
+            try:
+                with open(limit_path) as f:
+                    v = f.read().strip()
+                    if v != "max":
+                        limit = int(v)
+                        if limit > (1 << 62):  # v1 "unlimited" sentinel
+                            limit = None
+            except Exception:
+                pass
+            return used / 1048576.0, (limit / 1048576.0 if limit else None)
+        except Exception:
+            continue
+    # fallback: this process only (excludes Chromium children)
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0, None
+    except Exception:
+        pass
+    return None, None
+
+
+def _mem_str():
+    used, limit = _container_memory()
+    if used is None:
+        return "mem=?"
+    if limit:
+        return f"mem={used:.0f}/{limit:.0f}MB ({100.0 * used / limit:.0f}%)"
+    return f"mem={used:.0f}MB"
 
 
 async def _wait_for_feed_and_diagnose(page):
@@ -826,9 +902,9 @@ async def _scan_feed(page, to_apply, handled, delay, applied, skipped_already, f
             top_cards = len(await page.query_selector_all(CARD_SELECTOR))
         except Exception:
             top_cards = -1
-        log.info("apply[%s]: round %d — top_cards=%d seen=%d handled=%d/%d no_new=%d bottom=%d scroll=%s",
+        log.info("apply[%s]: round %d — top_cards=%d seen=%d handled=%d/%d no_new=%d bottom=%d %s scroll=%s",
                   label, rounds, top_cards, len(seen_any), len(handled),
-                  len(to_apply), no_new_rounds, bottom_rounds, moved)
+                  len(to_apply), no_new_rounds, bottom_rounds, _mem_str(), moved)
         # Two straight rounds pinned at the bottom = feed fully traversed.
         if bottom_rounds >= 2:
             break
@@ -880,6 +956,7 @@ async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
         except Exception as e:
             log.warning("apply: feed reload failed: %s: %s", type(e).__name__, e)
         n = await _wait_for_feed_and_diagnose(page)
+    log.info("apply: feed load done — cards=%d %s", n, _mem_str())
     if n == 0:
         log.error("apply: results feed never rendered any cards — the page is not "
                    "showing the mentions list (see feed diagnostic + mentions-view "
@@ -923,8 +1000,8 @@ async def _walk_feed_and_tag(page, to_apply: dict) -> dict:
     if unreached:
         log.warning("apply: %d target post(s) were never found in the feed: %s",
                      len(unreached), unreached[:5])
-    log.info("apply: done — applied=%d failed=%d already=%d unreached=%d",
-              len(applied), len(failed), len(skipped_already), len(unreached))
+    log.info("apply: done — applied=%d failed=%d already=%d unreached=%d %s",
+              len(applied), len(failed), len(skipped_already), len(unreached), _mem_str())
     return {
         "ok": True,
         "message": f"Applied {len(applied)} tag(s).",
