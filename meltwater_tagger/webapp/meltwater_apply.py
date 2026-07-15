@@ -84,6 +84,46 @@ CARD_SELECTOR = os.environ.get(
     '[data-testid="virtuoso-item-list"] > div, [data-index], [data-item-index]',
 )
 
+# Chromium launch flags for containerized/cloud hosts (Render, Docker).
+#  --disable-dev-shm-usage: the container's default 64MB /dev/shm is exhausted by
+#    a heavy SPA like Meltwater -> the page renders BLANK (bodyTextLen=0) even
+#    though navigation "succeeds". This writes to /tmp instead. (Main Render fix.)
+#  --no-sandbox / --disable-setuid-sandbox: required because most container
+#    runtimes run as a user that can't use Chromium's sandbox.
+#  --disable-blink-features=AutomationControlled: drops the navigator.webdriver
+#    automation flag that enterprise SPAs use to serve a blank/blocked page to
+#    bots. Combined with a real user-agent + viewport (see _new_browser_context),
+#    this makes the headless run look like an ordinary desktop Chrome.
+#  --window-size: give the SPA a real desktop viewport so it lays out normally.
+# All harmless locally; essential on Render.
+CHROMIUM_LAUNCH_ARGS = [
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-gpu",
+    "--disable-blink-features=AutomationControlled",
+    "--window-size=1440,900",
+]
+
+
+async def _new_browser_context(browser, **kwargs):
+    """A browser context that presents as an ordinary desktop Chrome, not a
+    headless bot. Meltwater (like many enterprise SPAs) can serve a blank page
+    to an obvious automation client, which shows up as bodyTextLen=0. A real
+    user-agent + viewport + hiding navigator.webdriver avoids that. Extra
+    new_context kwargs (e.g. none today) pass straight through."""
+    context = await browser.new_context(
+        user_agent=config.BROWSER_UA,
+        viewport={"width": 1440, "height": 900},
+        locale="en-US",
+        **kwargs,
+    )
+    # Mask the most common automation tell before any page script runs.
+    await context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+    )
+    return context
+
 
 async def _wait_for_feed_and_diagnose(page):
     """Wait for the results feed to render, and if no cards are found, dump the
@@ -917,8 +957,9 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
         return bad_input
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        page = await browser.new_page()
+        browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
+        context = await _new_browser_context(browser)
+        page = await context.new_page()
 
         ok, msg = await login_to_meltwater(page, email, password)
         if not ok:
@@ -955,8 +996,8 @@ async def apply_via_session(storage_value: str, topic_url: str, results: list[di
         return bad_input
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context()
+        browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
+        context = await _new_browser_context(browser)
 
         # Inject the cached token into Local Storage BEFORE any page script
         # runs, on every document load in this context -- this is what lets
