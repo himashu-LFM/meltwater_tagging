@@ -37,7 +37,9 @@ import httpx
 import db
 from auth import require_auth
 from fetchers import fetch_via_reddit_cookie
-from meltwater_apply import apply_results_to_meltwater, apply_via_session, decode_session_expiry
+from meltwater_apply import (
+    apply_results_to_meltwater, apply_via_session, apply_via_api, decode_session_expiry,
+)
 import classify_web
 from logging_setup import get_logger
 
@@ -47,6 +49,10 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 
 # CDP fetch needs a local logged-in Chrome, which a cloud host doesn't have.
 ALLOW_CDP = os.environ.get("MELTWATER_ALLOW_CDP", "true").lower() == "true"
+
+# Use the memory-safe API apply path (no feed rendering) with browser fallback.
+# Set MELTWATER_USE_API=false to force the old browser tagger.
+USE_API_APPLY = os.environ.get("MELTWATER_USE_API", "true").lower() == "true"
 
 
 def run_async(coro):
@@ -573,9 +579,26 @@ def apply_to_meltwater():
         if session_value:
             report = run_async(apply_via_session(session_value, topic_url, results))
         else:
-            report = run_async(apply_results_to_meltwater(
-                creds["meltwater_email"], creds["meltwater_password"], topic_url, results
-            ))
+            # Prefer the memory-safe API path (no feed rendering). If it can't
+            # capture the session/query, it flags a fallback and we use the
+            # browser tagger instead so behaviour never regresses.
+            report = None
+            if USE_API_APPLY:
+                try:
+                    report = run_async(apply_via_api(
+                        creds["meltwater_email"], creds["meltwater_password"], topic_url, results
+                    ))
+                    if report.get("_fallback"):
+                        log.warning("apply: API path unavailable (%s) — falling back to browser tagger",
+                                     report.get("message"))
+                        report = None
+                except Exception:
+                    log.exception("apply: API path errored — falling back to browser tagger")
+                    report = None
+            if report is None:
+                report = run_async(apply_results_to_meltwater(
+                    creds["meltwater_email"], creds["meltwater_password"], topic_url, results
+                ))
     except Exception as e:
         log.exception("apply failed: unexpected error (brand=%r, user=%s)", brand_name, g.user.id)
         msg = str(e)
