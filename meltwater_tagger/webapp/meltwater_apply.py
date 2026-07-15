@@ -167,8 +167,10 @@ _BLOCKED_HOSTS = (
 # mentions, list tags, and apply a tag — the basis for a browser-free apply.
 _CAPTURE_PATTERNS = (
     "enqueue-document-tagging",   # the call that actually applies a tag
-    "content-stream-bff/tags",    # GET tags list  (+ the enqueue path shares this prefix)
-    "/msearch",                   # mentions search -> document_id for a URL
+    "content-stream-bff",         # any content-stream-bff path (tags, and maybe expand)
+    "/msearch",                   # analytics/volume search
+    "discovery-next",             # discovery graphql
+    "masfsearch",                 # masf search — candidate for the "expand group" fetch
 )
 
 # Full (untruncated) captures are also written here so we don't rely on scrolling
@@ -1217,25 +1219,43 @@ def _iter_json_objects(text: str):
 
 
 def _expand_msearch_body(body_str: str, limit: int = 500) -> str:
-    """Turn the feed sub-request(s) into a flat, full list: bump the page size and
-    UNGROUP the "similar" grouping. The feed normally groups near-duplicate/similar
-    mentions (group.method='similar'), so a similar sub-post is hidden inside a
-    group instead of being its own hit. Removing the grouping makes every
-    individual mention/comment a top-level document we can match + tag exactly."""
+    """Make the feed msearch return EVERY individual mention, including the ones
+    Meltwater normally hides:
+      * hiddenDocuments: "excluded" -> "included"  — the feed hides near-duplicate
+        / "similar" mentions by default; those hidden docs ARE the similar
+        sub-posts (e.g. a comment grouped under another). Including them is what
+        surfaces the exact sub-post so we can tag it (never the parent).
+      * pagination.limit bumped + start=0 + drop the 'similar' grouping — one flat
+        page covering the whole window.
+    """
     try:
         data = json.loads(body_str)
     except Exception:
-        return body_str
-    changed = 0
-    for req in data.get("requests", []):
-        pag = (req.get("request") or {}).get("pagination")
-        if isinstance(pag, dict):
-            pag["limit"] = limit
-            pag["start"] = 0
-            pag.pop("group", None)   # ungroup -> similar sub-posts become their own hits
-            changed += 1
-    if changed:
-        log.info("apply-api: expanded+ungrouped %d msearch page(s) to limit=%d", changed, limit)
+        # best effort even if it isn't parseable as one object
+        return body_str.replace('"hiddenDocuments":"excluded"', '"hiddenDocuments":"included"')
+
+    stats = {"hidden": 0, "paged": 0}
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("hiddenDocuments") == "excluded":
+                node["hiddenDocuments"] = "included"
+                stats["hidden"] += 1
+            pag = node.get("pagination")
+            if isinstance(pag, dict):
+                pag["limit"] = limit
+                pag["start"] = 0
+                pag.pop("group", None)
+                stats["paged"] += 1
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(data)
+    log.info("apply-api: msearch tweaked (hiddenDocuments->included x%d, pages->limit=%d x%d)",
+              stats["hidden"], limit, stats["paged"])
     return json.dumps(data)
 
 
@@ -1279,7 +1299,8 @@ async def _capture_session(email: str, password: str, topic_url: str) -> dict:
     its msearch — capturing the bearer token, the account id, and the exact
     msearch URL+body. Bails as soon as those are captured so the heavy feed
     render never completes (that render is what OOMs a small instance)."""
-    cap = {"token": None, "account": None, "msearch_url": None, "msearch_body": None}
+    cap = {"token": None, "account": None, "msearches": []}
+    seen_bodies = set()
     got = asyncio.Event()
 
     async with async_playwright() as pw:
@@ -1295,15 +1316,17 @@ async def _capture_session(email: str, password: str, topic_url: str) -> dict:
                         cap["token"] = a[7:] if a.lower().startswith("bearer ") else a
                 if MSEARCH_HOST in u and req.method == "POST":
                     body = req.post_data or ""
-                    m = re.search(r"/accounts/([^/]+)/msearch", u)
-                    acct = m.group(1) if m else None
-                    # Prefer the FEED msearch (the one that paginates a document
-                    # list). Other msearch calls are aggregations/AI cards with no
-                    # per-document hits. Keep the first as a fallback either way.
-                    if not cap["msearch_body"]:
-                        cap["msearch_url"], cap["msearch_body"], cap["account"] = u, body, acct
-                    if '"pagination"' in body:
-                        cap["msearch_url"], cap["msearch_body"], cap["account"] = u, body, acct
+                    if body and body not in seen_bodies:
+                        seen_bodies.add(body)
+                        m = re.search(r"/accounts/([^/]+)/msearch", u)
+                        if m and not cap["account"]:
+                            cap["account"] = m.group(1)
+                        # Capture EVERY distinct msearch batch. The app fires
+                        # several (feed, analytics, AI card); the member documents
+                        # (similar sub-posts) come back in one of them, so we
+                        # replay them all verbatim and merge — no need to know
+                        # which, no query rewriting, no group expansion.
+                        cap["msearches"].append({"url": u, "body": body})
                         got.set()
             except Exception:
                 pass
@@ -1319,17 +1342,26 @@ async def _capture_session(email: str, password: str, topic_url: str) -> dict:
             await page.goto(topic_url, wait_until="commit", timeout=30000)
         except Exception:
             pass
+        # Wait for the first msearch, then a short grace to collect the sibling
+        # batches that fire together during initial load. We close before the
+        # heavy results render finishes — memory-safe.
         try:
             await asyncio.wait_for(got.wait(), timeout=60)
         except Exception:
-            log.warning("apply-api: msearch was not observed within timeout")
+            log.warning("apply-api: no msearch observed within timeout")
+        try:
+            await asyncio.sleep(5)
+        except Exception:
+            pass
         await browser.close()
 
-    if not (cap["token"] and cap["msearch_body"] and cap["account"]):
+    if not (cap["token"] and cap["account"] and cap["msearches"]):
         return {"ok": False,
-                "message": "Could not capture the Meltwater API session (token/msearch query). "
+                "message": "Could not capture the Meltwater API session (token/msearch). "
                            "Falling back to the browser tagger."}
     cap["ok"] = True
+    log.info("apply-api: captured %d msearch batch(es), account=%s",
+              len(cap["msearches"]), cap["account"])
     return cap
 
 
@@ -1358,57 +1390,46 @@ async def apply_via_api(email: str, password: str, topic_url: str, results: list
         name_to_id = {t["name"]: t["id"] for t in tr.json() if t.get("name")}
         log.info("apply-api: %d tags available", len(name_to_id))
 
-        # 2) msearch (replay the app's exact query) -> url -> documentId
-        mr = await c.post(
-            cap["msearch_url"],
-            headers={**_API_BASE_HEADERS, "authorization": f"Bearer {token}",
-                     "content-type": "application/json",
-                     "x-credit-pool-id": "mi-explore-brand-volume-ip",
-                     "x-product-type": "explore-dataservice"},
-            content=_expand_msearch_body(cap["msearch_body"]),
-        )
-        if mr.status_code != 200:
-            _capture_write(f"HTTPX MSEARCH RESP status={mr.status_code}\n{mr.text[:300000]}")
-            log.error("apply-api: msearch returned status %s — dumped to %s",
-                       mr.status_code, _CAPTURE_FILE)
-            return {"ok": False, "message": f"msearch failed (status {mr.status_code})",
-                    "applied": [], "failed": [], "unreached": [], "_fallback": True}
-        docmap = _hits_from_msearch(mr.text)
-        log.info("apply-api: msearch returned %d documents; %d targets to tag",
-                  len(docmap), len(to_apply))
+        # 2) replay each captured msearch batch VERBATIM and merge the hits.
+        # The app's own batch already returns the individual member documents
+        # (similar sub-posts) — rewriting the query broke that, so we send it
+        # unchanged. url -> {documentId, matchSentence, keywords}.
+        docmap = {}
+        for i, ms in enumerate(cap["msearches"]):
+            try:
+                mr = await c.post(
+                    ms["url"],
+                    headers={**_API_BASE_HEADERS, "authorization": f"Bearer {token}",
+                             "content-type": "application/json",
+                             "x-credit-pool-id": "mi-explore-brand-volume-ip",
+                             "x-product-type": "explore-dataservice"},
+                    content=ms["body"],
+                )
+                if mr.status_code == 200:
+                    found = _hits_from_msearch(mr.text)
+                    for k, v in found.items():
+                        docmap.setdefault(k, v)
+                    log.info("apply-api: msearch batch %d/%d -> %d docs (running total %d)",
+                              i + 1, len(cap["msearches"]), len(found), len(docmap))
+                else:
+                    log.warning("apply-api: msearch batch %d returned status %s", i + 1, mr.status_code)
+            except Exception as e:
+                log.warning("apply-api: msearch batch %d errored: %s: %s", i + 1, type(e).__name__, e)
+
+        log.info("apply-api: %d documents resolved; %d targets to tag", len(docmap), len(to_apply))
         if not docmap:
-            # Dump the raw response (reddit content, no secrets) so the actual
-            # shape can be inspected when nothing parsed out.
-            _capture_write(f"HTTPX MSEARCH RESP status={mr.status_code}\n{mr.text[:300000]}")
-            log.warning("apply-api: 0 documents parsed — dumped raw msearch response to %s",
-                         _CAPTURE_FILE)
+            return {"ok": False, "message": "msearch returned no documents",
+                    "applied": [], "failed": [], "unreached": [], "_fallback": True}
 
-        # Index docs by Reddit post-id, so the post<->comment granularity
-        # fallback can fire ONLY when exactly one document shares that post-id.
-        # If a thread has several tracked comments (the "Similar" case), matching
-        # by post-id would be ambiguous and could tag the parent/wrong comment —
-        # so we require an EXACT comment-level match there and leave it unreached
-        # otherwise. This mirrors the browser path's build_post_fallback guard.
-        from collections import defaultdict
-        by_post = defaultdict(list)
-        for k in docmap:
-            pid = reddit_post_id(k)
-            if pid:
-                by_post[pid].append(k)
-
-        # 3) enqueue a tag per target (EXACT url; safe single-doc post-id fallback)
+        # 3) enqueue a tag per target — EXACT match only.
+        # No post-id fallback: matching by post-id alone tagged the parent
+        # (oxb9six) for a target comment (oxfei07). The canonical key includes the
+        # comment id, so an exact match is the ONLY safe rule. If the exact
+        # document isn't present, we leave it unreached rather than risk tagging
+        # the wrong mention. (hiddenDocuments=included above ensures the exact
+        # sub-post is actually in the results, so exact match resolves it.)
         for key, val in to_apply.items():
-            hit = docmap.get(key)          # exact comment-level (or post) match
-            if not hit:
-                pid = reddit_post_id(key)
-                cands = by_post.get(pid, []) if pid else []
-                if len(cands) == 1:        # unambiguous -> safe to bridge granularity
-                    hit = docmap[cands[0]]
-                    log.info("apply-api: %s matched %s via single-doc post-id fallback",
-                              val["orig"], cands[0])
-                elif len(cands) > 1:
-                    log.info("apply-api: %s has %d docs on post %s — need exact match, "
-                              "not tagging the parent/other comment", val["orig"], len(cands), pid)
+            hit = docmap.get(key)
             if not hit:
                 unreached.append(val["orig"])
                 continue
