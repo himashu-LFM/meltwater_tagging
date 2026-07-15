@@ -12,8 +12,12 @@ input attributes).
 """
 
 import asyncio
+import json
 import os
+import re
 import sys
+
+import httpx
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_THIS_DIR))  # project root (apply_tags, config)
@@ -22,7 +26,7 @@ from playwright.async_api import async_playwright
 
 from apply_tags import (
     SELECTORS, norm_permalink, get_card_permalink, card_existing_tag,
-    expand_similar_if_needed, apply_tag_to_card,
+    expand_similar_if_needed, apply_tag_to_card, normalize_tag,
     build_post_fallback, resolve_target, reddit_post_id, log_card_links,
 )
 import config
@@ -158,8 +162,55 @@ _BLOCKED_HOSTS = (
     "sas-web-api.notifications",        # notification counts/list
 )
 
+# Endpoints whose full request (headers + body) and response body we capture, to
+# see exactly what auth/headers/payload a direct httpx call would need to search
+# mentions, list tags, and apply a tag — the basis for a browser-free apply.
+_CAPTURE_PATTERNS = (
+    "enqueue-document-tagging",   # the call that actually applies a tag
+    "content-stream-bff/tags",    # GET tags list  (+ the enqueue path shares this prefix)
+    "/msearch",                   # mentions search -> document_id for a URL
+)
+
+# Full (untruncated) captures are also written here so we don't rely on scrolling
+# the terminal — the file can be read directly. Overwritten at the start of each
+# apply run so it only holds the latest.
+_CAPTURE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mw_capture.log")
+
+
+def _redact_headers(hdrs: dict) -> dict:
+    """Strip secret header VALUES (auth token, cookies, api keys) before writing
+    a capture to disk, keeping only the scheme prefix + length so the code can be
+    built without ever recording the live credential."""
+    out = {}
+    for k, v in (hdrs or {}).items():
+        lk = k.lower()
+        if lk in ("authorization", "cookie", "x-api-key", "apikey") or "token" in lk or "secret" in lk:
+            if isinstance(v, str) and v.lower().startswith("bearer "):
+                out[k] = f"Bearer <redacted len={len(v) - 7}>"
+            else:
+                out[k] = f"<redacted len={len(v) if isinstance(v, str) else '?'}>"
+        else:
+            out[k] = v
+    return out
+
+
+def _capture_write(text: str) -> None:
+    try:
+        with open(_CAPTURE_FILE, "a", encoding="utf-8") as f:
+            f.write(text.rstrip() + "\n\n" + ("-" * 80) + "\n\n")
+    except Exception:
+        pass
+
+
+async def _reset_capture_file():
+    try:
+        open(_CAPTURE_FILE, "w", encoding="utf-8").close()
+    except Exception:
+        pass
+
 
 async def _new_browser_context(browser, **kwargs):
+    await _reset_capture_file()
     """A browser context that presents as an ordinary desktop Chrome, not a
     headless bot. Meltwater (like many enterprise SPAs) can serve a blank page
     to an obvious automation client, which shows up as bodyTextLen=0. A real
@@ -213,12 +264,38 @@ async def _new_browser_context(browser, **kwargs):
                     log.info("apply[net]: %s %s", req.method, key)
             except Exception:
                 pass
+        # Full request capture for the tagging-relevant endpoints (headers + body)
+        # so we can see exactly what a direct httpx call would have to send.
+        if any(p in url for p in _CAPTURE_PATTERNS):
+            try:
+                hdrs = await req.all_headers()
+                # redact nothing here — this is the user's own token in their own
+                # local log; they need it to replicate the call. Truncate size.
+                log.info("apply[capture-req]: %s %s (full body -> %s)",
+                          req.method, url, _CAPTURE_FILE)
+                _capture_write(f"REQUEST {req.method} {url}\nheaders={_redact_headers(hdrs)}\nbody={req.post_data or ''}")
+            except Exception as e:
+                log.warning("apply[capture-req] failed: %s", e)
         try:
             await route.continue_()
         except Exception:
             pass
 
     await context.route("**/*", _route)
+
+    # Capture the RESPONSE bodies for the same endpoints — this is where the
+    # msearch results (document_ids + source URLs) and the tags list come back.
+    async def _on_response(resp):
+        try:
+            if any(p in resp.url for p in _CAPTURE_PATTERNS):
+                body = await resp.text()
+                log.info("apply[capture-resp]: %s %s (full body -> %s)",
+                          resp.status, resp.url, _CAPTURE_FILE)
+                _capture_write(f"RESPONSE {resp.status} {resp.url}\nbody={body}")
+        except Exception:
+            pass
+
+    context.on("response", _on_response)
     return context
 
 
@@ -1087,6 +1164,281 @@ def _check_apply_inputs(to_apply: dict, topic_url: str) -> dict | None:
         return {"ok": False, "message": "This brand has no Meltwater topic URL configured yet (set it once in Brand settings).",
                 "applied": [], "failed": []}
     return None
+
+
+# =====================================================================================
+# API-based apply (no feed rendering) — the memory-safe path.
+#
+# Instead of scrolling+clicking the heavy Explore feed (which OOMs a small
+# instance), this reproduces exactly what the app does under the hood, using
+# Meltwater's own internal endpoints (captured from the live app):
+#   GET  bff.fhaicoreapps.com/prd-flux-content-stream-bff/tags            -> tag id by name
+#   POST unified-search.meltwater.io/1.0/accounts/<acct>/msearch          -> url -> documentId
+#   POST bff.fhaicoreapps.com/prd-flux-content-stream-bff/tags/enqueue-document-tagging
+# The only browser work is a lightweight login (which renders fine in 512MB) plus
+# a brief navigation to capture the session token + the exact msearch query the
+# app builds for this saved search; then everything is plain httpx (~no memory).
+# =====================================================================================
+
+MSEARCH_HOST = "unified-search.meltwater.io"
+BFF_TAGS_URL = "https://bff.fhaicoreapps.com/prd-flux-content-stream-bff/tags"
+BFF_ENQUEUE_URL = "https://bff.fhaicoreapps.com/prd-flux-content-stream-bff/tags/enqueue-document-tagging"
+_API_BASE_HEADERS = {
+    "accept": "*/*",
+    "accept-language": "en-US",
+    "origin": "https://app.meltwater.com",
+    "referer": "https://app.meltwater.com/",
+    "user-agent": config.BROWSER_UA,
+}
+
+
+def _extract_search_id(topic_url: str) -> str | None:
+    m = re.search(r"[?&]searchId=(\d+)", topic_url or "")
+    return m.group(1) if m else None
+
+
+def _iter_json_objects(text: str):
+    """Yield each top-level JSON object from an msearch response, which is a
+    stream of concatenated objects (one per batched sub-request), not a single
+    JSON document."""
+    dec = json.JSONDecoder()
+    i, n = 0, len(text or "")
+    while i < n:
+        while i < n and text[i] in " \r\n\t":
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, end = dec.raw_decode(text, i)
+        except Exception:
+            break
+        yield obj
+        i = end
+
+
+def _expand_msearch_body(body_str: str, limit: int = 500) -> str:
+    """Turn the feed sub-request(s) into a flat, full list: bump the page size and
+    UNGROUP the "similar" grouping. The feed normally groups near-duplicate/similar
+    mentions (group.method='similar'), so a similar sub-post is hidden inside a
+    group instead of being its own hit. Removing the grouping makes every
+    individual mention/comment a top-level document we can match + tag exactly."""
+    try:
+        data = json.loads(body_str)
+    except Exception:
+        return body_str
+    changed = 0
+    for req in data.get("requests", []):
+        pag = (req.get("request") or {}).get("pagination")
+        if isinstance(pag, dict):
+            pag["limit"] = limit
+            pag["start"] = 0
+            pag.pop("group", None)   # ungroup -> similar sub-posts become their own hits
+            changed += 1
+    if changed:
+        log.info("apply-api: expanded+ungrouped %d msearch page(s) to limit=%d", changed, limit)
+    return json.dumps(data)
+
+
+def _hits_from_msearch(text: str) -> dict:
+    """canonical-permalink-key -> {documentId, matchSentence, keywords}.
+
+    Robust to response shape: recursively walks the whole response and collects
+    EVERY object that has both a documentId and its own source url (flat feed
+    hits, gyda-wrapped hits, grouped members, and AI-card citations all qualify).
+    """
+    out = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            did = node.get("documentId")
+            url = node.get("url") or node.get("originalUrl") or node.get("sourceUrl")
+            if did and isinstance(url, str) and url.startswith("http"):
+                key = norm_permalink(url)
+                if key and key not in out:
+                    out[key] = {
+                        "documentId": did,
+                        "matchSentence": node.get("matchSentence") or "",
+                        "keywords": node.get("keywords") or [],
+                    }
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    for obj in _iter_json_objects(text):
+        try:
+            walk(obj)
+        except Exception:
+            continue
+    return out
+
+
+async def _capture_session(email: str, password: str, topic_url: str) -> dict:
+    """Light browser step: log in, then briefly open the topic so the app fires
+    its msearch — capturing the bearer token, the account id, and the exact
+    msearch URL+body. Bails as soon as those are captured so the heavy feed
+    render never completes (that render is what OOMs a small instance)."""
+    cap = {"token": None, "account": None, "msearch_url": None, "msearch_body": None}
+    got = asyncio.Event()
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
+        context = await _new_browser_context(browser)
+
+        def on_request(req):
+            try:
+                u = req.url
+                if "meltwater" in u and not cap["token"]:
+                    a = req.headers.get("authorization")
+                    if a:
+                        cap["token"] = a[7:] if a.lower().startswith("bearer ") else a
+                if MSEARCH_HOST in u and req.method == "POST":
+                    body = req.post_data or ""
+                    m = re.search(r"/accounts/([^/]+)/msearch", u)
+                    acct = m.group(1) if m else None
+                    # Prefer the FEED msearch (the one that paginates a document
+                    # list). Other msearch calls are aggregations/AI cards with no
+                    # per-document hits. Keep the first as a fallback either way.
+                    if not cap["msearch_body"]:
+                        cap["msearch_url"], cap["msearch_body"], cap["account"] = u, body, acct
+                    if '"pagination"' in body:
+                        cap["msearch_url"], cap["msearch_body"], cap["account"] = u, body, acct
+                        got.set()
+            except Exception:
+                pass
+
+        context.on("request", on_request)
+        page = await context.new_page()
+        ok, msg = await login_to_meltwater(page, email, password)
+        if not ok:
+            await browser.close()
+            return {"ok": False, "message": msg}
+
+        try:
+            await page.goto(topic_url, wait_until="commit", timeout=30000)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(got.wait(), timeout=60)
+        except Exception:
+            log.warning("apply-api: msearch was not observed within timeout")
+        await browser.close()
+
+    if not (cap["token"] and cap["msearch_body"] and cap["account"]):
+        return {"ok": False,
+                "message": "Could not capture the Meltwater API session (token/msearch query). "
+                           "Falling back to the browser tagger."}
+    cap["ok"] = True
+    return cap
+
+
+async def apply_via_api(email: str, password: str, topic_url: str, results: list[dict]) -> dict:
+    """Memory-safe apply: capture the session in a light browser step, then tag
+    every target via Meltwater's internal HTTP API (no feed rendering)."""
+    to_apply = _build_to_apply(results)
+    bad = _check_apply_inputs(to_apply, topic_url)
+    if bad:
+        return bad
+    if not _extract_search_id(topic_url):
+        return {"ok": False, "message": "Could not find searchId in the topic URL.",
+                "applied": [], "failed": []}
+
+    cap = await _capture_session(email, password, topic_url)
+    if not cap.get("ok"):
+        return {"ok": False, "message": cap.get("message", "session capture failed"),
+                "applied": [], "failed": [], "_fallback": True}
+
+    token = cap["token"]
+    applied, failed, unreached = [], [], []
+    async with httpx.AsyncClient(timeout=60) as c:
+        # 1) tags -> name -> id
+        tr = await c.get(BFF_TAGS_URL, headers={**_API_BASE_HEADERS, "authorization": token})
+        tr.raise_for_status()
+        name_to_id = {t["name"]: t["id"] for t in tr.json() if t.get("name")}
+        log.info("apply-api: %d tags available", len(name_to_id))
+
+        # 2) msearch (replay the app's exact query) -> url -> documentId
+        mr = await c.post(
+            cap["msearch_url"],
+            headers={**_API_BASE_HEADERS, "authorization": f"Bearer {token}",
+                     "content-type": "application/json",
+                     "x-credit-pool-id": "mi-explore-brand-volume-ip",
+                     "x-product-type": "explore-dataservice"},
+            content=_expand_msearch_body(cap["msearch_body"]),
+        )
+        if mr.status_code != 200:
+            _capture_write(f"HTTPX MSEARCH RESP status={mr.status_code}\n{mr.text[:300000]}")
+            log.error("apply-api: msearch returned status %s — dumped to %s",
+                       mr.status_code, _CAPTURE_FILE)
+            return {"ok": False, "message": f"msearch failed (status {mr.status_code})",
+                    "applied": [], "failed": [], "unreached": [], "_fallback": True}
+        docmap = _hits_from_msearch(mr.text)
+        log.info("apply-api: msearch returned %d documents; %d targets to tag",
+                  len(docmap), len(to_apply))
+        if not docmap:
+            # Dump the raw response (reddit content, no secrets) so the actual
+            # shape can be inspected when nothing parsed out.
+            _capture_write(f"HTTPX MSEARCH RESP status={mr.status_code}\n{mr.text[:300000]}")
+            log.warning("apply-api: 0 documents parsed — dumped raw msearch response to %s",
+                         _CAPTURE_FILE)
+
+        # Index docs by Reddit post-id, so the post<->comment granularity
+        # fallback can fire ONLY when exactly one document shares that post-id.
+        # If a thread has several tracked comments (the "Similar" case), matching
+        # by post-id would be ambiguous and could tag the parent/wrong comment —
+        # so we require an EXACT comment-level match there and leave it unreached
+        # otherwise. This mirrors the browser path's build_post_fallback guard.
+        from collections import defaultdict
+        by_post = defaultdict(list)
+        for k in docmap:
+            pid = reddit_post_id(k)
+            if pid:
+                by_post[pid].append(k)
+
+        # 3) enqueue a tag per target (EXACT url; safe single-doc post-id fallback)
+        for key, val in to_apply.items():
+            hit = docmap.get(key)          # exact comment-level (or post) match
+            if not hit:
+                pid = reddit_post_id(key)
+                cands = by_post.get(pid, []) if pid else []
+                if len(cands) == 1:        # unambiguous -> safe to bridge granularity
+                    hit = docmap[cands[0]]
+                    log.info("apply-api: %s matched %s via single-doc post-id fallback",
+                              val["orig"], cands[0])
+                elif len(cands) > 1:
+                    log.info("apply-api: %s has %d docs on post %s — need exact match, "
+                              "not tagging the parent/other comment", val["orig"], len(cands), pid)
+            if not hit:
+                unreached.append(val["orig"])
+                continue
+            tag_name = normalize_tag(val["tag"])
+            tag_id = name_to_id.get(tag_name) or name_to_id.get(val["tag"])
+            if not tag_id:
+                log.warning("apply-api: tag %r not found in account tag list", tag_name)
+                failed.append({"permalink": val["orig"], "tag": val["tag"]})
+                continue
+            body = json.dumps({
+                "documents": [{"documentId": hit["documentId"],
+                               "matchSentence": hit["matchSentence"],
+                               "keywords": hit["keywords"]}],
+                "tagIds": [tag_id],
+            })
+            er = await c.post(BFF_ENQUEUE_URL,
+                              headers={**_API_BASE_HEADERS, "authorization": token,
+                                       "content-type": "application/json"},
+                              content=body)
+            if er.status_code in (200, 202):
+                log.info("apply-api: tagged %s -> %s", val["orig"], tag_name)
+                applied.append({"permalink": val["orig"], "tag": tag_name})
+            else:
+                log.warning("apply-api: enqueue failed for %s (status=%s)", val["orig"], er.status_code)
+                failed.append({"permalink": val["orig"], "tag": val["tag"]})
+
+    log.info("apply-api: done applied=%d failed=%d unreached=%d",
+              len(applied), len(failed), len(unreached))
+    return {"ok": True, "message": f"Applied {len(applied)} tag(s) via API.",
+            "applied": applied, "skipped_already": [], "failed": failed, "unreached": unreached}
 
 
 async def apply_results_to_meltwater(email: str, password: str, topic_url: str, results: list[dict]) -> dict:
