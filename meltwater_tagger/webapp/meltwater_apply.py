@@ -103,6 +103,22 @@ CHROMIUM_LAUNCH_ARGS = [
     "--disable-gpu",
     "--disable-blink-features=AutomationControlled",
     "--window-size=1440,900",
+    # --- memory reduction for small cloud instances -----------------------
+    # Rendering Meltwater's heavy SPA in headless Chrome can OOM a small Render
+    # instance, which Render handles by KILLING AND RESTARTING the whole
+    # container mid-request (surfaces to the browser as a 502). These flags cut
+    # Chromium's peak memory substantially:
+    #  - site-per-process / IsolateOrigins off: don't spawn a separate renderer
+    #    process per origin (the single biggest saver for a multi-origin SPA)
+    #  - background/extension/GPU subsystems disabled: fewer helper processes
+    #  - cap the V8 heap so a runaway script can't balloon past the RAM limit
+    "--disable-features=site-per-process,TranslateUI,IsolateOrigins",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--js-flags=--max-old-space-size=512",
 ]
 
 
