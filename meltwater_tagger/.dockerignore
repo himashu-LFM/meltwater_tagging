@@ -1,0 +1,21 @@
+# Keep the image lean and, most importantly, NEVER ship secrets or local junk.
+# Secrets are provided at runtime via the host's env vars / secrets manager.
+.env
+.env.*
+!.env.example
+*.pyc
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+.git/
+.gitignore
+*.log
+results/
+decisions.json
+*.xlsx
+.DS_Store
+Thumbs.db
+node_modules/
