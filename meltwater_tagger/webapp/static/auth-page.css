@@ -38,6 +38,18 @@
 .auth-msg.ok{color:var(--pos)}
 .auth-msg.err{color:var(--neg)}
 
+/* "internal tool, not affiliated" disclaimer — clarifies ownership so the site
+   isn't mistaken for a brand's own page (helps avoid deceptive-site warnings) */
+.disclaimer{margin-top:22px;padding-top:18px;border-top:1px solid var(--stroke);text-align:center}
+.disclaimer-pill{display:inline-flex;align-items:center;gap:7px;
+  font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
+  color:var(--muted);background:rgba(255,255,255,.04);
+  border:1px solid var(--stroke);border-radius:999px;padding:6px 12px}
+.disclaimer-pill .logo-icon-xs{width:15px;height:15px;display:inline-flex}
+.disclaimer-pill .logo-icon-xs svg{width:15px;height:15px}
+.disclaimer-sep{color:var(--accent);font-weight:700}
+.disclaimer-text{margin:10px auto 0;max-width:340px;font-size:11.5px;line-height:1.55;color:var(--muted)}
+
 /* shared shell for logged-in secondary pages (profile/history) */
 .page-nav{display:flex;justify-content:space-between;align-items:center;max-width:1040px;
   margin:0 auto;padding:22px 24px 0}
