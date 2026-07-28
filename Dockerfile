@@ -8,7 +8,7 @@
 # The tag MUST track the Playwright version pip installs (see requirements.txt).
 # If pip resolves a newer Playwright than this image, bump this tag to match
 # (mcr.microsoft.com/playwright/python:v<version>-jammy) and redeploy.
-FROM mcr.microsoft.com/playwright/python:v1.61.0-
+FROM mcr.microsoft.com/playwright/python:v1.61.0-jammy
 
 WORKDIR /app
 
