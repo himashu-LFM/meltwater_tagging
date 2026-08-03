@@ -39,6 +39,7 @@ from auth import require_auth
 from fetchers import fetch_via_reddit_cookie
 from meltwater_apply import (
     apply_results_to_meltwater, apply_via_session, apply_via_api, decode_session_expiry,
+    is_meltwater_sso_email,
 )
 import classify_web
 from logging_setup import get_logger
@@ -53,6 +54,56 @@ ALLOW_CDP = os.environ.get("MELTWATER_ALLOW_CDP", "true").lower() == "true"
 # Use the memory-safe API apply path (no feed rendering) with browser fallback.
 # Set MELTWATER_USE_API=false to force the old browser tagger.
 USE_API_APPLY = os.environ.get("MELTWATER_USE_API", "true").lower() == "true"
+
+
+# --- MFA (Microsoft SSO OTP) human-in-the-loop bridge -----------------------
+# For @meltwater.com logins the apply job pauses mid-login waiting for the SMS
+# code. The Playwright browser runs inside ONE Flask request's event loop; the
+# OTP arrives on a SEPARATE request (POST /api/mfa/otp). We bridge the two with
+# a per-user, thread-safe store the async login callback polls. This requires
+# the server to handle concurrent requests while one is parked — Flask's dev
+# server runs threaded, and gunicorn is configured with --threads (see Procfile
+# / Dockerfile).
+import threading
+import time as _time
+
+_mfa_lock = threading.Lock()
+_mfa_waiters: dict = {}  # user_id -> {round, state, attempt, max, error, otp}
+MFA_WAIT_SECONDS = int(os.environ.get("MELTWATER_MFA_WAIT_SECONDS", "300"))  # 5 min per attempt
+
+
+def _make_request_otp(user_id):
+    """Return the async callback the SSO login flow calls when it needs the SMS
+    code. It publishes an 'awaiting' state the frontend polls, then blocks
+    cooperatively until the user submits a code (via /api/mfa/otp), cancels, or
+    the wait elapses. Returns the code string, or None to abort the login."""
+    async def request_otp(attempt, max_attempts, error):
+        with _mfa_lock:
+            w = _mfa_waiters.setdefault(user_id, {"round": 0})
+            w.update({"state": "awaiting", "round": w.get("round", 0) + 1,
+                      "attempt": attempt, "max": max_attempts, "error": error, "otp": None})
+        log.info("mfa: awaiting OTP for user=%s attempt=%d/%d error=%r",
+                  user_id, attempt, max_attempts, error)
+        deadline = _time.monotonic() + MFA_WAIT_SECONDS
+        while _time.monotonic() < deadline:
+            with _mfa_lock:
+                w = _mfa_waiters.get(user_id) or {}
+                if w.get("state") == "submitted" and w.get("otp"):
+                    code = w["otp"]
+                    w["state"] = "processing"
+                    w["otp"] = None
+                    log.info("mfa: OTP received for user=%s attempt=%d", user_id, attempt)
+                    return code
+                if w.get("state") == "cancelled":
+                    log.info("mfa: OTP cancelled by user=%s", user_id)
+                    return None
+            await asyncio.sleep(1)
+        with _mfa_lock:
+            w = _mfa_waiters.get(user_id) or {}
+            w["state"] = "timeout"
+        log.warning("mfa: OTP wait timed out for user=%s attempt=%d", user_id, attempt)
+        return None
+    return request_otp
 
 
 def run_async(coro):
@@ -533,6 +584,52 @@ def export():
                       mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+# --- MFA (Microsoft SSO OTP) ---------------------------------------------------
+
+@app.route("/api/mfa/status", methods=["GET"])
+@require_auth
+def mfa_status():
+    """Frontend polls this during an apply run. When state == 'awaiting', the
+    tagging screen shows the OTP popup. The code itself is never echoed back."""
+    with _mfa_lock:
+        w = dict(_mfa_waiters.get(g.user.id) or {})
+    return jsonify({
+        "state": w.get("state", "none"),
+        "round": w.get("round", 0),
+        "attempt": w.get("attempt"),
+        "max": w.get("max"),
+        "error": w.get("error"),
+    })
+
+
+@app.route("/api/mfa/otp", methods=["POST"])
+@require_auth
+def mfa_submit_otp():
+    data = request.get_json(force=True)
+    code = (data.get("otp") or "").strip()
+    if not code:
+        return jsonify({"error": "Enter the code first."}), 400
+    with _mfa_lock:
+        w = _mfa_waiters.get(g.user.id)
+        if not w or w.get("state") != "awaiting":
+            return jsonify({"error": "No verification is currently waiting for a code."}), 409
+        w["otp"] = code
+        w["state"] = "submitted"
+    log.info("mfa: OTP submitted by user=%s", g.user.id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/mfa/cancel", methods=["POST"])
+@require_auth
+def mfa_cancel():
+    with _mfa_lock:
+        w = _mfa_waiters.get(g.user.id)
+        if w:
+            w["state"] = "cancelled"
+    log.info("mfa: OTP cancelled via API by user=%s", g.user.id)
+    return jsonify({"ok": True})
+
+
 # --- apply to meltwater --------------------------------------------------------
 
 @app.route("/api/apply", methods=["POST"])
@@ -575,6 +672,15 @@ def apply_to_meltwater():
     log.info("apply: resolved topic_url for brand=%r via=%s (user=%s)",
               brand_name, "session" if session_value else "login", g.user.id)
 
+    # For @meltwater.com accounts the login pauses for an SMS code; this callback
+    # lets the browser flow ask for it via the tagging-screen popup. Harmless for
+    # ListenFirstMedia accounts (the SSO branch is the only caller). Clear any
+    # leftover state from a prior run so its round counter can't re-trigger the
+    # popup before this run actually needs a code.
+    with _mfa_lock:
+        _mfa_waiters.pop(g.user.id, None)
+    request_otp = _make_request_otp(g.user.id)
+
     try:
         if session_value:
             report = run_async(apply_via_session(session_value, topic_url, results))
@@ -583,10 +689,21 @@ def apply_to_meltwater():
             # capture the session/query, it flags a fallback and we use the
             # browser tagger instead so behaviour never regresses.
             report = None
-            if USE_API_APPLY:
+            # @meltwater.com (SSO) analysts often have MULTIPLE Meltwater
+            # workspaces; the SSO login lands on a personal one where the brand's
+            # saved search 404s (empty feed), so the internal API path can't
+            # capture anything and just wastes time. These accounts go straight
+            # to the browser path, which switches into the brand's workspace
+            # (account_hint = brand name) before opening the topic URL.
+            sso_account = is_meltwater_sso_email(creds["meltwater_email"])
+            if sso_account:
+                log.info("apply: %s is a Microsoft SSO account — browser path with account switch (brand=%r)",
+                          creds["meltwater_email"], brand_name)
+            if USE_API_APPLY and not sso_account:
                 try:
                     report = run_async(apply_via_api(
-                        creds["meltwater_email"], creds["meltwater_password"], topic_url, results
+                        creds["meltwater_email"], creds["meltwater_password"], topic_url, results,
+                        request_otp,
                     ))
                     if report.get("_fallback"):
                         log.warning("apply: API path unavailable (%s) — falling back to browser tagger",
@@ -597,7 +714,8 @@ def apply_to_meltwater():
                     report = None
             if report is None:
                 report = run_async(apply_results_to_meltwater(
-                    creds["meltwater_email"], creds["meltwater_password"], topic_url, results
+                    creds["meltwater_email"], creds["meltwater_password"], topic_url, results,
+                    request_otp, account_hint=(brand_name if sso_account else None),
                 ))
     except Exception as e:
         log.exception("apply failed: unexpected error (brand=%r, user=%s)", brand_name, g.user.id)
@@ -684,4 +802,6 @@ def history_delete(run_id):
 if __name__ == "__main__":
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "5000"))
-    app.run(host=host, port=port, debug=False)
+    # threaded=True so a paused apply request (waiting on the MFA OTP) doesn't
+    # block the concurrent /api/mfa/* requests that deliver the code.
+    app.run(host=host, port=port, debug=False, threaded=True)

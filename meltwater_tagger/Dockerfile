@@ -28,5 +28,7 @@ EXPOSE 7860
 
 # One worker keeps memory low (the API apply path only opens a short-lived
 # browser for login); the long timeout covers the login + tagging round-trip.
+# --threads 4 lets the worker serve the /api/mfa/* OTP requests while an apply
+# request is parked waiting on the Microsoft SSO verification code.
 # `sh -c` so ${PORT} is expanded at runtime.
-CMD ["sh", "-c", "gunicorn webapp.app:app --workers 1 --timeout 900 --bind 0.0.0.0:${PORT}"]
+CMD ["sh", "-c", "gunicorn webapp.app:app --workers 1 --threads 4 --timeout 1500 --bind 0.0.0.0:${PORT}"]

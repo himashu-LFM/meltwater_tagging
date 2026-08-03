@@ -221,6 +221,62 @@ function applySummaryChips(data) {
   $("applyStatus").className = "apply-status";
 }
 
+// ---- MFA (Meltwater SSO one-time code) ----
+// While an apply run is in flight, poll the server. If a Meltwater (@meltwater.com)
+// login pauses for an SMS code, show the OTP popup right here — the user never
+// leaves the tagging screen. Nothing shows for ListenFirstMedia logins.
+let mfaPoll = null, mfaLastRound = 0, mfaOpen = false;
+function startMfaPolling() {
+  mfaLastRound = 0; mfaOpen = false;
+  clearInterval(mfaPoll);
+  mfaPoll = setInterval(async () => {
+    try {
+      const r = await Auth.authedFetch("/api/mfa/status");
+      if (!r.ok) return;
+      const s = await r.json();
+      if (s.state === "awaiting" && s.round > mfaLastRound) {
+        mfaLastRound = s.round;
+        showMfa(s);
+      } else if (mfaOpen && ["processing", "timeout", "cancelled", "none"].includes(s.state)) {
+        hideMfa();
+      }
+    } catch (e) { /* transient poll error — ignore */ }
+  }, 2000);
+}
+function stopMfaPolling() { clearInterval(mfaPoll); mfaPoll = null; hideMfa(); }
+function showMfa(s) {
+  mfaOpen = true;
+  $("mfaErr").textContent = s.error ? s.error : "";
+  $("mfaSub").textContent = (s.attempt && s.max)
+    ? `Meltwater texted a code to your phone. Attempt ${s.attempt} of ${s.max}.`
+    : "Meltwater texted a code to your phone. Enter it to continue signing in.";
+  $("mfaInput").value = "";
+  $("mfaOverlay").classList.remove("hidden");
+  $("mfaInput").focus();
+}
+function hideMfa() { mfaOpen = false; $("mfaOverlay").classList.add("hidden"); }
+async function submitMfa() {
+  const otp = $("mfaInput").value.trim();
+  if (!otp) { $("mfaErr").textContent = "Enter the code first."; return; }
+  const btn = $("mfaSubmit"); btn.disabled = true;
+  try {
+    const r = await Auth.authedFetch("/api/mfa/otp", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ otp }),
+    });
+    const d = await r.json();
+    if (!r.ok) { $("mfaErr").textContent = d.error || "Could not submit the code."; }
+    else { $("mfaSub").textContent = "Verifying…"; $("mfaErr").textContent = ""; hideMfa(); }
+  } catch (e) { $("mfaErr").textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+$("mfaSubmit").addEventListener("click", submitMfa);
+$("mfaInput").addEventListener("keydown", (e) => { if (e.key === "Enter") submitMfa(); });
+$("mfaCancel").addEventListener("click", async () => {
+  try { await Auth.authedFetch("/api/mfa/cancel", { method: "POST" }); } catch (e) {}
+  hideMfa();
+});
+
 $("applyBtn").addEventListener("click", async () => {
   const btn = $("applyBtn");
   const label = btn.querySelector(".btn-label");
@@ -229,6 +285,7 @@ $("applyBtn").addEventListener("click", async () => {
   btn.classList.add("busy");
   label.textContent = "⏳ Applying…";
   const t = Toast.loading("Logging into Meltwater and applying tags — this can take a minute…", "Applying tags");
+  startMfaPolling();
   try {
     const r = await Auth.authedFetch("/api/apply", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -256,6 +313,7 @@ $("applyBtn").addEventListener("click", async () => {
   } catch (err) {
     t.error(err.message);
   } finally {
+    stopMfaPolling();
     btn.disabled = false;
     btn.classList.remove("busy");
     label.textContent = origLabel;

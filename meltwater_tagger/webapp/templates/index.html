@@ -116,6 +116,39 @@
     </section>
   </main>
 
+  <!-- MFA OTP popup — shown only for Meltwater SSO (@meltwater.com) logins -->
+  <div id="mfaOverlay" class="mfa-overlay hidden">
+    <div class="mfa-modal">
+      <h3 class="mfa-title">Enter verification code</h3>
+      <p class="mfa-sub" id="mfaSub">Meltwater texted a code to your phone. Enter it to continue signing in.</p>
+      <div class="mfa-err" id="mfaErr"></div>
+      <input id="mfaInput" type="text" inputmode="numeric" autocomplete="one-time-code"
+             maxlength="12" placeholder="Code" />
+      <div class="mfa-actions">
+        <button id="mfaCancel" class="btn ghost">Cancel</button>
+        <button id="mfaSubmit" class="btn primary"><span class="btn-label">Submit code</span></button>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .mfa-overlay { position: fixed; inset: 0; z-index: 1000; display: flex;
+      align-items: center; justify-content: center; background: rgba(0,0,0,.55);
+      backdrop-filter: blur(4px); }
+    .mfa-overlay.hidden { display: none; }
+    .mfa-modal { width: min(92vw, 420px); background: #16161a; color: #f5f5f2;
+      border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 26px 24px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+    .mfa-title { margin: 0 0 8px; font-size: 1.15rem; }
+    .mfa-sub { margin: 0 0 14px; opacity: .8; font-size: .9rem; line-height: 1.45; }
+    .mfa-err { color: #ff6b6b; font-size: .85rem; min-height: 1em; margin-bottom: 8px; }
+    #mfaInput { width: 100%; box-sizing: border-box; padding: 12px 14px; font-size: 1.25rem;
+      letter-spacing: .18em; text-align: center; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.18); background: #0e0e11; color: #f5f5f2; }
+    #mfaInput:focus { outline: none; border-color: #fdb913; }
+    .mfa-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+  </style>
+
   <script>
     window.__SUPABASE_URL__ = {{ supabase_url|tojson }};
     window.__SUPABASE_ANON_KEY__ = {{ supabase_anon_key|tojson }};
