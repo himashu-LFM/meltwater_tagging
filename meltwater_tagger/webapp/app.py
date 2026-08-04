@@ -196,6 +196,7 @@ def upsert_brand_route():
             name,
             roll_up_terms=data.get("roll_up_terms"),
             meltwater_topic_url=data.get("meltwater_topic_url"),
+            environment=data.get("environment"),
         )
         log.info("brand upserted: name=%r id=%s (user=%s)", name, brand.get("id"), g.user.id)
         return jsonify({"brand": brand})
@@ -216,6 +217,7 @@ def update_brand_route(brand_id):
         name=name.strip() if name else None,
         roll_up_terms=data.get("roll_up_terms"),
         meltwater_topic_url=data.get("meltwater_topic_url"),
+        environment=data.get("environment"),
     )
     return jsonify({"brand": brand})
 
@@ -361,6 +363,35 @@ def meltwater_session_status():
     if remaining <= 0:
         return jsonify({"state": "expired", "expires_at": exp})
     return jsonify({"state": "active", "expires_at": exp, "seconds_remaining": int(remaining)})
+
+
+# --- Auto-captured Meltwater BROWSER session (SSO no-repeat-OTP) --------------
+
+@app.route("/api/profile/meltwater-browser-session/status", methods=["GET"])
+@require_auth
+def meltwater_browser_session_status():
+    """Whether an auto-captured SSO session is saved (so the UI can show it and
+    offer 'Log out of Meltwater')."""
+    meta = db.get_meltwater_browser_state_meta(g.user.id) if db.is_configured() else None
+    if not meta:
+        return jsonify({"state": "none"})
+    return jsonify({"state": "saved", "updated_at": meta.get("updated_at"),
+                    "expires_at": meta.get("expires_at")})
+
+
+@app.route("/api/profile/meltwater-browser-session", methods=["DELETE"])
+@require_auth
+def clear_meltwater_browser_session():
+    """Log out of Meltwater: delete the saved SSO browser session. The next Apply
+    will do a fresh login (one SMS OTP) and save a new session."""
+    try:
+        if db.is_configured():
+            db.clear_meltwater_browser_state(g.user.id)
+        log.info("Meltwater browser session cleared for user=%s", g.user.id)
+        return jsonify({"ok": True})
+    except Exception as e:
+        log.exception("DELETE /api/profile/meltwater-browser-session failed (user=%s)", g.user.id)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/profile/reddit", methods=["GET"])
@@ -663,14 +694,32 @@ def apply_to_meltwater():
 
     brand = db.get_brand(brand_name) if brand_name else None
     topic_url = db.resolve_topic_url(g.user.id, brand) if brand else None
-    if not topic_url:
-        log.warning("apply rejected: no topic URL resolved for brand=%r (user=%s)", brand_name, g.user.id)
-        return jsonify({"error": f"No Meltwater topic URL configured for '{brand_name}' for your "
-                                  "account. Open Brand Studio -> select the brand -> 'My Meltwater "
-                                  "topic URL' and paste the exact saved-search URL from YOUR "
-                                  "Meltwater account (topic names often differ per account)."}), 400
-    log.info("apply: resolved topic_url for brand=%r via=%s (user=%s)",
-              brand_name, "session" if session_value else "login", g.user.id)
+
+    # @meltwater.com accounts use the SSO UI pipeline (switch into the brand's
+    # ENVIRONMENT account, then open its Reddit saved search by brand name) — they
+    # need the brand's Environment set, not a topic URL. Everyone else (Auth0)
+    # still needs a resolved topic URL as before.
+    sso_account = bool(creds) and is_meltwater_sso_email(creds.get("meltwater_email", ""))
+    environment = (brand or {}).get("environment") if brand else None
+
+    if sso_account:
+        if not environment:
+            log.warning("apply rejected: SSO account but brand=%r has no Environment set (user=%s)",
+                         brand_name, g.user.id)
+            return jsonify({"error": f"'{brand_name}' has no Environment set. Open Brand Studio -> "
+                                      "select the brand -> set 'Environment' to the exact Meltwater "
+                                      "account name (e.g. 'Kaseya - Fairhair'), then try again."}), 400
+        log.info("apply: SSO account — environment=%r brand=%r (user=%s)",
+                  environment, brand_name, g.user.id)
+    else:
+        if not topic_url:
+            log.warning("apply rejected: no topic URL resolved for brand=%r (user=%s)", brand_name, g.user.id)
+            return jsonify({"error": f"No Meltwater topic URL configured for '{brand_name}' for your "
+                                      "account. Open Brand Studio -> select the brand -> 'My Meltwater "
+                                      "topic URL' and paste the exact saved-search URL from YOUR "
+                                      "Meltwater account (topic names often differ per account)."}), 400
+        log.info("apply: resolved topic_url for brand=%r via=%s (user=%s)",
+                  brand_name, "session" if session_value else "login", g.user.id)
 
     # For @meltwater.com accounts the login pauses for an SMS code; this callback
     # lets the browser flow ask for it via the tagging-screen popup. Harmless for
@@ -693,12 +742,12 @@ def apply_to_meltwater():
             # workspaces; the SSO login lands on a personal one where the brand's
             # saved search 404s (empty feed), so the internal API path can't
             # capture anything and just wastes time. These accounts go straight
-            # to the browser path, which switches into the brand's workspace
-            # (account_hint = brand name) before opening the topic URL.
-            sso_account = is_meltwater_sso_email(creds["meltwater_email"])
+            # to the browser path, which switches into the brand's ENVIRONMENT
+            # account and opens its Reddit saved search via Explore.
+            # (sso_account was determined above alongside the environment lookup.)
             if sso_account:
-                log.info("apply: %s is a Microsoft SSO account — browser path with account switch (brand=%r)",
-                          creds["meltwater_email"], brand_name)
+                log.info("apply: %s is a Microsoft SSO account — browser path with account switch "
+                          "(env=%r, brand=%r)", creds["meltwater_email"], environment, brand_name)
             if USE_API_APPLY and not sso_account:
                 try:
                     report = run_async(apply_via_api(
@@ -713,10 +762,32 @@ def apply_to_meltwater():
                     log.exception("apply: API path errored — falling back to browser tagger")
                     report = None
             if report is None:
+                # SSO session reuse: load any saved browser session so we skip
+                # login/OTP, and capture a fresh one after a first-time login.
+                # While a saved session exists we never auto-prompt OTP (it's
+                # cleared manually from Profile).
+                saved_state = (db.get_meltwater_browser_state(g.user.id)
+                               if (sso_account and db.is_configured()) else None)
+                _uid = g.user.id
+
+                def _on_state_captured(state_json):
+                    try:
+                        db.upsert_meltwater_browser_state(_uid, state_json)
+                    except Exception:
+                        log.exception("apply: could not save captured Meltwater session (user=%s)", _uid)
+
                 report = run_async(apply_results_to_meltwater(
                     creds["meltwater_email"], creds["meltwater_password"], topic_url, results,
-                    request_otp, account_hint=(brand_name if sso_account else None),
+                    request_otp,
+                    account_hint=(environment if sso_account else None),
+                    brand_name=(brand_name if sso_account else None),
+                    saved_state=saved_state,
+                    on_state_captured=(_on_state_captured if sso_account else None),
                 ))
+                if report and report.get("_session_expired"):
+                    log.warning("apply: saved SSO session expired for user=%s — asking user to clear it",
+                                 g.user.id)
+                    return jsonify({"error": report.get("message"), "session_expired": True}), 409
     except Exception as e:
         log.exception("apply failed: unexpected error (brand=%r, user=%s)", brand_name, g.user.id)
         msg = str(e)

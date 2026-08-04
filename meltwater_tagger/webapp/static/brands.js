@@ -47,6 +47,7 @@ async function selectBrand(id) {
   $("cfgName").value = selected.name || "";
   $("cfgTopicUrl").value = selected.meltwater_topic_url || "";
   $("cfgRollup").value = (selected.roll_up_terms || []).join(", ");
+  $("cfgEnvironment").value = selected.environment || "";
   $("cfgMsg").textContent = "";
 
   // load my personal topic URL override
@@ -133,11 +134,12 @@ $("saveConfigBtn").addEventListener("click", async () => {
   const name = $("cfgName").value.trim();
   const meltwater_topic_url = $("cfgTopicUrl").value.trim();
   const roll_up_terms = $("cfgRollup").value.split(",").map(s => s.trim()).filter(Boolean);
+  const environment = $("cfgEnvironment").value.trim();
 
   // 1) update brand core fields
   const r1 = await Auth.authedFetch(`/api/brands/${selected.id}`, {
     method: "PUT", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, meltwater_topic_url, roll_up_terms }),
+    body: JSON.stringify({ name, meltwater_topic_url, roll_up_terms, environment }),
   });
   if (!r1.ok) { const d = await r1.json(); return Toast.error(d.error || "Could not save brand details"); }
 

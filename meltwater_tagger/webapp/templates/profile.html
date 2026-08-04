@@ -112,6 +112,16 @@
       </div>
       <button class="btn primary" id="saveMw"><span class="btn-shine"></span><span class="btn-label">Save</span></button>
       <span class="save-msg" id="mwMsg"></span>
+
+      <div class="mw-autosession" style="margin-top:18px;padding-top:16px;border-top:1px solid rgba(255,255,255,.08)">
+        <div class="field-label" style="margin-bottom:6px">Stay logged in (skip repeated codes)</div>
+        <p class="section-sub" style="margin:0 0 12px">
+          After your first Apply, we securely save your logged-in Meltwater session so later
+          batches don't ask for an SMS code again. It's reused until you clear it here.
+          <span id="mwAutoSessionStatus" style="display:block;margin-top:6px;color:var(--muted)">checking…</span>
+        </p>
+        <button class="btn ghost" id="clearMwSession">Log out of Meltwater / clear saved session</button>
+      </div>
     </div>
 
     <div class="card glass" style="margin-bottom:22px">

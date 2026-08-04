@@ -14,9 +14,13 @@ create table if not exists brands (
   roll_up_terms text[] not null default '{}', -- e.g. {datto, "it glue", autotask} for Kaseya family
   meltwater_topic_url text,                  -- saved-search/topic URL in Meltwater for this brand,
                                               -- used so "Apply to Meltwater" can jump straight there
+  environment text,                          -- free-text environment label, e.g. 'Kaseya - Fairhair'
   active boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+-- add the environment column to any pre-existing brands table (safe no-op if present)
+alter table brands add column if not exists environment text;
 
 -- seed the two brands already in use
 insert into brands (name, roll_up_terms) values
@@ -100,6 +104,28 @@ create table if not exists meltwater_sessions (
 alter table meltwater_sessions enable row level security;
 
 create policy "own meltwater session" on meltwater_sessions
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ---------------------------------------------------------------------------
+-- 2c) Per-user Meltwater BROWSER session (auto-captured) --
+--     For @meltwater.com (Microsoft SSO) accounts we capture the whole logged-in
+--     browser session (Playwright storage_state = cookies + Local Storage) after
+--     the FIRST successful SSO+OTP login, and reuse it on later runs so no OTP is
+--     needed again. It is reused until it stops working; per the product rule we
+--     NEVER auto-prompt OTP while a row exists here — the analyst clears it
+--     ("Log out of Meltwater") to force a fresh login. Sensitive: this is a live
+--     session (bearer tokens + cookies), protected by RLS like the token above.
+-- ---------------------------------------------------------------------------
+create table if not exists meltwater_browser_sessions (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  browser_state text not null,     -- Playwright storage_state JSON (cookies + localStorage)
+  expires_at timestamptz,          -- best-effort token exp, informational
+  updated_at timestamptz not null default now()
+);
+
+alter table meltwater_browser_sessions enable row level security;
+
+create policy "own meltwater browser session" on meltwater_browser_sessions
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- ---------------------------------------------------------------------------

@@ -1489,11 +1489,14 @@ def _build_to_apply(results: list[dict]) -> dict:
     return to_apply
 
 
-def _check_apply_inputs(to_apply: dict, topic_url: str) -> dict | None:
+def _check_apply_inputs(to_apply: dict, topic_url: str, require_topic: bool = True) -> dict | None:
     if not to_apply:
         log.warning("apply: nothing to apply — no results had action='apply' with a tag")
         return {"ok": False, "message": "No posts with an 'apply' action to tag.", "applied": [], "failed": []}
-    if not topic_url:
+    # @meltwater.com (SSO) runs reach the feed via account switch + Advanced
+    # search (by brand name), so they don't need a topic URL — only ListenFirst
+    # (Auth0) runs do. Callers pass require_topic=False for the SSO path.
+    if require_topic and not topic_url:
         log.error("apply: no topic_url given")
         return {"ok": False, "message": "This brand has no Meltwater topic URL configured yet (set it once in Brand settings).",
                 "applied": [], "failed": []}
@@ -1903,17 +1906,50 @@ async def switch_meltwater_account(page, account_hint: str) -> bool:
             pass
         await page.wait_for_timeout(2000)
 
-        # 5) verify we actually switched — the header account name should no
-        #    longer be the personal 'Buddy' workspace.
+        # 5) verify we actually switched — the top-right account button should now
+        #    read the target environment (e.g. "Kaseya - Fairhair"), not the
+        #    personal "…- Buddy" workspace. Poll a few times, since the switch
+        #    triggers a /switchingCompany reload.
+        want = account_hint.strip().lower()
+        label = ""
+        for _ in range(6):
+            label = (await _current_account_label(page)) or ""
+            if want in label.lower() and "buddy" not in label.lower():
+                log.info("apply: ACCOUNT SWITCH — VERIFIED switched into %r "
+                          "(account button now reads %r) ✓", account_hint, label)
+                return True
+            await page.wait_for_timeout(1500)
+        # Fallback to a page-text check if the button label couldn't be read.
         diag = await _diag(page)
-        if "Buddy" in diag and account_hint.lower() not in diag.lower():
-            log.warning("apply: ACCOUNT SWITCH — may NOT have switched; still shows Buddy %s", diag)
-            return False
-        log.info("apply: ACCOUNT SWITCH — done, now on %s", diag)
-        return True
+        if want in diag.lower() and "buddy" not in diag.lower():
+            log.info("apply: ACCOUNT SWITCH — VERIFIED switched into %r (via page text) ✓ %s",
+                      account_hint, diag)
+            return True
+        log.warning("apply: ACCOUNT SWITCH — could NOT verify switch into %r "
+                     "(account button=%r) %s", account_hint, label, diag)
+        return False
     except Exception as e:
         log.warning("apply: ACCOUNT SWITCH — failed: %s: %s", type(e).__name__, e)
         return False
+
+
+async def _current_account_label(page) -> str:
+    """Read the top-right account button's visible text (e.g. 'Kaseya - Fairhair'
+    or 'Ritu Sharma - Buddy'), used to confirm an account switch actually took."""
+    for sel in (
+        'button:has([data-testid="PersonIcon"])',
+        '[data-testid="PersonIcon"] >> xpath=ancestor::button[1]',
+        '[data-testid="PersonIcon"] >> xpath=ancestor::*[self::button or @role="button"][1]',
+    ):
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                t = (await el.inner_text()).strip()
+                if t:
+                    return " ".join(t.split())
+        except Exception:
+            continue
+    return ""
 
 
 async def open_brand_search_tile(page, brand_hint: str) -> bool:
@@ -1977,40 +2013,376 @@ async def open_brand_search_tile(page, brand_hint: str) -> bool:
         return False
 
 
+async def _explore_editor_ready(page, timeout: int = 3000) -> bool:
+    """True once the Advanced-search EDITOR is on screen (the screen that hosts
+    the 'Advanced search ▾' dropdown). Detected by editor-only landmarks —
+    'Refine with AI', 'Supported operators', or being on the /explore/results
+    (editor) URL — so the Explore landing page (which only shows the 'Advanced
+    search' card) never counts as ready.
+
+    Polls with get_by_text rather than a comma-joined `text=` selector: Playwright
+    only OR-joins CSS selectors with commas, not text-engine selectors, so the
+    joined form silently matches nothing (this was the 25s-timeout bug)."""
+    landmarks = (
+        re.compile(r"Refine with AI", re.I),
+        re.compile(r"Supported operators", re.I),
+        re.compile(r"update results", re.I),
+    )
+    waited = 0
+    step = 1000
+    while waited <= timeout:
+        # Require an actual editor LANDMARK to be painted — NOT just the
+        # /explore/results URL, which flips before the toolbar renders (racing it
+        # made us try to open the dropdown against a blank shell).
+        for rx in landmarks:
+            try:
+                if await page.get_by_text(rx).count() > 0:
+                    return True
+            except Exception:
+                pass
+        # heartbeat so the logs show we're still waiting (not stuck)
+        if waited and waited % 5000 == 0:
+            log.info("apply: ADV SEARCH (SSO) — still waiting for the search editor "
+                      "(%ds elapsed, url=%s)", waited // 1000, page.url)
+        await page.wait_for_timeout(step)
+        waited += step
+    return False
+
+
+async def open_advanced_search_via_explore(page, brand_name: str) -> bool:
+    """SSO pipeline — after switching into the brand's environment/account, reach
+    the brand's Reddit Advanced search results feed by driving the Explore UI:
+
+      1. click "Explore" (left nav)
+      2. click the "Advanced search" card
+      3. open the "Advanced search ▾" dropdown (top toolbar)
+      4. type the BRAND NAME (e.g. "Kaseya V2") into the dropdown's "Find" box
+      5. among the matches, click the one whose name contains "Reddit"
+
+    Returns True once the results feed is showing. This replaces the Home-tile
+    approach for @meltwater.com accounts (open_brand_search_tile), which was less
+    reliable. `brand_name` is the Sentiment Tagger run brand (matches the search title, e.g. "Kaseya V2 | Reddit")."""
+    log.info("apply: ADV SEARCH (SSO) — reaching the Reddit search for %r via Explore", brand_name)
+    try:
+        # 1) Explore (left nav).
+        clicked_explore = False
+        for getter in ("link", "button"):
+            try:
+                loc = page.get_by_role(getter, name=re.compile(r"^\s*Explore\s*$", re.I))
+                if await loc.count() > 0:
+                    await loc.first.click()
+                    clicked_explore = True
+                    break
+            except Exception:
+                pass
+        if not clicked_explore:
+            try:
+                el = await page.query_selector('a:has-text("Explore"), [data-testid*="explore" i]')
+                if el:
+                    await el.click()
+                    clicked_explore = True
+            except Exception:
+                pass
+        if not clicked_explore:
+            log.warning("apply: ADV SEARCH (SSO) — could not find the Explore nav item %s", await _diag(page))
+            return False
+        log.info("apply: ADV SEARCH (SSO) — clicked Explore")
+        # The Explore SPA (e.g. /a/explore/list) renders asynchronously — the
+        # page is briefly blank (bodyText=''). Wait for it to actually paint
+        # before looking for the card, or we race a blank DOM (the bug seen live).
+        # Generous timeouts + heartbeat logs: let it take as long as it needs.
+        try:
+            await page.wait_for_load_state("networkidle", timeout=60000)
+        except Exception:
+            pass
+
+        # 2) "Advanced search" card — this opens the search editor (which is what
+        #    hosts the Advanced search dropdown). Wait for it to render, click it, and
+        #    confirm the editor loaded before continuing. Skip only if the editor
+        #    is somehow already open.
+        editor_ready = await _explore_editor_ready(page)
+        if not editor_ready:
+            log.info("apply: ADV SEARCH (SSO) — waiting for the 'Advanced search' card to render "
+                      "(up to 90s)…")
+            card = None
+            try:
+                await page.wait_for_selector('text=/^\\s*Advanced search\\s*$/i', timeout=90000)
+                card = page.get_by_text(re.compile(r"^\s*Advanced search\s*$", re.I))
+            except Exception:
+                card = None
+            if not card or await card.count() == 0:
+                log.warning("apply: ADV SEARCH (SSO) — 'Advanced search' card never rendered %s",
+                             await _diag(page))
+                return False
+            await card.first.click()
+            log.info("apply: ADV SEARCH (SSO) — clicked the 'Advanced search' card; waiting for the "
+                      "editor to load (up to 120s, heartbeat every 5s)")
+            editor_ready = await _explore_editor_ready(page, timeout=120000)
+            if not editor_ready:
+                log.warning("apply: ADV SEARCH (SSO) — search editor did not load after the card %s",
+                             await _diag(page))
+                return False
+        log.info("apply: ADV SEARCH (SSO) — search editor is ready")
+
+        # 3) open the "Advanced search ▾" dropdown in the top toolbar.
+        #    The toolbar toggle can render a beat after the editor landmarks, so
+        #    POLL for it (up to 60s, heartbeat every 5s) rather than trying once.
+        #    IMPORTANT: the editor page ALSO has a global "Find" box in the top nav
+        #    with the same placeholder, so we must NOT confirm the dropdown by a
+        #    "Find" input (that box is always present). Confirm instead by the
+        #    dropdown's own menu contents ("New search" / "ALL SEARCHES").
+        toggle_sels = (
+            'button:has-text("Advanced search")',
+            '[role="button"]:has-text("Advanced search")',
+            'text=/^\\s*Advanced search\\s*$/i',
+        )
+        opened_dd = False
+        waited = 0
+        while waited <= 60000 and not opened_dd:
+            for cand in toggle_sels:
+                try:
+                    el = await page.query_selector(cand)
+                    if not el or not await el.is_visible():
+                        continue
+                    await el.click()
+                    # confirm the dropdown MENU opened via its own contents (poll
+                    # with get_by_text; a comma text= selector matches nothing)
+                    for _ in range(6):
+                        for rx in (re.compile(r"New search", re.I),
+                                   re.compile(r"ALL SEARCHES", re.I)):
+                            try:
+                                if await page.get_by_text(rx).count() > 0:
+                                    opened_dd = True
+                                    break
+                            except Exception:
+                                pass
+                        if opened_dd:
+                            break
+                        await page.wait_for_timeout(1000)
+                    if opened_dd:
+                        break
+                except Exception:
+                    continue
+            if opened_dd:
+                break
+            if waited and waited % 5000 == 0:
+                log.info("apply: ADV SEARCH (SSO) — still waiting for the 'Advanced search' toolbar "
+                          "toggle to render/open (%ds elapsed, url=%s)", waited // 1000, page.url)
+            await page.wait_for_timeout(1000)
+            waited += 1000
+        if not opened_dd:
+            log.warning("apply: ADV SEARCH (SSO) — could not open the Advanced search dropdown %s", await _diag(page))
+            return False
+        log.info("apply: ADV SEARCH (SSO) — opened the Advanced search dropdown")
+        await page.wait_for_timeout(800)
+
+        # 4) type the brand name into the DROPDOWN's "Find" box — NOT the global
+        #    nav "Find". The dropdown popover renders after the nav in the DOM, so
+        #    among the visible "Find" inputs its own is the LAST one. Prefer a Find
+        #    input that sits above the dropdown's "New search" row when we can find
+        #    it; otherwise use the last visible Find input.
+        find = None
+        try:
+            find = await page.query_selector(
+                'xpath=(//*[contains(translate(normalize-space(.),'
+                '"NEW SEARCH","new search"),"new search")]/preceding::input[@placeholder][1])[last()]')
+            if find and not await find.is_visible():
+                find = None
+        except Exception:
+            find = None
+        if not find:
+            try:
+                inputs = await page.query_selector_all('input[placeholder*="Find" i]')
+                for el in reversed(inputs):  # dropdown's Find is the last-rendered
+                    if await el.is_visible():
+                        find = el
+                        break
+            except Exception:
+                find = None
+        if not find:
+            log.warning("apply: ADV SEARCH (SSO) — dropdown 'Find' box not found %s", await _diag(page))
+            return False
+        await find.click()
+        await find.fill(brand_name)
+        log.info("apply: ADV SEARCH (SSO) — typed %r into the Advanced search 'Find' box; "
+                  "waiting for matches to load (up to 30s, heartbeat every 5s)", brand_name)
+
+        # 5) among the matches, click the search whose name contains "Reddit".
+        #    Match on both the brand name and "Reddit" so we never pick another
+        #    brand's Reddit search that happens to render. Give the filtered list
+        #    time to render rather than racing it.
+        clicked_label = ""
+        reddit_re = re.compile(
+            re.escape(brand_name) + r".*reddit|reddit.*" + re.escape(brand_name), re.I)
+        waited = 0
+        while waited <= 30000:
+            try:
+                if await page.get_by_text(reddit_re).count() > 0:
+                    break
+            except Exception:
+                pass
+            if waited and waited % 5000 == 0:
+                log.info("apply: ADV SEARCH (SSO) — still waiting for the %r Reddit search to "
+                          "appear (%ds elapsed)", brand_name, waited // 1000)
+            await page.wait_for_timeout(1000)
+            waited += 1000
+        try:
+            loc = page.get_by_text(reddit_re)
+            if await loc.count() > 0:
+                clicked_label = (await loc.first.inner_text()).strip().replace("\n", " ")[:60]
+                await loc.first.click()
+                log.info("apply: ADV SEARCH (SSO) — clicked search %r", clicked_label)
+        except Exception:
+            pass
+        if not clicked_label:
+            # Fallback: any visible row containing "Reddit" (the Find box already
+            # filtered to this brand's searches).
+            try:
+                loc = page.get_by_text(re.compile(r"reddit", re.I))
+                if await loc.count() > 0:
+                    clicked_label = (await loc.first.inner_text()).strip().replace("\n", " ")[:60]
+                    await loc.first.click()
+                    log.info("apply: ADV SEARCH (SSO) — clicked Reddit search (fallback) %r", clicked_label)
+            except Exception:
+                pass
+        if not clicked_label:
+            log.warning("apply: ADV SEARCH (SSO) — no 'Reddit' search matched %r %s",
+                         brand_name, await _diag(page))
+            return False
+
+        # results should load in place (the editor stays on /explore).
+        try:
+            await page.wait_for_load_state("networkidle", timeout=25000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1500)
+        log.info("apply: ADV SEARCH (SSO) — Reddit search open, now on %s", page.url)
+        return True
+    except Exception as e:
+        log.warning("apply: ADV SEARCH (SSO) — failed: %s: %s", type(e).__name__, e)
+        return False
+
+
+async def _is_logged_in(page) -> bool:
+    """True if opening app.meltwater.com lands on the authenticated app (the
+    account button is present) rather than a Meltwater/Microsoft login page. Used
+    to decide whether a reused saved session is still valid — if so we skip the
+    whole login/OTP flow entirely."""
+    try:
+        await page.goto(config.MELTWATER_URL, wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        return False
+    for _ in range(20):
+        url = (page.url or "").lower()
+        if ("authorize.meltwater.com" in url or "microsoftonline.com" in url
+                or "/login" in url):
+            return False
+        try:
+            el = await page.query_selector(
+                '[data-testid="PersonIcon"], button:has([data-testid="PersonIcon"])')
+            if el and await el.is_visible():
+                return True
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+    return False
+
+
 async def apply_results_to_meltwater(email: str, password: str, topic_url: str, results: list[dict],
-                                     request_otp=None, account_hint=None) -> dict:
+                                     request_otp=None, account_hint=None, brand_name=None,
+                                     saved_state=None, on_state_captured=None) -> dict:
     """
     Login-automation path: fills the Auth0 email/password/passkey flow (or, for
     @meltwater.com accounts, the Microsoft Entra SSO + SMS-OTP flow), then tags
     posts. results: classification results, each with permalink/tag/action.
     Only entries with action == 'apply' and a non-empty tag are actually applied.
+
+    Session reuse (SSO): if `saved_state` (a Playwright storage_state JSON string)
+    is given, it's loaded into the browser first. If that session is still valid,
+    login/OTP is skipped entirely. If it's expired, we DO NOT auto-prompt OTP —
+    we return `_session_expired` so the caller can ask the analyst to clear it
+    (per the product rule: never OTP while a saved session exists). On a fresh
+    login (no saved_state), the resulting session is captured via
+    `on_state_captured(state_json)` so subsequent runs need no OTP.
     """
     to_apply = _build_to_apply(results)
-    log.info("apply_results_to_meltwater: %d posts to tag, topic_url=%s", len(to_apply), topic_url)
-    bad_input = _check_apply_inputs(to_apply, topic_url)
+    log.info("apply_results_to_meltwater: %d posts to tag, topic_url=%s (saved_session=%s)",
+              len(to_apply), topic_url, bool(saved_state))
+    # SSO (@meltwater.com) runs — account_hint is the environment — reach the feed
+    # via account switch + Advanced search, so a topic URL isn't required.
+    bad_input = _check_apply_inputs(to_apply, topic_url, require_topic=not bool(account_hint))
     if bad_input:
         return bad_input
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
-        context = await _new_browser_context(browser)
+        # Load the saved browser session (cookies + localStorage) if we have one.
+        ctx_kwargs = {}
+        if saved_state:
+            try:
+                ctx_kwargs["storage_state"] = json.loads(saved_state)
+            except Exception as e:
+                log.warning("apply: saved session couldn't be parsed (%s) — ignoring it", e)
+        context = await _new_browser_context(browser, **ctx_kwargs)
         page = await context.new_page()
 
-        ok, msg = await login_to_meltwater(page, email, password, request_otp)
-        if not ok:
-            log.error("apply_results_to_meltwater: login failed — %s", msg)
-            await browser.close()
-            return {"ok": False, "message": msg, "applied": [], "failed": []}
+        if saved_state:
+            log.info("apply: SESSION REUSE — trying the saved Meltwater session (no OTP)…")
+            if await _is_logged_in(page):
+                log.info("apply: SESSION REUSE — saved session is VALID; skipping login/OTP ✓")
+            else:
+                # Expired/invalid. Per the product rule, do NOT auto-prompt OTP
+                # while a saved session exists — ask the user to clear it.
+                log.warning("apply: SESSION REUSE — saved session is EXPIRED/invalid; NOT prompting "
+                             "OTP. User must clear it on Profile to log in fresh.")
+                await browser.close()
+                return {"ok": False, "applied": [], "failed": [], "_session_expired": True,
+                        "message": ("Your saved Meltwater session has expired. Go to Profile → "
+                                     "'Log out of Meltwater / clear saved session', then run Apply "
+                                     "again to log in once (you'll enter an SMS code that one time).")}
+        else:
+            ok, msg = await login_to_meltwater(page, email, password, request_otp)
+            if not ok:
+                log.error("apply_results_to_meltwater: login failed — %s", msg)
+                await browser.close()
+                return {"ok": False, "message": msg, "applied": [], "failed": []}
+            # Capture the fresh logged-in session so future runs skip OTP.
+            if on_state_captured is not None:
+                try:
+                    state = await context.storage_state()
+                    on_state_captured(json.dumps(state))
+                    log.info("apply: SESSION SAVE — captured the logged-in session for reuse "
+                              "(future runs won't need OTP until it's cleared) ✓")
+                except Exception as e:
+                    log.warning("apply: SESSION SAVE — could not capture the session: %s", e)
 
-        # Post-login STEP 0 — switch into the brand's workspace, then open the
-        # brand's saved search from the Home "Pick up where you left off" tiles.
-        # Some logins land on a personal/default workspace where the brand's
-        # saved search 404s (empty feed); switching + clicking the tile fixes it.
+        # Post-login STEP 0 (SSO / @meltwater.com only) — switch into the brand's
+        # ENVIRONMENT account, then reach the brand's Reddit search through
+        # the Explore UI (Explore -> Advanced search -> Advanced search dropdown ->
+        # find brand name -> pick the Reddit search). `account_hint` here is the
+        # brand's ENVIRONMENT (e.g. "Kaseya - Fairhair"); `brand_name` is the run
+        # brand (e.g. "Kaseya V2"), which matches the Advanced search title.
         feed_opened = False
         if account_hint:
             switched = await switch_meltwater_account(page, account_hint)
-            if switched:
-                feed_opened = await open_brand_search_tile(page, account_hint)
+            if not switched:
+                log.error("apply: POST-LOGIN STEP FAILED — could not switch into the "
+                           "'%s' environment; aborting so we never tag in the wrong account",
+                           account_hint)
+                await browser.close()
+                return {"ok": False, "applied": [], "failed": [],
+                        "message": (f"Could not switch into the '{account_hint}' Meltwater "
+                                     "account/environment. Check the brand's Environment value in "
+                                     "Brand Studio matches an account name in Meltwater exactly.")}
+            feed_opened = await open_advanced_search_via_explore(page, brand_name or account_hint)
+            if not feed_opened:
+                log.error("apply: POST-LOGIN STEP FAILED — switched into %r but could not open "
+                           "the Reddit search for %r", account_hint, brand_name)
+                await browser.close()
+                return {"ok": False, "applied": [], "failed": [],
+                        "message": (f"Switched into '{account_hint}', but couldn't open the "
+                                     f"Reddit search for '{brand_name}'. Confirm a "
+                                     f"search named like '{brand_name} | Reddit' exists in that account.")}
 
         # Fallback (and the normal path for non-SSO accounts) — open the brand's
         # saved topic URL directly. This is the analyst's "My Meltwater topic URL
