@@ -66,29 +66,65 @@ def get_brand(name: str) -> dict | None:
 
 
 def upsert_brand(name: str, roll_up_terms: list[str] | None = None,
-                  meltwater_topic_url: str | None = None) -> dict:
+                  meltwater_topic_url: str | None = None,
+                  environment: str | None = None) -> dict:
     payload = {"name": name}
     if roll_up_terms is not None:
         payload["roll_up_terms"] = roll_up_terms
     if meltwater_topic_url is not None:
         payload["meltwater_topic_url"] = meltwater_topic_url
-    r = get_client().table("brands").upsert(payload, on_conflict="name").execute()
+    if environment is not None:
+        payload["environment"] = environment
+    try:
+        r = get_client().table("brands").upsert(payload, on_conflict="name").execute()
+    except Exception as e:
+        # Same guard as update_brand: survive a DB that lacks the environment column.
+        if "environment" in payload and "environment" in str(e).lower():
+            payload.pop("environment", None)
+            r = get_client().table("brands").upsert(payload, on_conflict="name").execute()
+        else:
+            raise
     return r.data[0] if r.data else payload
 
 
 def update_brand(brand_id: int, name: str | None = None, roll_up_terms: list[str] | None = None,
-                  meltwater_topic_url: str | None = None) -> dict:
+                  meltwater_topic_url: str | None = None,
+                  environment: str | None = None) -> dict:
     """Update an existing brand by id (lets you rename or change its topic URL)."""
     payload = {}
     if name is not None:
-        payload["name"] = name
+        # Only write the name when it actually changed. Re-sending the current
+        # name on every save can trip the unique-name constraint (e.g. a stray
+        # duplicate row), which would fail the whole save even when the analyst
+        # only edited the topic URL / roll-up / environment.
+        try:
+            cur = get_client().table("brands").select("name").eq("id", brand_id).limit(1).execute()
+            current_name = (cur.data[0]["name"] if cur.data else None)
+        except Exception:
+            current_name = None
+        if name != current_name:
+            payload["name"] = name
     if roll_up_terms is not None:
         payload["roll_up_terms"] = roll_up_terms
     if meltwater_topic_url is not None:
         payload["meltwater_topic_url"] = meltwater_topic_url
+    if environment is not None:
+        payload["environment"] = environment
     if not payload:
         return {}
-    r = get_client().table("brands").update(payload).eq("id", brand_id).execute()
+    try:
+        r = get_client().table("brands").update(payload).eq("id", brand_id).execute()
+    except Exception as e:
+        # If the DB hasn't had the `environment` column added yet, don't let it
+        # take down the whole save — retry without it so name/topic/roll-up still
+        # persist. (Run: alter table brands add column if not exists environment text;)
+        if "environment" in payload and "environment" in str(e).lower():
+            payload.pop("environment", None)
+            if not payload:
+                return {}
+            r = get_client().table("brands").update(payload).eq("id", brand_id).execute()
+        else:
+            raise
     return r.data[0] if r.data else payload
 
 
@@ -189,6 +225,38 @@ def upsert_meltwater_session(user_id: str, storage_value: str):
     get_client().table("meltwater_sessions").upsert(
         {"user_id": user_id, "storage_value": storage_value}, on_conflict="user_id"
     ).execute()
+
+
+# --- Meltwater BROWSER session (auto-captured storage_state) -------------------
+# Used for @meltwater.com SSO accounts: capture the whole logged-in browser
+# session once, reuse it so later runs skip login/OTP. Cleared only by the user
+# ("Log out of Meltwater"); while a row exists we never auto-prompt OTP.
+
+def get_meltwater_browser_state(user_id: str) -> str | None:
+    r = (get_client().table("meltwater_browser_sessions").select("browser_state")
+         .eq("user_id", user_id).limit(1).execute())
+    return r.data[0]["browser_state"] if r.data else None
+
+
+def get_meltwater_browser_state_meta(user_id: str) -> dict | None:
+    r = (get_client().table("meltwater_browser_sessions").select("updated_at,expires_at")
+         .eq("user_id", user_id).limit(1).execute())
+    return r.data[0] if r.data else None
+
+
+def upsert_meltwater_browser_state(user_id: str, browser_state: str, expires_at=None):
+    from datetime import datetime, timezone
+    payload = {"user_id": user_id, "browser_state": browser_state,
+               "updated_at": datetime.now(timezone.utc).isoformat()}
+    if expires_at is not None:
+        payload["expires_at"] = expires_at
+    get_client().table("meltwater_browser_sessions").upsert(
+        payload, on_conflict="user_id"
+    ).execute()
+
+
+def clear_meltwater_browser_state(user_id: str):
+    get_client().table("meltwater_browser_sessions").delete().eq("user_id", user_id).execute()
 
 
 # --- Reddit session cookie ----------------------------------------------------

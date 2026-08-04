@@ -47,7 +47,43 @@ const BOOKMARKLET_SRC = `(function(){
   }
 
   refreshRedditStatus();
+  refreshMwAutoSession();
 })();
+
+async function refreshMwAutoSession() {
+  const el = $("mwAutoSessionStatus");
+  if (!el) return;
+  try {
+    const d = await (await Auth.authedFetch("/api/profile/meltwater-browser-session/status")).json();
+    if (d.state === "saved") {
+      const when = d.updated_at ? new Date(d.updated_at).toLocaleString() : "";
+      el.textContent = when ? `Saved session active (since ${when}). No SMS code needed until you clear it.`
+                            : "Saved session active. No SMS code needed until you clear it.";
+    } else {
+      el.textContent = "No saved session yet — your next Apply will ask for an SMS code once, then reuse it.";
+    }
+  } catch (e) {
+    el.textContent = "";
+  }
+}
+
+if ($("clearMwSession")) $("clearMwSession").addEventListener("click", async () => {
+  const ok = await Modal.confirm({
+    title: "Log out of Meltwater?",
+    message: "This clears your saved Meltwater session. Your next Apply will log in fresh and ask for an SMS code once.",
+    okText: "Log out",
+    danger: true,
+  });
+  if (!ok) return;
+  const r = await Auth.authedFetch("/api/profile/meltwater-browser-session", { method: "DELETE" });
+  if (r.ok) {
+    Toast.info("Saved Meltwater session cleared. Next Apply will log in fresh.", "Logged out");
+    refreshMwAutoSession();
+  } else {
+    const d = await r.json().catch(() => ({}));
+    Toast.error(d.error || "Could not clear the saved session.");
+  }
+});
 
 function setMwLoginStatus(saved, updatedAt) {
   const pill = $("mwLoginStatus"), txt = $("mwLoginStatusText");

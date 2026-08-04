@@ -275,7 +275,11 @@ def normalize_tag(tag: str) -> str:
     'Kaseya - neutral' (brand-first); this makes those apply correctly too."""
     if not tag:
         return tag
-    parts = [p.strip() for p in re.split(r"\s*-\s*", tag) if p.strip()]
+    # Split only on " - " (hyphen surrounded by whitespace — the separator
+    # Meltwater uses between sentiment and brand). Do NOT split on a bare hyphen,
+    # or a brand whose name contains one (e.g. "N-Able") gets mangled into
+    # "N - Able" and the tag row can't be found in the modal.
+    parts = [p.strip() for p in re.split(r"\s+-\s+", tag) if p.strip()]
     sent = None
     brand = []
     for p in parts:
@@ -307,6 +311,30 @@ async def _close_any_modal(page):
             pass
 
 
+def _tag_candidates(raw: str) -> list[str]:
+    """Ordered list of spellings to try in the tag modal, so a tag stored in a
+    slightly different order/format than Meltwater's still matches:
+      1. normalized 'Sentiment - Brand'  (e.g. 'Neutral - N-Able')
+      2. reversed  'Brand - Sentiment'   (e.g. 'N-Able - Neutral', older format)
+      3. the raw stored tag, verbatim
+    Deduped, order preserved. The first candidate the modal actually shows wins."""
+    cands = []
+    norm = normalize_tag(raw)
+    if norm:
+        cands.append(norm)
+        parts = re.split(r"\s+-\s+", norm, maxsplit=1)
+        if len(parts) == 2:
+            cands.append(f"{parts[1]} - {parts[0]}")
+    if raw:
+        cands.append(raw)
+    seen, out = set(), []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
 async def apply_tag_to_card(page, card, tag, dry_run, delay):
     """Run the modal flow to apply one tag to one card. Returns True on success.
     Always closes the modal before returning (even on failure) so a stuck dialog
@@ -334,51 +362,61 @@ async def apply_tag_to_card(page, card, tag, dry_run, delay):
         scope = dlg or page
         await asyncio.sleep(delay)
 
-        # Type the tag into the modal's Find box (scoped to the dialog).
+        # Try each candidate spelling of the tag in turn (see _tag_candidates):
+        # type it into the modal's Find box, then look for its row. Stop at the
+        # first candidate the modal actually shows. Prefer a checkbox and use
+        # .check() (idempotent: ENSURES checked, no-op if already applied) so we
+        # never accidentally TOGGLE OFF an existing tag; fall back to clicking the
+        # row/text only when no checkbox is present.
         find = await scope.query_selector('input[placeholder*="Find" i], input[type="text"], input:not([type])')
-        if find:
-            await find.fill(tag)
-            await asyncio.sleep(max(delay, 0.6))
+        candidates = _tag_candidates(tag)
+        print(f"[tag-modal] trying tag candidates: {candidates}", flush=True)
 
-        # Select the matching tag row within the dialog. Prefer a checkbox and
-        # use .check() (idempotent: it ENSURES checked and is a no-op if the tag
-        # is already applied) so we never accidentally TOGGLE OFF an existing tag.
-        # Only fall back to clicking the row/text when no checkbox is present.
         selected = False
-        cb = await scope.query_selector(
-            f'label:has-text("{tag}") input[type="checkbox"], '
-            f'input[type="checkbox"][aria-label*="{tag}"]'
-        )
-        if cb:
+        chosen = None
+        for cand in candidates:
+            if find:
+                try:
+                    await find.fill("")
+                    await find.fill(cand)
+                    await asyncio.sleep(max(delay, 0.6))
+                except Exception:
+                    pass
+            cb = await scope.query_selector(
+                f'label:has-text("{cand}") input[type="checkbox"], '
+                f'input[type="checkbox"][aria-label*="{cand}"]'
+            )
+            if cb:
+                try:
+                    if await cb.is_checked():
+                        # already applied — leave as-is, count as success (never toggle off)
+                        print(f"[tag-modal] {cand!r} already checked in modal — not toggling", flush=True)
+                        return True
+                except Exception:
+                    pass
+                try:
+                    await cb.check()
+                    selected, chosen = True, cand
+                    break
+                except Exception:
+                    pass
             try:
-                if await cb.is_checked():
-                    # already applied — leave it as-is, count as success (never toggle off)
-                    print(f"[tag-modal] {tag!r} already checked in modal — not toggling", flush=True)
-                    return True
-            except Exception:
-                pass
-            try:
-                await cb.check()
-                selected = True
-            except Exception:
-                pass
-        if not selected:
-            try:
-                row = scope.get_by_text(tag, exact=True) if hasattr(scope, "get_by_text") else None
+                row = scope.get_by_text(cand, exact=True) if hasattr(scope, "get_by_text") else None
                 if row is not None and await row.count() > 0:
                     await row.first.click()
-                    selected = True
+                    selected, chosen = True, cand
+                    break
             except Exception:
                 pass
-        if not selected:
-            # last resort: click the text node inside the dialog
-            node = await scope.query_selector(f'text="{tag}"')
+            node = await scope.query_selector(f'text="{cand}"')
             if node:
                 await node.click()
-                selected = True
+                selected, chosen = True, cand
+                break
+            print(f"[tag-modal] candidate {cand!r} not found — trying next", flush=True)
 
         if not selected:
-            print(f"[tag-modal] could not find the tag row for {tag!r} — dumping visible rows", flush=True)
+            print(f"[tag-modal] could not find any tag row for candidates {candidates} — dumping visible rows", flush=True)
             try:
                 rows = await scope.evaluate("""el => [...el.querySelectorAll('input[type=checkbox]')]
                     .map(c => (c.closest('label,li,div')||{}).innerText || '').filter(Boolean).slice(0,25)""")
@@ -386,6 +424,9 @@ async def apply_tag_to_card(page, card, tag, dry_run, delay):
             except Exception:
                 pass
             return False
+
+        # Use the spelling that actually matched for the Apply-confirmation chip.
+        tag = chosen
 
         await asyncio.sleep(delay)
         apply_btn = await scope.query_selector('button:has-text("Apply")')

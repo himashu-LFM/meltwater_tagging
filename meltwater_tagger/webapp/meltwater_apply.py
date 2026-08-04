@@ -79,6 +79,333 @@ LOGIN_SELECTORS = {
 }
 
 
+# --- Microsoft Entra SSO (for @meltwater.com internal accounts) --------------
+# Meltwater-internal accounts (…@meltwater.com) are federated to Microsoft Entra
+# / Azure AD. After the FIRST Meltwater email screen (identical to the normal
+# flow), the browser is redirected to login.microsoftonline.com and walks:
+#   MS email -> MS password -> MFA "Approve request" -> "I can't use my
+#   Authenticator" -> "Verify your identity" chooser -> Text (SMS) -> enter code.
+# The SMS code can't be read server-side, so login_via_microsoft_sso pauses and
+# asks for it through a `request_otp` callback the web app wires to a popup on
+# the tagging screen. Any non-meltwater.com email keeps the existing Auth0 flow.
+#
+# Selectors are Microsoft's standard Entra login element IDs (stable across
+# tenants); the text fallbacks keep them working if Microsoft re-themes.
+MS_SSO_HOST = "login.microsoftonline.com"
+
+MS_SSO_SELECTORS = {
+    "email": 'input[type="email"], input[name="loginfmt"], #i0116',
+    "password": 'input[type="password"], input[name="passwd"], #i0118',
+    "submit": '#idSIButton9, input[type="submit"], button[type="submit"]',
+    # "I can't use my Microsoft Authenticator app right now"
+    "cant_use_authenticator": (
+        '#signInAnotherWay, a#signInAnotherWay, '
+        'a:has-text("I can\'t use my Microsoft Authenticator"), '
+        'a:has-text("different method"), a:has-text("another way")'
+    ),
+    "otp_field": 'input[name="otc"], #idTxtBx_SAOTCC_OTC, input[type="tel"], input[type="text"]',
+    "otp_verify": '#idSubmit_SAOTCC_Continue, #idSIButton9, input[type="submit"]',
+    "otp_error": '#idSpan_SAOTCC_Error_OTC, .alert-error, [role="alert"]',
+    # "Stay signed in?" (KMSI) prompt shown right after a successful OTP. Either
+    # button dismisses it; we click "Yes" (#idSIButton9) so the session persists
+    # and the redirect back to Meltwater fires immediately.
+    "kmsi_yes": (
+        '#idSIButton9, input[type="submit"][value="Yes"], '
+        'button:has-text("Yes")'
+    ),
+    "kmsi_no": '#idBtn_Back, input[type="button"][value="No"], button:has-text("No")',
+}
+
+
+# When true (default), the SSO step logs the exact email / password / OTP being
+# entered, so you can follow along in the backend logs. WARNING: these are
+# plaintext secrets in stdout — set MELTWATER_LOG_SECRETS=false to turn them off
+# once you're done debugging.
+_LOG_SECRETS = os.environ.get("MELTWATER_LOG_SECRETS", "true").lower() == "true"
+
+
+def is_meltwater_sso_email(email: str) -> bool:
+    """@meltwater.com accounts log in through Microsoft Entra SSO; everyone else
+    (ListenFirstMedia etc.) uses the standard Auth0 flow, unchanged."""
+    return bool(email) and email.strip().lower().endswith("@meltwater.com")
+
+
+async def _ms_fill_and_next(page, selector, value, label):
+    """Fill a Microsoft Entra field, blur it, and advance (button click, else
+    Enter). Microsoft enables the Next/Sign in button only after a blur, same as
+    the Auth0 form."""
+    field = await page.wait_for_selector(selector, timeout=20000)
+    await field.fill(value)
+    await field.press("Tab")
+    await page.wait_for_timeout(400)
+    btn = await page.query_selector(MS_SSO_SELECTORS["submit"])
+    if btn:
+        await btn.click()
+    else:
+        await field.press("Enter")
+    log.info("login[ms-sso]: submitted %s", label)
+
+
+async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[bool, str]:
+    """Drive the Meltwater -> Microsoft Entra SSO login for @meltwater.com
+    accounts, up to and INCLUDING entering the SMS OTP. Post-OTP navigation
+    (the "Stay signed in?" prompt and reaching the topic feed) is intentionally
+    not implemented yet.
+
+    request_otp: async callback (attempt, max_attempts, error) -> code|None,
+    supplied by the caller (the web app). Without it MFA can't be completed."""
+    log.info("login[ms-sso]: ===== Microsoft SSO flow START for %s =====", email)
+
+    # Screen 1 — Meltwater's own email box (identical to the standard flow).
+    log.info("login[ms-sso]: STEP 1/6 — Meltwater login page: opening %s", MELTWATER_LOGIN_URL)
+    try:
+        await page.goto(MELTWATER_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        log.error("login[ms-sso]: STEP 1/6 FAILED — could not open the Meltwater login page: %s", e)
+        return False, f"Could not open the Meltwater login page: {e}"
+    try:
+        mw_email = await page.wait_for_selector(LOGIN_SELECTORS["email"], timeout=15000)
+    except Exception:
+        log.error("login[ms-sso]: STEP 1/6 FAILED — Meltwater email field not found %s", await _diag(page))
+        return False, f"Meltwater email field not found {await _diag(page)}"
+    if _LOG_SECRETS:
+        log.info("login[ms-sso]: STEP 1/6 — typing email %r into the Meltwater box and clicking Next", email)
+    else:
+        log.info("login[ms-sso]: STEP 1/6 — typing the email into the Meltwater box and clicking Next")
+    await mw_email.fill(email)
+    await mw_email.press("Tab")
+    await page.wait_for_timeout(500)
+    await _submit_step(page, mw_email, "mw-email")
+
+    # Redirect to Microsoft Entra.
+    log.info("login[ms-sso]: STEP 2/6 — waiting for redirect to Microsoft (login.microsoftonline.com)")
+    try:
+        await page.wait_for_url(f"**{MS_SSO_HOST}**", timeout=30000)
+        log.info("login[ms-sso]: STEP 2/6 — now on Microsoft: %s", page.url)
+    except Exception:
+        # Some tenants reach the MS screen without a URL change we catch;
+        # fall through and look for the field directly.
+        log.info("login[ms-sso]: STEP 2/6 — no Microsoft URL match yet %s", await _diag(page))
+
+    # Screen 2 — Microsoft usually goes straight to the password screen for this
+    # account (the Meltwater email carries over). We do NOT require a separate MS
+    # email entry: only fill it if an email field actually appears quickly (same
+    # Meltwater address); otherwise proceed straight to the password.
+    log.info("login[ms-sso]: STEP 2/6 — checking for a Microsoft email screen (optional)")
+    try:
+        ms_email = await page.wait_for_selector(MS_SSO_SELECTORS["email"], timeout=4000)
+    except Exception:
+        ms_email = None
+    if ms_email:
+        if _LOG_SECRETS:
+            log.info("login[ms-sso]: STEP 2/6 — Microsoft email screen shown; re-entering email %r and clicking Next", email)
+        else:
+            log.info("login[ms-sso]: STEP 2/6 — Microsoft email screen shown; re-entering the Meltwater email and clicking Next")
+        await ms_email.fill(email)
+        await ms_email.press("Tab")
+        await page.wait_for_timeout(400)
+        btn = await page.query_selector(MS_SSO_SELECTORS["submit"])
+        if btn:
+            await btn.click()
+        else:
+            await ms_email.press("Enter")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=20000)
+        except Exception:
+            pass
+    else:
+        log.info("login[ms-sso]: STEP 2/6 — no Microsoft email screen; going straight to the password")
+
+    # Screen 3 — Microsoft password box.
+    if _LOG_SECRETS:
+        log.info("login[ms-sso]: STEP 3/6 — Microsoft password page: typing password %r and clicking Sign in", password)
+    else:
+        log.info("login[ms-sso]: STEP 3/6 — Microsoft password page: typing the password and clicking Sign in")
+    try:
+        await _ms_fill_and_next(page, MS_SSO_SELECTORS["password"], password, "ms-password")
+    except Exception:
+        log.error("login[ms-sso]: STEP 3/6 FAILED — Microsoft password field never appeared %s", await _diag(page))
+        return False, f"Microsoft password field never appeared {await _diag(page)}"
+    try:
+        await page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+
+    # Screen 4 — MFA "Approve sign in request": we can't approve a push, so pick
+    # "I can't use my Microsoft Authenticator app right now" to reach the method
+    # chooser. (Absent on single-method tenants that jump straight to a code.)
+    log.info("login[ms-sso]: STEP 4/6 — MFA screen: clicking \"I can't use my Microsoft Authenticator app right now\"")
+    try:
+        link = await page.wait_for_selector(MS_SSO_SELECTORS["cant_use_authenticator"], timeout=15000)
+        await link.click()
+        log.info("login[ms-sso]: STEP 4/6 — chose an alternate verification method")
+        await page.wait_for_timeout(1500)
+    except Exception:
+        log.info("login[ms-sso]: STEP 4/6 — no 'can't use authenticator' link shown (skipping) %s", await _diag(page))
+
+    # Screen 5 — "Verify your identity" chooser: click the Text (SMS) option.
+    log.info("login[ms-sso]: STEP 5/6 — 'Verify your identity' chooser: clicking the Text (SMS) option")
+    clicked_text = False
+    try:
+        text_opt = page.get_by_text(re.compile(r"^\s*Text\b", re.I))
+        if await text_opt.count() > 0:
+            await text_opt.first.click()
+            clicked_text = True
+    except Exception:
+        pass
+    if not clicked_text:
+        try:
+            node = await page.query_selector(
+                'div[role="button"]:has-text("Text"), div[data-value]:has-text("Text")')
+            if node:
+                await node.click()
+                clicked_text = True
+        except Exception:
+            pass
+    if clicked_text:
+        log.info("login[ms-sso]: STEP 5/6 — SMS code requested; Microsoft is texting the code to the phone")
+        await page.wait_for_timeout(1500)
+    else:
+        log.info("login[ms-sso]: STEP 5/6 — no Text option shown (may already be on the code screen) %s",
+                  await _diag(page))
+
+    # Screen 6 — OTP entry. Ask the analyst for the code, up to 3 attempts.
+    if request_otp is None:
+        log.error("login[ms-sso]: STEP 6/6 FAILED — an SMS code is required but no OTP input was wired up")
+        return False, ("This @meltwater.com account needs an SMS verification code, but there "
+                       "was no way to enter one (OTP entry is only available in the web app).")
+
+    max_attempts = 3
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        log.info("login[ms-sso]: STEP 6/6 — waiting for the analyst to enter the SMS code (attempt %d/%d)",
+                  attempt, max_attempts)
+        code = await request_otp(attempt, max_attempts, last_error)
+        if not code:
+            log.warning("login[ms-sso]: STEP 6/6 — no code entered in time; giving up")
+            return False, "No verification code was entered in time (waited up to 5 minutes)."
+        code = str(code).strip()
+        if _LOG_SECRETS:
+            log.info("login[ms-sso]: STEP 6/6 — got code %r; typing it on the Microsoft screen and submitting (attempt %d)", code, attempt)
+        else:
+            log.info("login[ms-sso]: STEP 6/6 — got a code; typing it on the Microsoft screen and submitting (attempt %d)", attempt)
+        try:
+            otp_field = await page.wait_for_selector(MS_SSO_SELECTORS["otp_field"], timeout=15000)
+            await otp_field.fill(code)
+            await otp_field.press("Tab")
+            await page.wait_for_timeout(300)
+            verify = await page.query_selector(MS_SSO_SELECTORS["otp_verify"])
+            if verify:
+                await verify.click()
+            else:
+                await otp_field.press("Enter")
+        except Exception as e:
+            last_error = "Could not enter the code on the Microsoft page — try again."
+            log.warning("login[ms-sso]: STEP 6/6 — OTP entry failed (attempt %d): %s", attempt, e)
+            continue
+
+        await page.wait_for_timeout(3000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+
+        err = None
+        try:
+            err_el = await page.query_selector(MS_SSO_SELECTORS["otp_error"])
+            if err_el and await err_el.is_visible():
+                err = (await err_el.inner_text()).strip()
+        except Exception:
+            pass
+        if err:
+            last_error = err or "That code wasn't accepted — check it and try again."
+            log.warning("login[ms-sso]: STEP 6/6 — code rejected on attempt %d: %s", attempt, last_error)
+            continue
+
+        # No visible error -> the code was accepted.
+        log.info("login[ms-sso]: STEP 6/6 — code accepted on attempt %d %s", attempt, await _diag(page))
+        # Finish the flow: dismiss "Stay signed in?" and wait for the redirect
+        # back to app.meltwater.com so callers land on an authenticated app page.
+        return await _finish_ms_sso(page)
+
+    log.error("login[ms-sso]: STEP 6/6 FAILED — the code was rejected %d times", max_attempts)
+    return False, f"The verification code was rejected {max_attempts} times."
+
+
+async def _finish_ms_sso(page) -> tuple[bool, str]:
+    """Post-OTP navigation for the Microsoft Entra SSO flow.
+
+    After a correct OTP, Microsoft shows a "Stay signed in?" (KMSI) prompt and
+    then redirects back to Meltwater (authorize.meltwater.com -> app.meltwater.com).
+    This dismisses the KMSI prompt (clicking "Yes" so the session persists) and
+    waits until the browser is actually back on app.meltwater.com and off any
+    login/authorize screen — otherwise the caller's next step (account switch /
+    opening the topic feed) would run against a Microsoft interstitial.
+
+    Also dismisses Meltwater's own "Create a passkey" interstitial if it appears
+    on the way in, mirroring the Auth0 flow."""
+    # STEP 7 — "Stay signed in?" (KMSI). Optional; absent on some tenants.
+    log.info("login[ms-sso]: STEP 7 — handling the 'Stay signed in?' prompt (if shown)")
+    try:
+        kmsi = await page.wait_for_selector(MS_SSO_SELECTORS["kmsi_yes"], timeout=8000)
+        await kmsi.click()
+        log.info("login[ms-sso]: STEP 7 — clicked 'Yes' on 'Stay signed in?'")
+    except Exception:
+        log.info("login[ms-sso]: STEP 7 — no 'Stay signed in?' prompt shown (skipping)")
+
+    # STEP 8 — wait for the redirect chain back to Meltwater to settle.
+    log.info("login[ms-sso]: STEP 8 — waiting for redirect back to app.meltwater.com")
+    try:
+        await page.wait_for_url("**app.meltwater.com**", timeout=45000)
+    except Exception:
+        # Some redirects don't fire a matchable URL event; fall back to polling.
+        log.info("login[ms-sso]: STEP 8 — no direct URL match; polling for the Meltwater app")
+    try:
+        await page.wait_for_load_state("networkidle", timeout=30000)
+    except Exception:
+        pass
+
+    # Poll a few seconds: the login/authorize hosts must have dropped away and we
+    # must be on app.meltwater.com before we call the login a success.
+    landed = False
+    for _ in range(10):
+        url = (page.url or "").lower()
+        on_app = "app.meltwater.com" in url
+        still_auth = any(h in url for h in ("login.microsoftonline.com",
+                                            "authorize.meltwater.com")) or "/login" in url
+        if on_app and not still_auth:
+            landed = True
+            break
+        await page.wait_for_timeout(1500)
+
+    # Meltwater's post-login "Create a passkey" interstitial (same as Auth0 flow).
+    try:
+        skip = await page.wait_for_selector(
+            'button:has-text("Continue without passkeys"), a:has-text("Continue without passkeys")',
+            timeout=5000,
+        )
+        await skip.click()
+        log.info("login[ms-sso]: STEP 8 — dismissed the passkey-enrollment prompt")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+    except Exception:
+        log.debug("login[ms-sso]: STEP 8 — no passkey prompt shown (or already past it)")
+
+    if not landed:
+        log.error("login[ms-sso]: STEP 8 FAILED — never reached the Meltwater app after OTP %s",
+                   await _diag(page))
+        return False, (
+            "Signed in to Microsoft, but the browser never landed back on the Meltwater "
+            f"app after the code {await _diag(page)}. The 'Stay signed in?' step or the "
+            "redirect back to Meltwater may have changed."
+        )
+    log.info("login[ms-sso]: STEP 8 — landed on the Meltwater app %s", await _diag(page))
+    log.info("login[ms-sso]: ===== Microsoft SSO flow DONE =====")
+    return True, "ok"
+
+
 # Result-card container selector. Broadened beyond the original guess; the
 # real one is confirmed via the feed diagnostic below and can be pinned via env.
 # Confirmed live: Meltwater's feed is a Virtuoso virtualized list; each result
@@ -552,7 +879,12 @@ async def _diag(page) -> str:
     return f"(page url: {page.url} | title: {title!r} | visible text: {snippet!r})"
 
 
-async def login_to_meltwater(page, email: str, password: str) -> tuple[bool, str]:
+async def login_to_meltwater(page, email: str, password: str, request_otp=None) -> tuple[bool, str]:
+    # @meltwater.com internal accounts federate to Microsoft Entra SSO — a
+    # different flow (MS email -> MS password -> MFA -> SMS OTP). Everything
+    # else (ListenFirstMedia etc.) uses the standard Auth0 flow below, unchanged.
+    if is_meltwater_sso_email(email):
+        return await login_via_microsoft_sso(page, email, password, request_otp)
     log.info("login: opening %s", MELTWATER_LOGIN_URL)
     try:
         await page.goto(MELTWATER_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
@@ -1157,11 +1489,14 @@ def _build_to_apply(results: list[dict]) -> dict:
     return to_apply
 
 
-def _check_apply_inputs(to_apply: dict, topic_url: str) -> dict | None:
+def _check_apply_inputs(to_apply: dict, topic_url: str, require_topic: bool = True) -> dict | None:
     if not to_apply:
         log.warning("apply: nothing to apply — no results had action='apply' with a tag")
         return {"ok": False, "message": "No posts with an 'apply' action to tag.", "applied": [], "failed": []}
-    if not topic_url:
+    # @meltwater.com (SSO) runs reach the feed via account switch + Advanced
+    # search (by brand name), so they don't need a topic URL — only ListenFirst
+    # (Auth0) runs do. Callers pass require_topic=False for the SSO path.
+    if require_topic and not topic_url:
         log.error("apply: no topic_url given")
         return {"ok": False, "message": "This brand has no Meltwater topic URL configured yet (set it once in Brand settings).",
                 "applied": [], "failed": []}
@@ -1294,7 +1629,7 @@ def _hits_from_msearch(text: str) -> dict:
     return out
 
 
-async def _capture_session(email: str, password: str, topic_url: str) -> dict:
+async def _capture_session(email: str, password: str, topic_url: str, request_otp=None) -> dict:
     """Light browser step: log in, then briefly open the topic so the app fires
     its msearch — capturing the bearer token, the account id, and the exact
     msearch URL+body. Bails as soon as those are captured so the heavy feed
@@ -1333,7 +1668,7 @@ async def _capture_session(email: str, password: str, topic_url: str) -> dict:
 
         context.on("request", on_request)
         page = await context.new_page()
-        ok, msg = await login_to_meltwater(page, email, password)
+        ok, msg = await login_to_meltwater(page, email, password, request_otp)
         if not ok:
             await browser.close()
             return {"ok": False, "message": msg}
@@ -1365,7 +1700,8 @@ async def _capture_session(email: str, password: str, topic_url: str) -> dict:
     return cap
 
 
-async def apply_via_api(email: str, password: str, topic_url: str, results: list[dict]) -> dict:
+async def apply_via_api(email: str, password: str, topic_url: str, results: list[dict],
+                        request_otp=None) -> dict:
     """Memory-safe apply: capture the session in a light browser step, then tag
     every target via Meltwater's internal HTTP API (no feed rendering)."""
     to_apply = _build_to_apply(results)
@@ -1376,7 +1712,7 @@ async def apply_via_api(email: str, password: str, topic_url: str, results: list
         return {"ok": False, "message": "Could not find searchId in the topic URL.",
                 "applied": [], "failed": []}
 
-    cap = await _capture_session(email, password, topic_url)
+    cap = await _capture_session(email, password, topic_url, request_otp)
     if not cap.get("ok"):
         return {"ok": False, "message": cap.get("message", "session capture failed"),
                 "applied": [], "failed": [], "_fallback": True}
@@ -1462,37 +1798,611 @@ async def apply_via_api(email: str, password: str, topic_url: str, results: list
             "applied": applied, "skipped_already": [], "failed": failed, "unreached": unreached}
 
 
-async def apply_results_to_meltwater(email: str, password: str, topic_url: str, results: list[dict]) -> dict:
+async def switch_meltwater_account(page, account_hint: str) -> bool:
+    """Some logins (e.g. an analyst whose SSO drops them on a personal 'Buddy'
+    workspace) start in the WRONG Meltwater account, so the brand's saved search
+    404s and the feed is empty. This switches into the workspace that owns the
+    brand: click the top-right account menu -> Account -> type the brand in
+    'Find account' -> pick the first matching account. `account_hint` is what to
+    type (the run brand name). Returns True if a switch was attempted+selected."""
+    log.info("apply: ACCOUNT SWITCH — need to switch into the '%s' workspace", account_hint)
+    try:
+        # 1) open the top-right account menu. The person icon lives inside the
+        #    account button; click it (or its clickable ancestor).
+        opened = False
+        for sel in ('[data-testid="PersonIcon"]',
+                    'button:has([data-testid="PersonIcon"])',
+                    '[data-testid="PersonIcon"] >> xpath=ancestor::button[1]'):
+            try:
+                el = await page.query_selector(sel)
+            except Exception:
+                el = None
+            if el:
+                try:
+                    await el.click()
+                    opened = True
+                    log.info("apply: ACCOUNT SWITCH — clicked account button via %s", sel)
+                    break
+                except Exception:
+                    continue
+        if not opened:
+            log.warning("apply: ACCOUNT SWITCH — account button not found %s", await _diag(page))
+            return False
+        # confirm the menu actually opened (Logout / the email should be visible)
+        try:
+            await page.wait_for_selector('text="Logout"', timeout=6000)
+            log.info("apply: ACCOUNT SWITCH — account menu is open")
+        except Exception:
+            log.warning("apply: ACCOUNT SWITCH — menu didn't open (no 'Logout' seen) %s", await _diag(page))
+
+        # 2) click "Account" in that menu. Prefer a menuitem role so we never hit
+        #    the left-nav "Account"; fall back to the LAST plain "Account" (the
+        #    overlay renders after the nav in the DOM). Verify by waiting for the
+        #    "Find account" box; if it doesn't appear, try the next candidate.
+        found_search = False
+        candidates = []
+        try:
+            mi = page.get_by_role("menuitem", name=re.compile(r"account", re.I))
+            for i in range(await mi.count()):
+                candidates.append(mi.nth(i))
+        except Exception:
+            pass
+        try:
+            tx = page.get_by_text("Account", exact=True)
+            cnt = await tx.count()
+            # iterate from last to first (overlay item is usually last)
+            for i in range(cnt - 1, -1, -1):
+                candidates.append(tx.nth(i))
+        except Exception:
+            pass
+        for cand in candidates:
+            try:
+                await cand.click(timeout=3000)
+            except Exception:
+                continue
+            try:
+                await page.wait_for_selector(
+                    'xpath=//*[contains(translate(normalize-space(.),"FIND ACCOUNT","find account"),"find account")]',
+                    timeout=3500)
+                found_search = True
+                log.info("apply: ACCOUNT SWITCH — opened the 'Accounts' panel")
+                break
+            except Exception:
+                continue
+        if not found_search:
+            log.warning("apply: ACCOUNT SWITCH — could not open the 'Accounts' panel (no 'Find account') %s",
+                         await _diag(page))
+            return False
+        await page.wait_for_timeout(400)
+
+        # 3) type the brand into the "Find account" box (the input right after the
+        #    'Find account' label).
+        find = await page.query_selector(
+            'xpath=//*[contains(translate(text(),"FIND ACCOUNT","find account"),"find account")]/following::input[1]')
+        if not find:
+            find = await page.query_selector('input[type="text"]:not([disabled])')
+        if not find:
+            log.warning("apply: ACCOUNT SWITCH — 'Find account' input not found %s", await _diag(page))
+            return False
+        await find.click()
+        await find.fill(account_hint)
+        log.info("apply: ACCOUNT SWITCH — typed %r into 'Find account'", account_hint)
+        await page.wait_for_timeout(1500)
+
+        # 4) click the first matching account result (a clickable row that appears
+        #    below the search box, NOT the input itself).
+        rowloc = page.get_by_text(re.compile(re.escape(account_hint), re.I))
+        n = await rowloc.count()
+        if n == 0:
+            log.warning("apply: ACCOUNT SWITCH — no account matched %r %s", account_hint, await _diag(page))
+            return False
+        await rowloc.last.click()
+        log.info("apply: ACCOUNT SWITCH — clicked the account matching %r (of %d matches)", account_hint, n)
+
+        # switching navigates via /switchingCompany/... then reloads home.
+        try:
+            await page.wait_for_load_state("networkidle", timeout=25000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(2000)
+
+        # 5) verify we actually switched — the top-right account button should now
+        #    read the target environment (e.g. "Kaseya - Fairhair"), not the
+        #    personal "…- Buddy" workspace. Poll a few times, since the switch
+        #    triggers a /switchingCompany reload.
+        want = account_hint.strip().lower()
+        label = ""
+        for _ in range(6):
+            label = (await _current_account_label(page)) or ""
+            if want in label.lower() and "buddy" not in label.lower():
+                log.info("apply: ACCOUNT SWITCH — VERIFIED switched into %r "
+                          "(account button now reads %r) ✓", account_hint, label)
+                return True
+            await page.wait_for_timeout(1500)
+        # Fallback to a page-text check if the button label couldn't be read.
+        diag = await _diag(page)
+        if want in diag.lower() and "buddy" not in diag.lower():
+            log.info("apply: ACCOUNT SWITCH — VERIFIED switched into %r (via page text) ✓ %s",
+                      account_hint, diag)
+            return True
+        log.warning("apply: ACCOUNT SWITCH — could NOT verify switch into %r "
+                     "(account button=%r) %s", account_hint, label, diag)
+        return False
+    except Exception as e:
+        log.warning("apply: ACCOUNT SWITCH — failed: %s: %s", type(e).__name__, e)
+        return False
+
+
+async def _current_account_label(page) -> str:
+    """Read the top-right account button's visible text (e.g. 'Kaseya - Fairhair'
+    or 'Ritu Sharma - Buddy'), used to confirm an account switch actually took."""
+    for sel in (
+        'button:has([data-testid="PersonIcon"])',
+        '[data-testid="PersonIcon"] >> xpath=ancestor::button[1]',
+        '[data-testid="PersonIcon"] >> xpath=ancestor::*[self::button or @role="button"][1]',
+    ):
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                t = (await el.inner_text()).strip()
+                if t:
+                    return " ".join(t.split())
+        except Exception:
+            continue
+    return ""
+
+
+async def open_brand_search_tile(page, brand_hint: str) -> bool:
+    """After switching into the brand's workspace we land on Home, which shows a
+    'Pick up where you left off' row of saved-search tiles (e.g. 'Kaseya V2 |
+    Reddit'). Clicking the tile does the in-app navigation that actually renders
+    the results — more reliable in automation than re-opening the saved URL.
+    Prefer a tile whose title contains the brand; else click the first tile."""
+    log.info("apply: OPEN SEARCH — looking for a 'Pick up where you left off' tile for %r", brand_hint)
+    try:
+        try:
+            await page.wait_for_selector('text="Pick up where you left off"', timeout=10000)
+        except Exception:
+            log.info("apply: OPEN SEARCH — 'Pick up where you left off' heading not seen %s", await _diag(page))
+        await page.wait_for_timeout(600)
+
+        clicked = False
+        clicked_label = ""
+        # 1) prefer a tile whose title contains the brand name.
+        try:
+            loc = page.get_by_text(re.compile(re.escape(brand_hint), re.I))
+            for i in range(await loc.count()):
+                el = loc.nth(i)
+                try:
+                    txt = (await el.inner_text()).strip()
+                except Exception:
+                    continue
+                if "|" in txt or "reddit" in txt.lower() or "news" in txt.lower() or "social" in txt.lower():
+                    await el.click()
+                    clicked, clicked_label = True, txt.replace("\n", " ")[:50]
+                    break
+        except Exception:
+            pass
+        # 2) fallback: the first search-like tile ("<name> | <source>").
+        if not clicked:
+            try:
+                first = page.get_by_text(re.compile(r"\|\s*(Reddit|News|Social|Twitter|X|Web|Blogs)\b", re.I)).first
+                if await first.count() > 0:
+                    clicked_label = (await first.inner_text()).strip().replace("\n", " ")[:50]
+                    await first.click()
+                    clicked = True
+            except Exception:
+                pass
+        if not clicked:
+            log.info("apply: OPEN SEARCH — no tile matched; will fall back to the saved URL")
+            return False
+
+        log.info("apply: OPEN SEARCH — clicked tile %r; waiting for results", clicked_label)
+        try:
+            await page.wait_for_url("**/explore/results**", timeout=20000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1500)
+        if "explore/results" not in page.url.lower():
+            log.info("apply: OPEN SEARCH — did not reach results page %s", await _diag(page))
+            return False
+        log.info("apply: OPEN SEARCH — results page open, now on %s", page.url)
+        return True
+    except Exception as e:
+        log.warning("apply: OPEN SEARCH — failed: %s: %s", type(e).__name__, e)
+        return False
+
+
+async def _explore_editor_ready(page, timeout: int = 3000) -> bool:
+    """True once the Advanced-search EDITOR is on screen (the screen that hosts
+    the 'Advanced search ▾' dropdown). Detected by editor-only landmarks —
+    'Refine with AI', 'Supported operators', or being on the /explore/results
+    (editor) URL — so the Explore landing page (which only shows the 'Advanced
+    search' card) never counts as ready.
+
+    Polls with get_by_text rather than a comma-joined `text=` selector: Playwright
+    only OR-joins CSS selectors with commas, not text-engine selectors, so the
+    joined form silently matches nothing (this was the 25s-timeout bug)."""
+    landmarks = (
+        re.compile(r"Refine with AI", re.I),
+        re.compile(r"Supported operators", re.I),
+        re.compile(r"update results", re.I),
+    )
+    waited = 0
+    step = 1000
+    while waited <= timeout:
+        # Require an actual editor LANDMARK to be painted — NOT just the
+        # /explore/results URL, which flips before the toolbar renders (racing it
+        # made us try to open the dropdown against a blank shell).
+        for rx in landmarks:
+            try:
+                if await page.get_by_text(rx).count() > 0:
+                    return True
+            except Exception:
+                pass
+        # heartbeat so the logs show we're still waiting (not stuck)
+        if waited and waited % 5000 == 0:
+            log.info("apply: ADV SEARCH (SSO) — still waiting for the search editor "
+                      "(%ds elapsed, url=%s)", waited // 1000, page.url)
+        await page.wait_for_timeout(step)
+        waited += step
+    return False
+
+
+async def open_advanced_search_via_explore(page, brand_name: str) -> bool:
+    """SSO pipeline — after switching into the brand's environment/account, reach
+    the brand's Reddit Advanced search results feed by driving the Explore UI:
+
+      1. click "Explore" (left nav)
+      2. click the "Advanced search" card
+      3. open the "Advanced search ▾" dropdown (top toolbar)
+      4. type the BRAND NAME (e.g. "Kaseya V2") into the dropdown's "Find" box
+      5. among the matches, click the one whose name contains "Reddit"
+
+    Returns True once the results feed is showing. This replaces the Home-tile
+    approach for @meltwater.com accounts (open_brand_search_tile), which was less
+    reliable. `brand_name` is the Sentiment Tagger run brand (matches the search title, e.g. "Kaseya V2 | Reddit")."""
+    log.info("apply: ADV SEARCH (SSO) — reaching the Reddit search for %r via Explore", brand_name)
+    try:
+        # 1) Explore (left nav).
+        clicked_explore = False
+        for getter in ("link", "button"):
+            try:
+                loc = page.get_by_role(getter, name=re.compile(r"^\s*Explore\s*$", re.I))
+                if await loc.count() > 0:
+                    await loc.first.click()
+                    clicked_explore = True
+                    break
+            except Exception:
+                pass
+        if not clicked_explore:
+            try:
+                el = await page.query_selector('a:has-text("Explore"), [data-testid*="explore" i]')
+                if el:
+                    await el.click()
+                    clicked_explore = True
+            except Exception:
+                pass
+        if not clicked_explore:
+            log.warning("apply: ADV SEARCH (SSO) — could not find the Explore nav item %s", await _diag(page))
+            return False
+        log.info("apply: ADV SEARCH (SSO) — clicked Explore")
+        # The Explore SPA (e.g. /a/explore/list) renders asynchronously — the
+        # page is briefly blank (bodyText=''). Wait for it to actually paint
+        # before looking for the card, or we race a blank DOM (the bug seen live).
+        # Generous timeouts + heartbeat logs: let it take as long as it needs.
+        try:
+            await page.wait_for_load_state("networkidle", timeout=60000)
+        except Exception:
+            pass
+
+        # 2) "Advanced search" card — this opens the search editor (which is what
+        #    hosts the Advanced search dropdown). Wait for it to render, click it, and
+        #    confirm the editor loaded before continuing. Skip only if the editor
+        #    is somehow already open.
+        editor_ready = await _explore_editor_ready(page)
+        if not editor_ready:
+            log.info("apply: ADV SEARCH (SSO) — waiting for the 'Advanced search' card to render "
+                      "(up to 90s)…")
+            card = None
+            try:
+                await page.wait_for_selector('text=/^\\s*Advanced search\\s*$/i', timeout=90000)
+                card = page.get_by_text(re.compile(r"^\s*Advanced search\s*$", re.I))
+            except Exception:
+                card = None
+            if not card or await card.count() == 0:
+                log.warning("apply: ADV SEARCH (SSO) — 'Advanced search' card never rendered %s",
+                             await _diag(page))
+                return False
+            await card.first.click()
+            log.info("apply: ADV SEARCH (SSO) — clicked the 'Advanced search' card; waiting for the "
+                      "editor to load (up to 120s, heartbeat every 5s)")
+            editor_ready = await _explore_editor_ready(page, timeout=120000)
+            if not editor_ready:
+                log.warning("apply: ADV SEARCH (SSO) — search editor did not load after the card %s",
+                             await _diag(page))
+                return False
+        log.info("apply: ADV SEARCH (SSO) — search editor is ready")
+
+        # 3) open the "Advanced search ▾" dropdown in the top toolbar.
+        #    The toolbar toggle can render a beat after the editor landmarks, so
+        #    POLL for it (up to 60s, heartbeat every 5s) rather than trying once.
+        #    IMPORTANT: the editor page ALSO has a global "Find" box in the top nav
+        #    with the same placeholder, so we must NOT confirm the dropdown by a
+        #    "Find" input (that box is always present). Confirm instead by the
+        #    dropdown's own menu contents ("New search" / "ALL SEARCHES").
+        toggle_sels = (
+            'button:has-text("Advanced search")',
+            '[role="button"]:has-text("Advanced search")',
+            'text=/^\\s*Advanced search\\s*$/i',
+        )
+        opened_dd = False
+        waited = 0
+        while waited <= 60000 and not opened_dd:
+            for cand in toggle_sels:
+                try:
+                    el = await page.query_selector(cand)
+                    if not el or not await el.is_visible():
+                        continue
+                    await el.click()
+                    # confirm the dropdown MENU opened via its own contents (poll
+                    # with get_by_text; a comma text= selector matches nothing)
+                    for _ in range(6):
+                        for rx in (re.compile(r"New search", re.I),
+                                   re.compile(r"ALL SEARCHES", re.I)):
+                            try:
+                                if await page.get_by_text(rx).count() > 0:
+                                    opened_dd = True
+                                    break
+                            except Exception:
+                                pass
+                        if opened_dd:
+                            break
+                        await page.wait_for_timeout(1000)
+                    if opened_dd:
+                        break
+                except Exception:
+                    continue
+            if opened_dd:
+                break
+            if waited and waited % 5000 == 0:
+                log.info("apply: ADV SEARCH (SSO) — still waiting for the 'Advanced search' toolbar "
+                          "toggle to render/open (%ds elapsed, url=%s)", waited // 1000, page.url)
+            await page.wait_for_timeout(1000)
+            waited += 1000
+        if not opened_dd:
+            log.warning("apply: ADV SEARCH (SSO) — could not open the Advanced search dropdown %s", await _diag(page))
+            return False
+        log.info("apply: ADV SEARCH (SSO) — opened the Advanced search dropdown")
+        await page.wait_for_timeout(800)
+
+        # 4) type the brand name into the DROPDOWN's "Find" box — NOT the global
+        #    nav "Find". The dropdown popover renders after the nav in the DOM, so
+        #    among the visible "Find" inputs its own is the LAST one. Prefer a Find
+        #    input that sits above the dropdown's "New search" row when we can find
+        #    it; otherwise use the last visible Find input.
+        find = None
+        try:
+            find = await page.query_selector(
+                'xpath=(//*[contains(translate(normalize-space(.),'
+                '"NEW SEARCH","new search"),"new search")]/preceding::input[@placeholder][1])[last()]')
+            if find and not await find.is_visible():
+                find = None
+        except Exception:
+            find = None
+        if not find:
+            try:
+                inputs = await page.query_selector_all('input[placeholder*="Find" i]')
+                for el in reversed(inputs):  # dropdown's Find is the last-rendered
+                    if await el.is_visible():
+                        find = el
+                        break
+            except Exception:
+                find = None
+        if not find:
+            log.warning("apply: ADV SEARCH (SSO) — dropdown 'Find' box not found %s", await _diag(page))
+            return False
+        await find.click()
+        await find.fill(brand_name)
+        log.info("apply: ADV SEARCH (SSO) — typed %r into the Advanced search 'Find' box; "
+                  "waiting for matches to load (up to 30s, heartbeat every 5s)", brand_name)
+
+        # 5) among the matches, click the search whose name contains "Reddit".
+        #    Match on both the brand name and "Reddit" so we never pick another
+        #    brand's Reddit search that happens to render. Give the filtered list
+        #    time to render rather than racing it.
+        clicked_label = ""
+        reddit_re = re.compile(
+            re.escape(brand_name) + r".*reddit|reddit.*" + re.escape(brand_name), re.I)
+        waited = 0
+        while waited <= 30000:
+            try:
+                if await page.get_by_text(reddit_re).count() > 0:
+                    break
+            except Exception:
+                pass
+            if waited and waited % 5000 == 0:
+                log.info("apply: ADV SEARCH (SSO) — still waiting for the %r Reddit search to "
+                          "appear (%ds elapsed)", brand_name, waited // 1000)
+            await page.wait_for_timeout(1000)
+            waited += 1000
+        try:
+            loc = page.get_by_text(reddit_re)
+            if await loc.count() > 0:
+                clicked_label = (await loc.first.inner_text()).strip().replace("\n", " ")[:60]
+                await loc.first.click()
+                log.info("apply: ADV SEARCH (SSO) — clicked search %r", clicked_label)
+        except Exception:
+            pass
+        if not clicked_label:
+            # Fallback: any visible row containing "Reddit" (the Find box already
+            # filtered to this brand's searches).
+            try:
+                loc = page.get_by_text(re.compile(r"reddit", re.I))
+                if await loc.count() > 0:
+                    clicked_label = (await loc.first.inner_text()).strip().replace("\n", " ")[:60]
+                    await loc.first.click()
+                    log.info("apply: ADV SEARCH (SSO) — clicked Reddit search (fallback) %r", clicked_label)
+            except Exception:
+                pass
+        if not clicked_label:
+            log.warning("apply: ADV SEARCH (SSO) — no 'Reddit' search matched %r %s",
+                         brand_name, await _diag(page))
+            return False
+
+        # results should load in place (the editor stays on /explore).
+        try:
+            await page.wait_for_load_state("networkidle", timeout=25000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1500)
+        log.info("apply: ADV SEARCH (SSO) — Reddit search open, now on %s", page.url)
+        return True
+    except Exception as e:
+        log.warning("apply: ADV SEARCH (SSO) — failed: %s: %s", type(e).__name__, e)
+        return False
+
+
+async def _is_logged_in(page) -> bool:
+    """True if opening app.meltwater.com lands on the authenticated app (the
+    account button is present) rather than a Meltwater/Microsoft login page. Used
+    to decide whether a reused saved session is still valid — if so we skip the
+    whole login/OTP flow entirely."""
+    try:
+        await page.goto(config.MELTWATER_URL, wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        return False
+    for _ in range(20):
+        url = (page.url or "").lower()
+        if ("authorize.meltwater.com" in url or "microsoftonline.com" in url
+                or "/login" in url):
+            return False
+        try:
+            el = await page.query_selector(
+                '[data-testid="PersonIcon"], button:has([data-testid="PersonIcon"])')
+            if el and await el.is_visible():
+                return True
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+    return False
+
+
+async def apply_results_to_meltwater(email: str, password: str, topic_url: str, results: list[dict],
+                                     request_otp=None, account_hint=None, brand_name=None,
+                                     saved_state=None, on_state_captured=None) -> dict:
     """
-    Login-automation path: fills the Auth0 email/password/passkey flow, then
-    tags posts. results: classification results, each with permalink/tag/action.
+    Login-automation path: fills the Auth0 email/password/passkey flow (or, for
+    @meltwater.com accounts, the Microsoft Entra SSO + SMS-OTP flow), then tags
+    posts. results: classification results, each with permalink/tag/action.
     Only entries with action == 'apply' and a non-empty tag are actually applied.
+
+    Session reuse (SSO): if `saved_state` (a Playwright storage_state JSON string)
+    is given, it's loaded into the browser first. If that session is still valid,
+    login/OTP is skipped entirely. If it's expired, we DO NOT auto-prompt OTP —
+    we return `_session_expired` so the caller can ask the analyst to clear it
+    (per the product rule: never OTP while a saved session exists). On a fresh
+    login (no saved_state), the resulting session is captured via
+    `on_state_captured(state_json)` so subsequent runs need no OTP.
     """
     to_apply = _build_to_apply(results)
-    log.info("apply_results_to_meltwater: %d posts to tag, topic_url=%s", len(to_apply), topic_url)
-    bad_input = _check_apply_inputs(to_apply, topic_url)
+    log.info("apply_results_to_meltwater: %d posts to tag, topic_url=%s (saved_session=%s)",
+              len(to_apply), topic_url, bool(saved_state))
+    # SSO (@meltwater.com) runs — account_hint is the environment — reach the feed
+    # via account switch + Advanced search, so a topic URL isn't required.
+    bad_input = _check_apply_inputs(to_apply, topic_url, require_topic=not bool(account_hint))
     if bad_input:
         return bad_input
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
-        context = await _new_browser_context(browser)
+        # Load the saved browser session (cookies + localStorage) if we have one.
+        ctx_kwargs = {}
+        if saved_state:
+            try:
+                ctx_kwargs["storage_state"] = json.loads(saved_state)
+            except Exception as e:
+                log.warning("apply: saved session couldn't be parsed (%s) — ignoring it", e)
+        context = await _new_browser_context(browser, **ctx_kwargs)
         page = await context.new_page()
 
-        ok, msg = await login_to_meltwater(page, email, password)
-        if not ok:
-            log.error("apply_results_to_meltwater: login failed — %s", msg)
-            await browser.close()
-            return {"ok": False, "message": msg, "applied": [], "failed": []}
+        if saved_state:
+            log.info("apply: SESSION REUSE — trying the saved Meltwater session (no OTP)…")
+            if await _is_logged_in(page):
+                log.info("apply: SESSION REUSE — saved session is VALID; skipping login/OTP ✓")
+            else:
+                # Expired/invalid. Per the product rule, do NOT auto-prompt OTP
+                # while a saved session exists — ask the user to clear it.
+                log.warning("apply: SESSION REUSE — saved session is EXPIRED/invalid; NOT prompting "
+                             "OTP. User must clear it on Profile to log in fresh.")
+                await browser.close()
+                return {"ok": False, "applied": [], "failed": [], "_session_expired": True,
+                        "message": ("Your saved Meltwater session has expired. Go to Profile → "
+                                     "'Log out of Meltwater / clear saved session', then run Apply "
+                                     "again to log in once (you'll enter an SMS code that one time).")}
+        else:
+            ok, msg = await login_to_meltwater(page, email, password, request_otp)
+            if not ok:
+                log.error("apply_results_to_meltwater: login failed — %s", msg)
+                await browser.close()
+                return {"ok": False, "message": msg, "applied": [], "failed": []}
+            # Capture the fresh logged-in session so future runs skip OTP.
+            if on_state_captured is not None:
+                try:
+                    state = await context.storage_state()
+                    on_state_captured(json.dumps(state))
+                    log.info("apply: SESSION SAVE — captured the logged-in session for reuse "
+                              "(future runs won't need OTP until it's cleared) ✓")
+                except Exception as e:
+                    log.warning("apply: SESSION SAVE — could not capture the session: %s", e)
 
-        log.info("apply_results_to_meltwater: navigating to topic feed")
-        try:
-            await page.goto(topic_url, wait_until="domcontentloaded", timeout=30000)
-        except Exception as e:
-            log.error("apply_results_to_meltwater: failed to open topic_url: %s: %s", type(e).__name__, e)
-            await browser.close()
-            return {"ok": False, "message": f"Could not open the Meltwater topic feed: {e}", "applied": [], "failed": []}
-        await asyncio.sleep(2)
+        # Post-login STEP 0 (SSO / @meltwater.com only) — switch into the brand's
+        # ENVIRONMENT account, then reach the brand's Reddit search through
+        # the Explore UI (Explore -> Advanced search -> Advanced search dropdown ->
+        # find brand name -> pick the Reddit search). `account_hint` here is the
+        # brand's ENVIRONMENT (e.g. "Kaseya - Fairhair"); `brand_name` is the run
+        # brand (e.g. "Kaseya V2"), which matches the Advanced search title.
+        feed_opened = False
+        if account_hint:
+            switched = await switch_meltwater_account(page, account_hint)
+            if not switched:
+                log.error("apply: POST-LOGIN STEP FAILED — could not switch into the "
+                           "'%s' environment; aborting so we never tag in the wrong account",
+                           account_hint)
+                await browser.close()
+                return {"ok": False, "applied": [], "failed": [],
+                        "message": (f"Could not switch into the '{account_hint}' Meltwater "
+                                     "account/environment. Check the brand's Environment value in "
+                                     "Brand Studio matches an account name in Meltwater exactly.")}
+            feed_opened = await open_advanced_search_via_explore(page, brand_name or account_hint)
+            if not feed_opened:
+                log.error("apply: POST-LOGIN STEP FAILED — switched into %r but could not open "
+                           "the Reddit search for %r", account_hint, brand_name)
+                await browser.close()
+                return {"ok": False, "applied": [], "failed": [],
+                        "message": (f"Switched into '{account_hint}', but couldn't open the "
+                                     f"Reddit search for '{brand_name}'. Confirm a "
+                                     f"search named like '{brand_name} | Reddit' exists in that account.")}
+
+        # Fallback (and the normal path for non-SSO accounts) — open the brand's
+        # saved topic URL directly. This is the analyst's "My Meltwater topic URL
+        # (personal override)" (falling back to the org default), resolved
+        # server-side. We're already logged in, so the feed shows directly.
+        if not feed_opened:
+            log.info("apply: POST-LOGIN STEP — opening the brand's saved topic URL: %s", topic_url)
+            try:
+                await page.goto(topic_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                log.error("apply: POST-LOGIN STEP FAILED — could not open the topic URL: %s: %s",
+                           type(e).__name__, e)
+                await browser.close()
+                return {"ok": False, "message": f"Could not open the Meltwater topic feed: {e}", "applied": [], "failed": []}
+            await asyncio.sleep(2)
+            if "login" in page.url.lower():
+                log.error("apply: POST-LOGIN STEP — bounced back to a login page (session not carried) %s",
+                           await _diag(page))
+            else:
+                log.info("apply: POST-LOGIN STEP — topic feed loaded, now on %s", page.url)
 
         report = await _walk_feed_and_tag(page, to_apply)
         await browser.close()
