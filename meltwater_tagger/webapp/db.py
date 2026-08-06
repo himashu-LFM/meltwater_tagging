@@ -12,6 +12,7 @@ user_id explicitly, on top of the Row Level Security policies in schema.sql.
 
 import os
 
+import httpx
 from supabase import create_client, Client
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -51,6 +52,84 @@ def verify_token(access_token: str):
         return resp.user
     except Exception:
         return None
+
+
+# --- Auth admin (forgot-password flow) --------------------------------------
+# These hit Supabase's GoTrue admin API with the service_role key (server-side
+# only). Used to check if an email is registered and to reset a password.
+
+def _admin_headers() -> dict:
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def find_auth_user_by_email(email: str) -> dict | None:
+    """Return the auth user dict for this email, or None if not registered.
+    Lists users via the admin API and matches case-insensitively."""
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    url = f"{SUPABASE_URL}/auth/v1/admin/users"
+    try:
+        with httpx.Client(timeout=30) as c:
+            # per_page large enough for an internal team; paginate a few pages to be safe.
+            for page in range(1, 6):
+                r = c.get(url, headers=_admin_headers(),
+                          params={"page": page, "per_page": 200})
+                r.raise_for_status()
+                data = r.json()
+                users = data.get("users", data) if isinstance(data, dict) else data
+                if not users:
+                    break
+                for u in users:
+                    if (u.get("email") or "").lower() == email:
+                        return u
+                if len(users) < 200:
+                    break
+    except Exception:
+        return None
+    return None
+
+
+def update_auth_user_password(user_id: str, new_password: str) -> bool:
+    """Set a new password for the given auth user (admin API). Supabase hashes it
+    into auth.users.encrypted_password. Returns True on success."""
+    url = f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}"
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.put(url, headers=_admin_headers(), json={"password": new_password})
+            r.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+# --- Password-reset codes ---------------------------------------------------
+
+def upsert_reset_code(email: str, code_hash: str, expires_at: str):
+    get_client().table("pw_reset_codes").upsert(
+        {"email": email.strip().lower(), "code_hash": code_hash,
+         "expires_at": expires_at, "attempts": 0}, on_conflict="email"
+    ).execute()
+
+
+def get_reset_code(email: str) -> dict | None:
+    r = (get_client().table("pw_reset_codes").select("*")
+         .eq("email", email.strip().lower()).limit(1).execute())
+    return r.data[0] if r.data else None
+
+
+def bump_reset_attempts(email: str, attempts: int):
+    get_client().table("pw_reset_codes").update(
+        {"attempts": attempts}).eq("email", email.strip().lower()).execute()
+
+
+def delete_reset_code(email: str):
+    get_client().table("pw_reset_codes").delete().eq(
+        "email", email.strip().lower()).execute()
 
 
 # --- Brands -----------------------------------------------------------------

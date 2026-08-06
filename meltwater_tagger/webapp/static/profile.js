@@ -181,9 +181,14 @@ $("saveMw").addEventListener("click", async () => {
   });
   const data = await r.json();
   if (r.ok) {
-    Toast.success("Meltwater login saved.", "Credentials updated");
+    Toast.success(
+      data.session_cleared
+        ? "Meltwater login saved. Saved session cleared — your next Apply will log in with the new credentials (one SMS code)."
+        : "Meltwater login saved.",
+      "Credentials updated");
     lockPasswordField(!!email);
     setMwLoginStatus(!!email, new Date().toISOString());
+    refreshMwAutoSession();
   }
   else Toast.error(data.error || "Could not save your Meltwater login.");
 });

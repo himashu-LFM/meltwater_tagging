@@ -13,6 +13,7 @@ the same pipeline as classify.py, so tagging logic is identical everywhere.
 import asyncio
 import io
 import os
+import re
 import sys
 
 import pandas as pd
@@ -35,6 +36,7 @@ from classify import (
 import httpx
 
 import db
+import emailer
 from auth import require_auth
 from fetchers import fetch_via_reddit_cookie
 from meltwater_apply import (
@@ -277,6 +279,112 @@ def save_brand_tags_route(brand_id):
 
 # --- profile: meltwater + reddit creds ---------------------------------------
 
+@app.route("/api/auth/welcome", methods=["POST"])
+def auth_welcome():
+    """Send a welcome email right after a new account is created. Called by the
+    signup page after Supabase signUp succeeds. Best-effort: a failure here never
+    blocks the signup (the account already exists in Supabase)."""
+    from datetime import datetime, timezone
+    data = request.get_json(force=True, silent=True) or {}
+    email = (data.get("email") or "").strip()
+    if not email or "@" not in email:
+        return jsonify({"ok": False, "error": "valid email required"}), 400
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    sent = emailer.send_welcome_email(email, when)
+    return jsonify({"ok": True, "emailed": sent})
+
+
+@app.route("/api/auth/forgot-password", methods=["POST"])
+def auth_forgot_password():
+    """Start a password reset: if the email is registered, email a 6-digit code;
+    otherwise tell the caller it's not registered."""
+    import hashlib
+    import secrets
+    from datetime import datetime, timezone, timedelta
+    data = request.get_json(force=True, silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return jsonify({"ok": False, "error": "Enter a valid email address."}), 400
+    if not db.is_configured():
+        return jsonify({"ok": False, "error": "Server is not configured."}), 500
+
+    user = db.find_auth_user_by_email(email)
+    if not user:
+        log.info("forgot-password: no account for %s", email)
+        return jsonify({"ok": False, "registered": False,
+                        "error": "No account is registered with this email."}), 404
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    try:
+        db.upsert_reset_code(email, code_hash, expires)
+    except Exception:
+        log.exception("forgot-password: could not store reset code for %s", email)
+        return jsonify({"ok": False, "error": "Could not start the reset. Try again."}), 500
+
+    sent = emailer.send_reset_code_email(email, code, minutes=10)
+    if not sent:
+        return jsonify({"ok": False, "error": "Couldn't send the code email — check email setup."}), 500
+    log.info("forgot-password: reset code emailed to %s", email)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/reset-password", methods=["POST"])
+def auth_reset_password():
+    """Verify the emailed code and set the new password."""
+    import hashlib
+    from datetime import datetime, timezone
+    data = request.get_json(force=True, silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    code = (data.get("code") or "").strip()
+    new_password = data.get("new_password") or ""
+    if not email or not code:
+        return jsonify({"ok": False, "error": "Email and code are required."}), 400
+    if len(new_password) < 6:
+        return jsonify({"ok": False, "error": "Password must be at least 6 characters."}), 400
+    if not db.is_configured():
+        return jsonify({"ok": False, "error": "Server is not configured."}), 500
+
+    rec = db.get_reset_code(email)
+    if not rec:
+        return jsonify({"ok": False, "error": "No reset in progress — request a new code."}), 400
+
+    # expiry
+    try:
+        exp = datetime.fromisoformat(str(rec["expires_at"]).replace("Z", "+00:00"))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+    except Exception:
+        exp = None
+    if exp is None or datetime.now(timezone.utc) > exp:
+        db.delete_reset_code(email)
+        return jsonify({"ok": False, "error": "That code has expired — request a new one."}), 400
+
+    # attempt limit
+    attempts = int(rec.get("attempts") or 0)
+    if attempts >= 5:
+        db.delete_reset_code(email)
+        return jsonify({"ok": False, "error": "Too many attempts — request a new code."}), 429
+
+    if hashlib.sha256(code.encode()).hexdigest() != rec["code_hash"]:
+        db.bump_reset_attempts(email, attempts + 1)
+        return jsonify({"ok": False, "error": "Incorrect code. Check it and try again."}), 400
+
+    user = db.find_auth_user_by_email(email)
+    if not user:
+        db.delete_reset_code(email)
+        return jsonify({"ok": False, "error": "No account is registered with this email."}), 404
+
+    if not db.update_auth_user_password(user["id"], new_password):
+        log.error("reset-password: password update failed for %s", email)
+        return jsonify({"ok": False, "error": "Could not update the password. Try again."}), 500
+
+    db.delete_reset_code(email)
+    log.info("reset-password: password updated for %s", email)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/profile/meltwater", methods=["GET"])
 @require_auth
 def get_meltwater_profile():
@@ -294,10 +402,31 @@ def set_meltwater_profile():
         log.warning("POST /api/profile/meltwater rejected: missing email (user=%s)", g.user.id)
         return jsonify({"error": "Meltwater email is required"}), 400
     try:
+        # Did the Meltwater login actually change? (email changed, or a new
+        # password was entered). If so, the saved browser session belongs to the
+        # OLD login and must be cleared so the next Apply logs in fresh with the
+        # new credentials. Re-saving the same email with a blank password leaves
+        # the session intact (no needless OTP).
+        old = db.get_meltwater_creds(g.user.id) if db.is_configured() else None
+        old_email = ((old or {}).get("meltwater_email") or "").strip().lower()
+        creds_changed = (old_email != email.strip().lower()) or bool(password)
+
         db.upsert_meltwater_creds(g.user.id, email, password)
         # never log the password value itself
-        log.info("Meltwater creds saved for user=%s (password_changed=%s)", g.user.id, bool(password))
-        return jsonify({"ok": True})
+        log.info("Meltwater creds saved for user=%s (password_changed=%s, creds_changed=%s)",
+                  g.user.id, bool(password), creds_changed)
+
+        cleared = False
+        if creds_changed and db.is_configured():
+            try:
+                db.clear_meltwater_browser_state(g.user.id)
+                cleared = True
+                log.info("Meltwater creds changed for user=%s — cleared saved browser session "
+                          "so the new login is used on the next Apply", g.user.id)
+            except Exception:
+                log.exception("Could not clear browser session after creds change (user=%s)", g.user.id)
+
+        return jsonify({"ok": True, "session_cleared": cleared})
     except Exception as e:
         log.exception("POST /api/profile/meltwater failed (user=%s)", g.user.id)
         return jsonify({"error": str(e)}), 500
@@ -577,7 +706,12 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
     out = []
     for d in decisions:
         tag = d.get("tag") or ""
-        sentiment = tag.split(" - ", 1)[1] if tag and " - " in tag else ""
+        # Find the sentiment word anywhere in the tag — never assume which side of
+        # the "-" it's on or how the tag is separated. We just locate whichever of
+        # the three sentiment words appears (as a whole word), so a hyphenated
+        # brand like "N-Able" is never mistaken for the sentiment.
+        _m = re.search(r"\b(positive|negative|neutral)\b", tag, re.I)
+        sentiment = _m.group(1).capitalize() if _m else ""
         out.append({
             "permalink": d["permalink"],
             "action": d.get("action"),
