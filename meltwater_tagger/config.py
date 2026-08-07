@@ -86,3 +86,16 @@ ACTION_DELAY_MS = int(os.environ.get("MELTWATER_ACTION_DELAY_MS", "400"))
 
 DECISIONS_FILE = os.environ.get("MELTWATER_DECISIONS_FILE", "decisions.json")
 REPORT_FILE = os.environ.get("MELTWATER_REPORT_FILE", "report.md")
+
+# --- Outbound email (welcome + password-reset code) -----------------------
+# Standard SMTP; works with Gmail/Google Workspace (smtp.gmail.com:587 + an App
+# Password), SendGrid, etc. If SMTP_HOST is unset, email features no-op (and log
+# a warning) instead of crashing.
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+# Friendly From header; falls back to SMTP_USER if not set.
+SMTP_FROM = os.environ.get("SMTP_FROM", "") or SMTP_USER
+# Public URL of the app, used in email copy / links.
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "https://listeningmw.listenfirst.in")

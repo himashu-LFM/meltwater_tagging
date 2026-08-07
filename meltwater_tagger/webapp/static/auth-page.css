@@ -34,6 +34,10 @@
 .auth-form{display:flex;flex-direction:column;gap:16px}
 .auth-form.hidden{display:none}
 .auth-submit{width:100%;margin-top:6px}
+.auth-link{background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;
+  padding:4px 0;margin-top:2px;text-align:center;width:100%;transition:color .15s}
+.auth-link:hover{color:var(--accent)}
+.reset-step.hidden{display:none}
 .auth-msg{margin-top:16px;font-size:14px;min-height:20px;text-align:center}
 .auth-msg.ok{color:var(--pos)}
 .auth-msg.err{color:var(--neg)}

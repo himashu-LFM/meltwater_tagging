@@ -129,6 +129,23 @@ create policy "own meltwater browser session" on meltwater_browser_sessions
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- ---------------------------------------------------------------------------
+-- 2d) Password-reset codes (forgot-password flow) --
+--     One active 6-digit code per email (hashed, short-lived). Written/read
+--     ONLY by the backend using the service_role key; RLS is enabled with NO
+--     policy so anon/user tokens can't read codes.
+-- ---------------------------------------------------------------------------
+create table if not exists pw_reset_codes (
+  email text primary key,
+  code_hash text not null,       -- sha256 hex of the 6-digit code (never store the code itself)
+  expires_at timestamptz not null,
+  attempts int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+alter table pw_reset_codes enable row level security;
+-- intentionally no policy: only the service_role backend (bypasses RLS) touches it.
+
+-- ---------------------------------------------------------------------------
 -- 3) Per-user Reddit session cookie — fallback fetch method until the Reddit
 --    Data API key is available. One cookie string per user, editable.
 -- ---------------------------------------------------------------------------

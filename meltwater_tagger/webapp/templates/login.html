@@ -50,6 +50,39 @@
         <button type="submit" class="btn primary auth-submit">
           <span class="btn-shine"></span><span class="btn-label">Log in</span>
         </button>
+        <button type="button" id="forgotLink" class="auth-link">Forgot password?</button>
+      </form>
+
+      <!-- Forgot-password / reset panel -->
+      <form id="resetForm" class="auth-form hidden">
+        <div class="reset-step" id="resetStep1">
+          <label class="field">
+            <span class="field-label">Email</span>
+            <input type="email" id="resetEmail" autocomplete="email" placeholder="you@company.com" />
+          </label>
+          <button type="button" id="sendCodeBtn" class="btn primary auth-submit">
+            <span class="btn-shine"></span><span class="btn-label">Send reset code</span>
+          </button>
+        </div>
+
+        <div class="reset-step hidden" id="resetStep2">
+          <p class="section-sub" style="margin:0 0 12px">
+            We emailed a 6-digit code to <b id="resetEmailEcho"></b>. Enter it below with your new password.
+          </p>
+          <label class="field">
+            <span class="field-label">Reset code</span>
+            <input type="text" id="resetCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" />
+          </label>
+          <label class="field">
+            <span class="field-label">New password</span>
+            <input type="password" id="resetNewPassword" minlength="6" autocomplete="new-password" placeholder="at least 6 characters" />
+          </label>
+          <button type="button" id="resetBtn" class="btn primary auth-submit">
+            <span class="btn-shine"></span><span class="btn-label">Reset password</span>
+          </button>
+        </div>
+
+        <button type="button" id="backToLogin" class="auth-link">← Back to log in</button>
       </form>
 
       <form id="signupForm" class="auth-form hidden">
