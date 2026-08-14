@@ -56,6 +56,17 @@ async function selectBrand(id) {
     $("myTopicUrl").value = d.topic_url || "";
   });
 
+  // Taxonomy brands (Bentley) don't use positive/negative/neutral — they tag
+  // from a big protocol taxonomy and are guided by uploaded client feedback docs.
+  // So for them we swap the sentiment "Tags & rules" card for an upload card.
+  if (isTaxonomyBrand(selected.name)) {
+    $("tagsHeading").textContent = "Client feedback docs";
+    renderFeedbackDocs(id);
+    return;
+  }
+
+  $("tagsHeading").textContent = "Tags & rules";
+
   // load tags/rules
   const r = await Auth.authedFetch(`/api/brands/${id}/tags`);
   const data = await r.json();
@@ -78,6 +89,121 @@ async function selectBrand(id) {
           placeholder="Optional rule for ${s} — e.g. what counts as ${s} for ${escAttr(selected.name)}. Leave blank to use default logic.">${escapeHtml(t.rule || "")}</textarea>
       </div>`;
   }).join("");
+}
+
+// Which brands use the taxonomy pipeline (many tags + feedback docs) instead of
+// sentiment. Kept as a simple list for now; add future taxonomy brands here.
+function isTaxonomyBrand(name) {
+  return (name || "").trim().toLowerCase() === "bentley";
+}
+
+// Render the "Client feedback docs" card: upload + list of uploaded docs.
+async function renderFeedbackDocs(id) {
+  $("tagCards").innerHTML = `
+    <div class="tag-card">
+      <p class="section-sub" style="margin:0 0 12px">
+        Upload the client's "Tagging Adjustments" feedback docs (.docx, .txt, .md).
+        These become the living rules the classifier follows — no positive/negative/neutral here.
+      </p>
+      <div class="row" style="margin-bottom:0; align-items:center">
+        <input type="file" id="fbFile" accept=".docx,.txt,.md" />
+        <button class="btn primary" id="fbUploadBtn" style="flex:0 0 auto">
+          <span class="btn-shine"></span><span class="btn-label">Upload doc</span>
+        </button>
+      </div>
+      <div id="fbList" style="margin-top:16px"></div>
+    </div>
+    <div class="tag-card" style="margin-top:12px">
+      <div class="field-label" style="margin:0 0 10px">Extracted rules <span class="section-sub" id="fbRuleCount"></span></div>
+      <p class="section-sub" style="margin:0 0 12px">Each uploaded doc is parsed into reusable rules the classifier follows on future articles.</p>
+      <div id="fbRules"></div>
+    </div>`;
+
+  loadFeedbackDocs(id);
+  loadFeedbackRules(id);
+
+  $("fbUploadBtn").addEventListener("click", async () => {
+    const input = $("fbFile");
+    if (!input.files || !input.files[0]) return Toast.error("Choose a file first.");
+    const fd = new FormData();
+    fd.append("file", input.files[0]);
+    $("fbUploadBtn").disabled = true;
+    const btnLabel = $("fbUploadBtn").querySelector(".btn-label");
+    const prev = btnLabel ? btnLabel.textContent : "";
+    if (btnLabel) btnLabel.textContent = "Parsing…";
+    try {
+      const r = await Auth.authedFetch(`/api/brands/${id}/feedback-docs`, { method: "POST", body: fd });
+      const d = await r.json();
+      if (!r.ok) return Toast.error(d.error || "Upload failed");
+      if (d.extract_error) {
+        Toast.error(`Doc saved, but rule extraction failed: ${d.extract_error}`, "Partial");
+      } else {
+        Toast.success(`Uploaded "${d.doc.filename}" — ${d.rules_added} rule(s) extracted.`, "Doc parsed");
+      }
+      input.value = "";
+      loadFeedbackDocs(id);
+      loadFeedbackRules(id);
+    } finally {
+      $("fbUploadBtn").disabled = false;
+      if (btnLabel) btnLabel.textContent = prev;
+    }
+  });
+}
+
+async function loadFeedbackRules(id) {
+  const r = await Auth.authedFetch(`/api/brands/${id}/feedback-rules`);
+  const d = await r.json();
+  const rules = d.rules || [];
+  $("fbRuleCount").textContent = rules.length ? `· ${rules.length}` : "";
+  if (!rules.length) {
+    $("fbRules").innerHTML = `<p class="section-sub" style="margin:0">No rules yet — upload a doc to extract some.</p>`;
+    return;
+  }
+  $("fbRules").innerHTML = rules.map(rule => `
+    <div class="tag-card" style="margin-bottom:8px">
+      <div class="tag-card-head" style="justify-content:space-between">
+        <span class="chip flag">${escapeHtml(rule.category || "general")}</span>
+        <button class="mini-btn danger" data-rule="${escAttr(rule.id)}">Delete</button>
+      </div>
+      <div style="margin-top:8px">${escapeHtml(rule.rule_text || "")}</div>
+      ${rule.example_url ? `<div class="section-sub" style="margin-top:6px">↳ ${escapeHtml(rule.example_url)}</div>` : ""}
+    </div>`).join("");
+  $("fbRules").querySelectorAll("button[data-rule]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const r2 = await Auth.authedFetch(`/api/brands/${id}/feedback-rules/${btn.dataset.rule}`, { method: "DELETE" });
+      if (r2.ok) { Toast.success("Rule deleted."); loadFeedbackRules(id); }
+      else Toast.error("Could not delete rule.");
+    });
+  });
+}
+
+async function loadFeedbackDocs(id) {
+  const r = await Auth.authedFetch(`/api/brands/${id}/feedback-docs`);
+  const d = await r.json();
+  const docs = d.docs || [];
+  if (!docs.length) {
+    $("fbList").innerHTML = `<p class="section-sub" style="margin:0">No feedback docs uploaded yet.</p>`;
+    return;
+  }
+  $("fbList").innerHTML = docs.map(doc => `
+    <div class="tag-card-head" style="justify-content:space-between; margin-bottom:8px">
+      <span>📄 ${escapeHtml(doc.filename || "untitled")}
+        <span class="section-sub">· ${new Date(doc.created_at).toLocaleDateString()}</span></span>
+      <button class="mini-btn danger" data-doc="${escAttr(doc.id)}">Remove</button>
+    </div>`).join("");
+  $("fbList").querySelectorAll("button[data-doc]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const ok = await Modal.confirm({
+        title: "Remove this doc?",
+        message: "This deletes the uploaded feedback doc. This can't be undone.",
+        okText: "Remove", danger: true,
+      });
+      if (!ok) return;
+      const r = await Auth.authedFetch(`/api/brands/${id}/feedback-docs/${btn.dataset.doc}`, { method: "DELETE" });
+      if (r.ok) { Toast.success("Doc removed."); loadFeedbackDocs(id); }
+      else Toast.error("Could not remove doc.");
+    });
+  });
 }
 
 $("addBrandBtn").addEventListener("click", async () => {
@@ -143,24 +269,23 @@ $("saveConfigBtn").addEventListener("click", async () => {
   });
   if (!r1.ok) { const d = await r1.json(); return Toast.error(d.error || "Could not save brand details"); }
 
-  // 2) save tags + rules
-  const tags = SENTIMENTS.map(s => ({
-    sentiment: s,
-    tag_label: document.querySelector(`.tag-label-input[data-s="${s}"]`).value.trim()
-               || `${s.charAt(0).toUpperCase() + s.slice(1)} - ${name}`,
-    rule: document.querySelector(`.tag-rule-input[data-s="${s}"]`).value.trim(),
-  }));
-  const r2 = await Auth.authedFetch(`/api/brands/${selected.id}/tags`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tags }),
-  });
-  if (!r2.ok) { const d = await r2.json(); return Toast.error(d.error || "Could not save tags & rules"); }
+  // 2) save tags + rules — sentiment brands only. Taxonomy brands (Bentley)
+  //    have no sentiment inputs on screen; their rules come from feedback docs.
+  if (!isTaxonomyBrand(name)) {
+    const tags = SENTIMENTS.map(s => ({
+      sentiment: s,
+      tag_label: document.querySelector(`.tag-label-input[data-s="${s}"]`).value.trim()
+                 || `${s.charAt(0).toUpperCase() + s.slice(1)} - ${name}`,
+      rule: document.querySelector(`.tag-rule-input[data-s="${s}"]`).value.trim(),
+    }));
+    const r2 = await Auth.authedFetch(`/api/brands/${selected.id}/tags`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags }),
+    });
+    if (!r2.ok) { const d = await r2.json(); return Toast.error(d.error || "Could not save tags & rules"); }
+  }
 
-  const hasRules = tags.some(t => t.rule);
-  Toast.success(
-    hasRules ? `Saved — rules will guide tagging for ${name}.` : `Configuration saved for ${name}.`,
-    "Brand config saved"
-  );
+  Toast.success(`Configuration saved for ${name}.`, "Brand config saved");
   await loadBrands(selected.id);
 });
 
