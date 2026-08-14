@@ -51,6 +51,8 @@ results/
 *.json
 !decisions.json
 !taxonomy.json
+# scratch list of test URLs — not part of the codebase
+urls.txt
 
 # Testing
 .pytest_cache/

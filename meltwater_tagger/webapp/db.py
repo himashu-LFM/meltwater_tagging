@@ -144,6 +144,74 @@ def get_brand(name: str) -> dict | None:
     return r.data[0] if r.data else None
 
 
+def get_brand_by_id(brand_id: int) -> dict | None:
+    r = get_client().table("brands").select("*").eq("id", brand_id).limit(1).execute()
+    return r.data[0] if r.data else None
+
+
+# --- Client feedback docs (taxonomy brands like Bentley) ---------------------
+
+def list_feedback_docs(brand_name: str) -> list[dict]:
+    r = (get_client().table("feedback_docs")
+         .select("id,filename,created_at")
+         .eq("brand_name", brand_name)
+         .order("created_at", desc=True)
+         .execute())
+    return r.data or []
+
+
+def save_feedback_doc(brand_id: int, brand_name: str, filename: str,
+                      raw_text: str, uploaded_by: str | None = None) -> dict:
+    payload = {"brand_id": brand_id, "brand_name": brand_name,
+               "filename": filename, "raw_text": raw_text}
+    if uploaded_by:
+        payload["uploaded_by"] = uploaded_by
+    r = get_client().table("feedback_docs").insert(payload).execute()
+    return r.data[0] if r.data else payload
+
+
+def delete_feedback_doc(doc_id: str) -> None:
+    # remove the doc's extracted rules too, then the doc
+    get_client().table("feedback_rules").delete().eq("doc_id", doc_id).execute()
+    get_client().table("feedback_docs").delete().eq("id", doc_id).execute()
+
+
+def save_feedback_rules(brand_id: int, brand_name: str, doc_id: str | None,
+                        rules: list[dict], created_by: str | None = None) -> int:
+    """Bulk-insert extracted rules. Returns how many were inserted."""
+    if not rules:
+        return 0
+    rows = []
+    for r in rules:
+        row = {
+            "brand_id": brand_id,
+            "brand_name": brand_name,
+            "doc_id": doc_id,
+            "category": r.get("category"),
+            "rule_text": r.get("rule_text"),
+            "example_url": r.get("example_url"),
+        }
+        if created_by:
+            row["created_by"] = created_by
+        rows.append(row)
+    res = get_client().table("feedback_rules").insert(rows).execute()
+    return len(res.data or [])
+
+
+def list_feedback_rules(brand_name: str, active_only: bool = True) -> list[dict]:
+    q = (get_client().table("feedback_rules")
+         .select("id,category,rule_text,example_url,active,created_at")
+         .eq("brand_name", brand_name))
+    if active_only:
+        q = q.eq("active", True)
+    r = q.order("created_at", desc=True).execute()
+    return r.data or []
+
+
+def delete_feedback_rule(rule_id: str) -> None:
+    get_client().table("feedback_rules").delete().eq("id", rule_id).execute()
+
+
 def upsert_brand(name: str, roll_up_terms: list[str] | None = None,
                   meltwater_topic_url: str | None = None,
                   environment: str | None = None) -> dict:

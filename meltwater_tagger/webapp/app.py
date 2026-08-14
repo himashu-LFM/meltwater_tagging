@@ -277,6 +277,94 @@ def save_brand_tags_route(brand_id):
     return jsonify({"ok": True})
 
 
+# --- brand feedback docs (taxonomy brands like Bentley) ----------------------
+
+def _extract_doc_text(filename: str, data: bytes) -> tuple[str | None, str | None]:
+    """Return (text, error). Supports .txt/.md/.csv and .docx (stdlib, no dep)."""
+    name = (filename or "").lower()
+    try:
+        if name.endswith((".txt", ".md", ".csv")):
+            return data.decode("utf-8", "ignore").strip(), None
+        if name.endswith(".docx"):
+            import io, zipfile, re, html
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                xml = z.read("word/document.xml").decode("utf-8", "ignore")
+            xml = re.sub(r"</w:p>", "\n", xml)          # paragraph breaks
+            text = re.sub(r"<[^>]+>", "", xml)           # strip all tags
+            return html.unescape(text).strip(), None
+        return None, "Unsupported file — upload .docx, .txt, or .md (PDF support coming later)."
+    except Exception as e:
+        return None, f"Could not read the file: {e}"
+
+
+@app.route("/api/brands/<int:brand_id>/feedback-docs", methods=["GET"])
+@require_auth
+def list_feedback_docs_route(brand_id):
+    brand = db.get_brand_by_id(brand_id)
+    if not brand:
+        return jsonify({"error": "brand not found"}), 404
+    return jsonify({"docs": db.list_feedback_docs(brand["name"])})
+
+
+@app.route("/api/brands/<int:brand_id>/feedback-docs", methods=["POST"])
+@require_auth
+def upload_feedback_doc_route(brand_id):
+    brand = db.get_brand_by_id(brand_id)
+    if not brand:
+        return jsonify({"error": "brand not found"}), 404
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "No file uploaded."}), 400
+    text, err = _extract_doc_text(f.filename, f.read())
+    if err:
+        return jsonify({"error": err}), 400
+    if not text:
+        return jsonify({"error": "The file appears to be empty."}), 400
+    row = db.save_feedback_doc(brand["id"], brand["name"], f.filename, text,
+                               uploaded_by=g.user.id)
+    doc_id = row.get("id")
+
+    # Parse the doc into reusable rules and store them. Best-effort: if extraction
+    # fails, the doc is still saved and we report the error without 500-ing.
+    rules_added, extract_error = 0, None
+    try:
+        from brands.bentley.extract_rules import extract_rules
+        rules = extract_rules(text)
+        rules_added = db.save_feedback_rules(brand["id"], brand["name"], doc_id, rules,
+                                             created_by=g.user.id)
+    except Exception as e:
+        extract_error = str(e)
+        log.exception("rule extraction failed for doc %s", doc_id)
+
+    return jsonify({"ok": True,
+                    "doc": {"id": doc_id, "filename": f.filename, "chars": len(text)},
+                    "rules_added": rules_added,
+                    "extract_error": extract_error})
+
+
+@app.route("/api/brands/<int:brand_id>/feedback-rules", methods=["GET"])
+@require_auth
+def list_feedback_rules_route(brand_id):
+    brand = db.get_brand_by_id(brand_id)
+    if not brand:
+        return jsonify({"error": "brand not found"}), 404
+    return jsonify({"rules": db.list_feedback_rules(brand["name"], active_only=False)})
+
+
+@app.route("/api/brands/<int:brand_id>/feedback-rules/<rule_id>", methods=["DELETE"])
+@require_auth
+def delete_feedback_rule_route(brand_id, rule_id):
+    db.delete_feedback_rule(rule_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/brands/<int:brand_id>/feedback-docs/<doc_id>", methods=["DELETE"])
+@require_auth
+def delete_feedback_doc_route(brand_id, doc_id):
+    db.delete_feedback_doc(doc_id)
+    return jsonify({"ok": True})
+
+
 # --- profile: meltwater + reddit creds ---------------------------------------
 
 @app.route("/api/auth/welcome", methods=["POST"])
