@@ -17,7 +17,25 @@ async function loadBrands() {
   } else {
     sel.innerHTML = `<option value="">No brands configured — add one on Profile</option>`;
   }
+  applyFetchModeRestriction();
 }
+
+// ---- Bentley (news-site brand) only supports the news article reader —
+// Reddit cookie / CDP / anon are tuned for Reddit and won't read news sites
+// correctly, so lock the fetch mode instead of letting a bad combo run.
+const NEWS_ONLY_BRANDS = ["bentley"];
+function applyFetchModeRestriction() {
+  const brand = ($("brand").value || "").trim().toLowerCase();
+  const fm = $("fetchMode");
+  const isNewsOnly = NEWS_ONLY_BRANDS.includes(brand);
+  [...fm.options].forEach(o => {
+    o.disabled = isNewsOnly && o.value !== "news_reader";
+    o.hidden = isNewsOnly && o.value !== "news_reader";
+  });
+  if (isNewsOnly) fm.value = "news_reader";
+  fm.dispatchEvent(new Event("change"));
+}
+$("brand").addEventListener("change", applyFetchModeRestriction);
 
 // ---- URL counting ----
 function countUrls() {
@@ -28,9 +46,9 @@ function countUrls() {
 $("urls").addEventListener("input", () => { state.urls = []; countUrls(); });
 
 // ---- fetch-mode pill ----
+const FETCH_MODE_LABELS = { cdp: "CDP fetch", reddit_cookie: "Cookie fetch", anon: "Anon fetch", news_reader: "News reader fetch" };
 $("fetchMode").addEventListener("change", (e) => {
-  const labels = { cdp: "CDP fetch", reddit_cookie: "Cookie fetch", anon: "Anon fetch" };
-  $("modePill").textContent = labels[e.target.value] || e.target.value;
+  $("modePill").textContent = FETCH_MODE_LABELS[e.target.value] || e.target.value;
 });
 
 // ---- file upload / dropzone ----
@@ -57,7 +75,7 @@ async function handleFile(file) {
     $("urls").value = "";
     if (data.brand) {
       const opt = [...$("brand").options].find(o => o.value.toLowerCase() === data.brand.toLowerCase());
-      if (opt) $("brand").value = opt.value;
+      if (opt) { $("brand").value = opt.value; applyFetchModeRestriction(); }
     }
     $("dzSub").textContent = `✓ ${data.count} URLs loaded from ${file.name}`;
     countUrls();
@@ -333,6 +351,5 @@ $("logoutLink").addEventListener("click", async (e) => {
 });
 
 // sync fetch-mode pill with whatever option is selected on load
-const labels0 = { cdp: "CDP fetch", reddit_cookie: "Cookie fetch", anon: "Anon fetch" };
-$("modePill").textContent = labels0[$("fetchMode").value] || $("fetchMode").value;
+$("modePill").textContent = FETCH_MODE_LABELS[$("fetchMode").value] || $("fetchMode").value;
 countUrls();
