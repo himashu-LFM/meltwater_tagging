@@ -10,3 +10,5 @@ flask>=3.0
 gunicorn>=21.2 ; sys_platform != "win32"
 waitress>=3.0
 supabase>=2.7
+# Bentley: general news-article text extraction (fetcher) + feedback-doc parsing
+trafilatura>=2.0
