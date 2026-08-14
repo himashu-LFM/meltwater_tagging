@@ -665,6 +665,17 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
         if not cookie:
             log.warning("fetch_mode=reddit_cookie but no cookie saved for user=%s — fetch will be empty", user_id)
         posts = await fetch_via_reddit_cookie(posts, cookie)
+    elif fetch_mode == "news_reader":
+        # Interim: same generic fetch as "anon" (plain GET + tag-strip) until the
+        # dedicated news-site reader (real article extraction, retries, paywall
+        # handling, publication-country/byline metadata) is built.
+        sem = asyncio.Semaphore(config.FETCH_CONCURRENCY)
+        async with httpx.AsyncClient() as http:
+            async def _f(p):
+                async with sem:
+                    await fetch_and_enrich(http, p)
+                return p
+            posts = await asyncio.gather(*[_f(p) for p in posts])
     else:
         sem = asyncio.Semaphore(config.FETCH_CONCURRENCY)
         async with httpx.AsyncClient() as http:

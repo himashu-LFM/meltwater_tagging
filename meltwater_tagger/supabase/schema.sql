@@ -22,10 +22,11 @@ create table if not exists brands (
 -- add the environment column to any pre-existing brands table (safe no-op if present)
 alter table brands add column if not exists environment text;
 
--- seed the two brands already in use
+-- seed the brands already in use
 insert into brands (name, roll_up_terms) values
   ('Kaseya', array['kaseya','datto','it glue','itglue','autotask','unitrends','rocketcyber','graphus','id agent','pulseway','saas alerts','backupify','bullphish','vonahi']),
-  ('Ninja', array['ninja','ninjaone'])
+  ('Ninja', array['ninja','ninjaone']),
+  ('Bentley', array['bentley','bentley systems','seequent','plaxis','leapfrog','openroads','openrail','opencities','openutilities','projectwise','synchro','assetwise','itwin','blyncsy','microstation'])
 on conflict (name) do nothing;
 
 -- ---------------------------------------------------------------------------
