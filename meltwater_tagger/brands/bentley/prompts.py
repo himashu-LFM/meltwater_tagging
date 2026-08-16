@@ -60,11 +60,24 @@ Fewer, correct tags beat many loosely-related ones. Tag only the article's ACTUA
 topic it touches. Concretely:
 - Beyond the mandatory Type of Publication + Region, add a tag ONLY if that theme/product/person is a
   real subject of the piece — not merely mentioned.
-- Industry: assign exactly ONE (the primary sector); add a second only if the article genuinely spans two.
+- Industry: for in-scope infrastructure coverage assign exactly ONE — do NOT leave it empty. Pick the
+  primary sector; when the piece is broad or cross-sector infrastructure (e.g. a general event covering
+  transport + water + energy), use AEC as the general infrastructure catch-all (per the protocol's AEC
+  definition). Add a second industry only if it genuinely spans two distinct sectors equally.
 - Pillar: assign one only when that lens (AI / Connected Data / Resilience) is a real theme; often zero.
 - Product: only products named explicitly in the text.
 - Corporate - General: last resort; skip if any other corporate/industry tag already fits.
 - When in doubt about a tag, LEAVE IT OFF. A short, precise tag set is the goal.
+
+## PILLAR & PRODUCT & TECHNOLOGY — extra-high bar (the two most common over-tags)
+- A **Pillar** tag (Infrastructure AI / Connected Data / Resilient Built World) requires the article to
+  SUBSTANTIVELY explain that capability — HOW AI helps, HOW fragmented data is connected, HOW resilience/
+  risk is addressed. If AI / connected data / digital twins are merely NAMED as themes — especially in
+  event, conference, awards, or milestone coverage ("showcased AI, digital twins and connected data") —
+  that is NOT substantive: assign NO Pillar tag. Often the correct number of Pillar tags is ZERO.
+- **Corporate - Product & Technology** requires a SPECIFIC named Bentley product (MicroStation, iTwin,
+  ProjectWise, SYNCHRO, Blyncsy, AssetWise, …). Generic phrases like "digital engineering technology" or
+  "digital twins" with NO product name do NOT qualify — do not assign it, and do not assign any Product tag.
 
 ## NOT IN SCOPE (highest priority — decide this FIRST)
 Classify as Not in Scope if any apply:

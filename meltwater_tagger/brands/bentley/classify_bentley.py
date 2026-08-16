@@ -19,6 +19,7 @@ CLI:
 
 import argparse
 import json
+import sys
 
 from anthropic import Anthropic
 
@@ -75,7 +76,7 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     client = Anthropic()  # reads ANTHROPIC_API_KEY from env (config loaded it)
     resp = client.messages.create(
         model=config.MODEL,
-        max_tokens=6000,
+        max_tokens=12000,
         thinking={"type": "adaptive"},
         system=system_prompt,
         messages=[{
@@ -146,6 +147,12 @@ def _print(r: dict) -> None:
 
 
 def main():
+    # Windows consoles default to cp1252 and crash on chars like "→" in the
+    # model's QA text. Make stdout tolerant so printing never errors.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="Classify one Bentley article (Phase 1).")
     ap.add_argument("url")
     ap.add_argument("--source", default="")
