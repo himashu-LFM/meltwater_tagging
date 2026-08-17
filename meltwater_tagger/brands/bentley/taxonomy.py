@@ -191,8 +191,10 @@ PRODUCT = [
     {"key": "prod_microstation", "label": "Product - MicroStation",
      "aliases": ["MicroStation"]},
     {"key": "prod_bic", "label": "Product - Bentley Infrastructure Cloud",
-     "aliases": ["Bentley Infrastructure Cloud", "ProjectWise", "SYNCHRO", "AssetWise"],
-     "note": "Umbrella: ProjectWise (design) + SYNCHRO (build) + AssetWise (operate)."},
+     "aliases": ["Bentley Infrastructure Cloud"],
+     "note": "Umbrella of ProjectWise (design) + SYNCHRO (build) + AssetWise (operate). "
+             "Match ONLY the literal umbrella name — the sub-products have their own tags, "
+             "so aliasing them here would double-tag."},
     {"key": "prod_itwin", "label": "Product - iTwin",
      "aliases": ["iTwin", "iTwin Capture", "iTwin IoT", "iTwin Experience", "iTwin Studio", "iTwin Platform"],
      "note": "Digital-twin platform. NOTE: a generic 'digital twin' mention is NOT enough — the specific "
@@ -353,3 +355,32 @@ def all_labels() -> set[str]:
 
 def is_valid_label(label: str) -> bool:
     return label in all_labels()
+
+
+# ---------------------------------------------------------------------------
+# Deterministic name scans — Product and Spokesperson are LITERAL-NAME
+# categories (protocol: "product tags require explicit names, never infer";
+# spokespeople are named). So we can reliably find them by scanning the full
+# article text, instead of relying on the model's recall.
+# ---------------------------------------------------------------------------
+def products_in_text(text: str) -> list[str]:
+    low = (text or "").lower()
+    out = []
+    for p in PRODUCT:
+        if any(a.lower() in low for a in p["aliases"]):
+            out.append(p["label"])
+    return out
+
+
+def spokespeople_in_text(text: str) -> list[str]:
+    low = (text or "").lower()
+    out = []
+    for sp in SPOKESPEOPLE:
+        names = [sp["name"]] + sp.get("aliases", [])
+        if any(n.lower() in low for n in names):
+            out.append(spokesperson_label(sp["name"]))
+    return out
+
+
+def valid_spokesperson_labels() -> set[str]:
+    return {spokesperson_label(sp["name"]) for sp in SPOKESPEOPLE}

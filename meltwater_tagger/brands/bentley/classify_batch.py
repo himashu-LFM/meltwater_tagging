@@ -51,7 +51,7 @@ def _read_urls(args_urls: list[str]) -> list[str]:
 def run(urls: list[str], workers: int = 6) -> list[dict]:
     results: list[dict] = []
     total = len(urls)
-    print(f"Classifying {total} URL(s) with {workers} workers…\n")
+    print(f"Classifying {total} URL(s) with {workers} workers...\n")
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(classify_url, u): u for u in urls}
@@ -65,7 +65,7 @@ def run(urls: list[str], workers: int = 6) -> list[dict]:
             results.append(r)
             scope = (r.get("scope") or "?").upper()
             ntags = len(r.get("tags", []))
-            flag = " ⚠" if r.get("needs_review") else ""
+            flag = " [review]" if r.get("needs_review") else ""
             print(f"[{i}/{total}] {scope:6s} {ntags:2d} tags{flag}  {u[:80]}")
 
     # keep input order in the output

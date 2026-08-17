@@ -28,6 +28,15 @@ _PROJECT_DIR = os.path.dirname(_THIS_DIR)
 sys.path.insert(0, _PROJECT_DIR)
 sys.path.insert(0, _THIS_DIR)
 
+# Windows consoles default to cp1252; a stray non-ASCII print from any library
+# (e.g. a "→"/"⚠" in a log line) would otherwise raise UnicodeEncodeError and
+# fail the whole request. Make stdout/stderr tolerant so prints never crash us.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import config
 from classify import (
     fetch_full_text, fetch_and_enrich, fetch_via_cdp, classify_post, _find_col,
@@ -708,10 +717,21 @@ def classify():
         log.warning("POST /api/classify rejected: no brand (user=%s)", g.user.id)
         return jsonify({"error": "Please choose a brand"}), 400
 
-    log.info("classify start: brand=%r urls=%d fetch_mode=%r model=%s (user=%s)",
-              brand, len(urls), fetch_mode, config.MODEL, g.user.id)
+    # Route by brand style: taxonomy brands (Bentley) use the multi-tag pipeline
+    # with scope + feedback rules; sentiment brands (Kaseya/Ninja) use the old path.
+    from brands import get_profile
     try:
-        results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id))
+        is_taxonomy = get_profile(brand).style == "taxonomy"
+    except Exception:
+        is_taxonomy = False
+
+    log.info("classify start: brand=%r style=%s urls=%d fetch_mode=%r model=%s (user=%s)",
+              brand, "taxonomy" if is_taxonomy else "sentiment", len(urls), fetch_mode, config.MODEL, g.user.id)
+    try:
+        if is_taxonomy:
+            results = _classify_bentley_urls(urls)
+        else:
+            results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id))
     except AuthenticationError:
         log.error("classify failed: invalid/missing ANTHROPIC_API_KEY (user=%s)", g.user.id)
         return jsonify({"error": "Invalid or missing ANTHROPIC_API_KEY (server config)."}), 400
@@ -740,6 +760,35 @@ def classify():
 
     return jsonify({"run_brand": brand, "results": results,
                      "run_id": run_record["id"] if run_record else None})
+
+
+def _classify_bentley_urls(urls):
+    """Bentley (taxonomy) classify path for the dashboard.
+
+    Reuses the CLI batch runner (its own news fetcher + feedback-rule injection),
+    then maps each result to the shape the results table/history expect. The
+    'Apply to Meltwater' button stays disabled for now (action='review') because
+    Bentley Phase-2 apply (multi-tag) isn't wired yet.
+    """
+    from brands.bentley.classify_batch import run as bentley_run
+    raw = bentley_run(urls, workers=6)
+    out = []
+    for r in raw:
+        tags = r.get("tags") or []
+        in_scope = r.get("scope") == "in"
+        out.append({
+            "permalink": r.get("url"),
+            "content_type": "post",
+            "sentiment": "",                 # Bentley has no sentiment
+            "scope": r.get("scope"),
+            "tags": tags,                    # list — for the future brand-aware table
+            "tags_by_family": r.get("tags_by_family") or {},
+            "tag": ", ".join(tags) if tags else ("Not in scope" if r.get("scope") == "out" else "—"),
+            "action": "review",             # keep Apply disabled until Phase-2 apply exists
+            "reason": r.get("reason", ""),
+            "needs_review": r.get("needs_review") or [],
+        })
+    return out
 
 
 async def _classify_urls(urls, brand, fetch_mode, user_id):

@@ -96,14 +96,20 @@ def enforce_structural_rules(tags_by_family: dict) -> dict:
     """Apply the deterministic post-LLM rules in place and return the result.
 
     - If any Product tag exists, ensure Corporate - Product & Technology is present.
+    - If NO Product tag exists, remove Corporate - Product & Technology (a common
+      over-tag: the model adds it on a generic "digital technology" mention with
+      no specific named product). Product & Technology travels WITH a product.
     Returns the (possibly modified) tags_by_family dict. Does NOT invent the
     mandatory Publication/Region tags — those are validated/flagged separately
     because they depend on metadata the LLM may not have.
     """
-    if PRODUCT_IMPLIES_CORP_PRODTECH and tags_by_family.get("product"):
+    if PRODUCT_IMPLIES_CORP_PRODTECH:
         corp = tags_by_family.setdefault("corporate", [])
-        if CORP_PRODUCT_TECH_LABEL not in corp:
+        has_product = bool(tags_by_family.get("product"))
+        if has_product and CORP_PRODUCT_TECH_LABEL not in corp:
             corp.append(CORP_PRODUCT_TECH_LABEL)
+        elif not has_product and CORP_PRODUCT_TECH_LABEL in corp:
+            corp.remove(CORP_PRODUCT_TECH_LABEL)
     return tags_by_family
 
 
