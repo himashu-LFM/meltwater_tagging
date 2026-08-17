@@ -60,20 +60,37 @@ Fewer, correct tags beat many loosely-related ones. Tag only the article's ACTUA
 topic it touches. Concretely:
 - Beyond the mandatory Type of Publication + Region, add a tag ONLY if that theme/product/person is a
   real subject of the piece — not merely mentioned.
-- Industry: assign exactly ONE (the primary sector); add a second only if the article genuinely spans two.
+- Industry: for in-scope infrastructure coverage assign exactly ONE — do NOT leave it empty. Pick the
+  primary sector; when the piece is broad or cross-sector infrastructure (e.g. a general event covering
+  transport + water + energy), use AEC as the general infrastructure catch-all (per the protocol's AEC
+  definition). Add a second industry only if it genuinely spans two distinct sectors equally.
 - Pillar: assign one only when that lens (AI / Connected Data / Resilience) is a real theme; often zero.
 - Product: only products named explicitly in the text.
 - Corporate - General: last resort; skip if any other corporate/industry tag already fits.
 - When in doubt about a tag, LEAVE IT OFF. A short, precise tag set is the goal.
 
+## PILLAR & PRODUCT & TECHNOLOGY — extra-high bar (the two most common over-tags)
+- A **Pillar** tag (Infrastructure AI / Connected Data / Resilient Built World) requires the article to
+  SUBSTANTIVELY explain that capability — HOW AI helps, HOW fragmented data is connected, HOW resilience/
+  risk is addressed. If AI / connected data / digital twins are merely NAMED as themes — especially in
+  event, conference, awards, or milestone coverage ("showcased AI, digital twins and connected data") —
+  that is NOT substantive: assign NO Pillar tag. Often the correct number of Pillar tags is ZERO.
+- **Corporate - Product & Technology** requires a SPECIFIC named Bentley product (MicroStation, iTwin,
+  ProjectWise, SYNCHRO, Blyncsy, AssetWise, …). Generic phrases like "digital engineering technology" or
+  "digital twins" with NO product name do NOT qualify — do not assign it, and do not assign any Product tag.
+
 ## NOT IN SCOPE (highest priority — decide this FIRST)
 Classify as Not in Scope if any apply:
 {not_in_scope}
 
-## TYPE OF COVERAGE
-- Unique: original author byline / original reporting or analysis (a press-release pickup WITH a byline is still Unique).
-- Press release: a Bentley-issued release, or a direct pickup of a Bentley announcement with no editorial contribution.
-- 3rd party press release: a release issued by ANOTHER organization where Bentley is merely mentioned. Never use this for Bentley-issued releases.
+## TYPE OF COVERAGE — decide by BYLINE first (this is the rule, apply it decisively)
+- If an "Author byline" is provided/present (a named journalist), it is **Unique** — FULL STOP. Even if the
+  content reads like an earnings report, a product announcement, or reproduces a Bentley release, a named
+  byline means a person wrote/edited it. NEVER downgrade a bylined piece to Press release because it
+  "sounds like" a release.
+- Press release: NO byline AND the item is a Bentley-issued announcement reproduced with no editorial contribution.
+- 3rd party press release: NO byline AND the release was issued by ANOTHER organization (Bentley merely mentioned).
+  Never use this for Bentley-issued releases.
 
 ## REGION — publication country of origin, NOT the location in the story.
 US publication → NALA · UAE/UK/Germany/South Africa → EMEA · India/Singapore/Australia/China/Cambodia → APAC.
@@ -93,7 +110,8 @@ Return the structured decision:
 - decision: "In Scope" or "Not in Scope"
 - reasoning: one short line on the scope decision
 - the tag fields (leave a field empty if nothing applies; for Not-in-Scope, set type_of_coverage to "Not in scope" and leave the rest empty)
-- qa_validation: justify each assigned tag briefly, AND explicitly state why any commonly-confused tag was NOT assigned (e.g. "digital twin present but 'iTwin' not named, so no Product - iTwin").
+- qa_validation: keep it SHORT — 1-2 sentences total covering only the key judgment calls (e.g. a confused tag you deliberately did NOT assign). Do NOT write a justification for every tag; brevity matters for speed.
+- uncertain: list any tag or decision you are NOT confident about (a genuine borderline call). Each entry = the tag + a few-word reason (e.g. "Industry - AEC (multi-sector, could be Energy)"). Still assign your best guess above; this just flags it so a human can confirm. Leave empty if you are confident.
 """.format(
     not_in_scope="\n".join(f"- {t}" for t in rules.NOT_IN_SCOPE_TOPICS),
     qa="\n".join(f"- {c}" for c in rules.QA_CORRECTIONS),
@@ -172,7 +190,12 @@ DECISION_SCHEMA = {
         },
         "qa_validation": {
             "type": "string",
-            "description": "Why each assigned tag qualifies, and why confused tags were NOT assigned.",
+            "description": "SHORT: 1-2 sentences on the key judgment calls only. Not a per-tag essay.",
+        },
+        "uncertain": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Tags/decisions you are NOT confident about (borderline) — each: tag + short reason. Empty if confident.",
         },
     },
     "required": ["decision", "reasoning", "type_of_coverage", "qa_validation"],

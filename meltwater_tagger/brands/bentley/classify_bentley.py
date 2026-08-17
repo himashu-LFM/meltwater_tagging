@@ -19,6 +19,7 @@ CLI:
 
 import argparse
 import json
+import sys
 
 from anthropic import Anthropic
 
@@ -65,31 +66,53 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     fetched = fetch_article(url)
     result["fetch"] = {"ok": fetched["ok"], "chars": fetched["chars"],
                        "status": fetched["status"], "error": fetched["error"]}
-    text = fetched["text"] or "(article text could not be fetched)"
+
+    # Fail-safe: if we couldn't read the real article (paywall / JS-only /
+    # aggregator boilerplate), do NOT let the model guess — that produces false
+    # "Not in scope" verdicts. Flag it for a human instead. (In export mode a
+    # Meltwater snippet would be passed as text and this branch wouldn't trigger.)
+    if not fetched["ok"]:
+        result.update(scope="review",
+                      reason=f"Could not read the article ({fetched['error']}). "
+                             "Needs manual check — not classified.",
+                      needs_review=["article-text-not-fetched"])
+        return result
+
+    text = fetched["text"]
 
     # 3) ask Claude — base protocol prompt + any DB-stored client-feedback rules
     learned, n_learned = rules_block(taxonomy.RUN_BRAND)
     system_prompt = prompts.SYSTEM_PROMPT + ("\n\n" + learned if learned else "")
     result["live_rules_applied"] = n_learned
 
-    client = Anthropic()  # reads ANTHROPIC_API_KEY from env (config loaded it)
-    resp = client.messages.create(
-        model=config.MODEL,
-        max_tokens=6000,
-        thinking={"type": "adaptive"},
-        system=system_prompt,
-        messages=[{
-            "role": "user",
-            "content": prompts.ARTICLE_TEMPLATE.format(
-                source=source or "(unknown)",
-                pub_country=pub_country or "(unknown)",
-                byline=byline or "(none)",
-                url=url,
-                text=text,
-            ),
-        }],
-        output_config={"format": {"type": "json_schema", "schema": prompts.DECISION_SCHEMA}},
-    )
+    # timeout so a slow/stuck call FLAGS for review instead of hanging for minutes
+    client = Anthropic(timeout=90.0)
+    try:
+        resp = client.messages.create(
+            model=config.MODEL,
+            max_tokens=8000,
+            # No extended thinking: it was the main time sink (~minutes on big/non-EN
+            # articles). Classification is guided by explicit rules + deterministic
+            # post-processing, so standard generation is plenty and far faster.
+            system=system_prompt,
+            messages=[{
+                "role": "user",
+                "content": prompts.ARTICLE_TEMPLATE.format(
+                    source=source or "(unknown)",
+                    pub_country=pub_country or "(unknown)",
+                    byline=(byline or fetched.get("author") or "(none)"),
+                    url=url,
+                    text=text,
+                ),
+            }],
+            output_config={"format": {"type": "json_schema", "schema": prompts.DECISION_SCHEMA}},
+        )
+    except Exception as e:
+        result.update(scope="review",
+                      reason=f"Classification did not complete ({type(e).__name__}) — timed out or "
+                             "errored. Flagged for manual tagging.",
+                      needs_review=["classification-timed-out"])
+        return result
     raw = next((b.text for b in resp.content if b.type == "text"), None)
     if raw is None:
         result.update(scope="review",
@@ -108,16 +131,52 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
 
     # 4) in scope -> assemble + enforce deterministic rules
     fam = _to_families(d)
-    fam = rules.enforce_structural_rules(fam)      # product -> Corporate-Product&Tech
+
+    # de-duplicate every family (model sometimes repeats a tag)
+    for k in list(fam):
+        fam[k] = list(dict.fromkeys(fam[k]))
+
+    # Product & Spokesperson are literal-name categories — scan the full text so
+    # recall doesn't depend on the model. Add any taxonomy product named in the
+    # text; validate spokespeople against the taxonomy (drops invented names like
+    # "Greg Bentley") and add any taxonomy person named in the text.
+    for lbl in taxonomy.products_in_text(text):
+        if lbl not in fam.get("product", []):
+            fam.setdefault("product", []).append(lbl)
+
+    valid_sp = taxonomy.valid_spokesperson_labels()
+    kept = [s for s in fam.get("spokesperson", []) if s in valid_sp]
+    for lbl in taxonomy.spokespeople_in_text(text):
+        if lbl not in kept:
+            kept.append(lbl)
+    fam["spokesperson"] = kept
+
+    # now enforce structural rules (product -> Corporate-Product&Technology, and
+    # remove it when no product) AFTER the product scan
+    fam = rules.enforce_structural_rules(fam)
+
+    # Deterministic Coverage rule (protocol: a byline => Unique, even if the piece
+    # reads like a wire/earnings release). The model is inconsistent on this, so
+    # enforce it when we actually have a byline (passed in or scraped as author).
+    byline_present = bool((byline or "").strip() or fetched.get("author"))
+    cov = (fam.get("type_of_coverage") or [""])[0]
+    if byline_present and ("Press release" in cov or "3rd party" in cov):
+        fam["type_of_coverage"] = ["Type of Coverage - Unique"]
     result["scope"] = "in"
     result["tags_by_family"] = fam
     result["tags"] = _flatten(fam)
 
     # 5) flag for human review
     review = rules.missing_mandatory(fam)
-    if not fetched["ok"]:
-        # classified on metadata/URL only — tags are a guess, don't trust silently
-        review.append("article-text-not-fetched")
+    if fetched.get("summary_only"):
+        # classified from headline + summary meta only (body not extractable,
+        # e.g. paywalled aggregator) — tags are coarse, a human should confirm
+        review.append("summary-only-extraction")
+    # tags the model itself was unsure about -> route to a human
+    for u in (d.get("uncertain") or []):
+        u = (u or "").strip()
+        if u:
+            review.append(f"uncertain: {u}")
     result["needs_review"] = review
     return result
 
@@ -146,6 +205,12 @@ def _print(r: dict) -> None:
 
 
 def main():
+    # Windows consoles default to cp1252 and crash on chars like "→" in the
+    # model's QA text. Make stdout tolerant so printing never errors.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="Classify one Bentley article (Phase 1).")
     ap.add_argument("url")
     ap.add_argument("--source", default="")
