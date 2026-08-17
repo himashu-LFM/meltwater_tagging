@@ -83,10 +83,14 @@ topic it touches. Concretely:
 Classify as Not in Scope if any apply:
 {not_in_scope}
 
-## TYPE OF COVERAGE
-- Unique: original author byline / original reporting or analysis (a press-release pickup WITH a byline is still Unique).
-- Press release: a Bentley-issued release, or a direct pickup of a Bentley announcement with no editorial contribution.
-- 3rd party press release: a release issued by ANOTHER organization where Bentley is merely mentioned. Never use this for Bentley-issued releases.
+## TYPE OF COVERAGE — decide by BYLINE first (this is the rule, apply it decisively)
+- If an "Author byline" is provided/present (a named journalist), it is **Unique** — FULL STOP. Even if the
+  content reads like an earnings report, a product announcement, or reproduces a Bentley release, a named
+  byline means a person wrote/edited it. NEVER downgrade a bylined piece to Press release because it
+  "sounds like" a release.
+- Press release: NO byline AND the item is a Bentley-issued announcement reproduced with no editorial contribution.
+- 3rd party press release: NO byline AND the release was issued by ANOTHER organization (Bentley merely mentioned).
+  Never use this for Bentley-issued releases.
 
 ## REGION — publication country of origin, NOT the location in the story.
 US publication → NALA · UAE/UK/Germany/South Africa → EMEA · India/Singapore/Australia/China/Cambodia → APAC.
@@ -106,7 +110,8 @@ Return the structured decision:
 - decision: "In Scope" or "Not in Scope"
 - reasoning: one short line on the scope decision
 - the tag fields (leave a field empty if nothing applies; for Not-in-Scope, set type_of_coverage to "Not in scope" and leave the rest empty)
-- qa_validation: justify each assigned tag briefly, AND explicitly state why any commonly-confused tag was NOT assigned (e.g. "digital twin present but 'iTwin' not named, so no Product - iTwin").
+- qa_validation: keep it SHORT — 1-2 sentences total covering only the key judgment calls (e.g. a confused tag you deliberately did NOT assign). Do NOT write a justification for every tag; brevity matters for speed.
+- uncertain: list any tag or decision you are NOT confident about (a genuine borderline call). Each entry = the tag + a few-word reason (e.g. "Industry - AEC (multi-sector, could be Energy)"). Still assign your best guess above; this just flags it so a human can confirm. Leave empty if you are confident.
 """.format(
     not_in_scope="\n".join(f"- {t}" for t in rules.NOT_IN_SCOPE_TOPICS),
     qa="\n".join(f"- {c}" for c in rules.QA_CORRECTIONS),
@@ -185,7 +190,12 @@ DECISION_SCHEMA = {
         },
         "qa_validation": {
             "type": "string",
-            "description": "Why each assigned tag qualifies, and why confused tags were NOT assigned.",
+            "description": "SHORT: 1-2 sentences on the key judgment calls only. Not a per-tag essay.",
+        },
+        "uncertain": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Tags/decisions you are NOT confident about (borderline) — each: tag + short reason. Empty if confident.",
         },
     },
     "required": ["decision", "reasoning", "type_of_coverage", "qa_validation"],

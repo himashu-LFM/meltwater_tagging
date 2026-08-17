@@ -28,6 +28,15 @@ _PROJECT_DIR = os.path.dirname(_THIS_DIR)
 sys.path.insert(0, _PROJECT_DIR)
 sys.path.insert(0, _THIS_DIR)
 
+# Windows consoles default to cp1252; a stray non-ASCII print from any library
+# (e.g. a "→"/"⚠" in a log line) would otherwise raise UnicodeEncodeError and
+# fail the whole request. Make stdout/stderr tolerant so prints never crash us.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import config
 from classify import (
     fetch_full_text, fetch_and_enrich, fetch_via_cdp, classify_post, _find_col,
