@@ -83,17 +83,30 @@ topic it touches. Concretely:
 Classify as Not in Scope if any apply:
 {not_in_scope}
 
-## TYPE OF COVERAGE — decide by BYLINE first (this is the rule, apply it decisively)
-- If an "Author byline" is provided/present (a named journalist), it is **Unique** — FULL STOP. Even if the
-  content reads like an earnings report, a product announcement, or reproduces a Bentley release, a named
-  byline means a person wrote/edited it. NEVER downgrade a bylined piece to Press release because it
-  "sounds like" a release.
-- Press release: NO byline AND the item is a Bentley-issued announcement reproduced with no editorial contribution.
-- 3rd party press release: NO byline AND the release was issued by ANOTHER organization (Bentley merely mentioned).
-  Never use this for Bentley-issued releases.
+## TYPE OF COVERAGE — Unique is the DEFAULT; Press release is the rare exception
+Two independent ways to be **Unique** — EITHER is enough:
+  (a) the article has a named author byline; OR
+  (b) the publication produced its OWN reporting, analysis, summary, or commentary about Bentley — i.e. a
+      third-party outlet writing ABOUT Bentley (Bentley is the subject), EVEN IF it is short, formulaic,
+      and has NO named byline (e.g. a financial-news brief summarising Bentley's earnings with its own
+      framing is Unique — it is the outlet's authored content, not Bentley's).
+- **Press release** — ONLY when the content is BENTLEY-ISSUED: Bentley's own release, or a direct unedited
+  pickup of a Bentley announcement with no editorial contribution. Signals: "Bentley Systems today
+  announced…", a wire release Bentley distributed, listed on bentley.com/newsroom. A short third-party
+  brief is NOT a press release.
+- **3rd party press release** — a release issued by ANOTHER organisation where Bentley is merely mentioned
+  (not the subject). Never for Bentley-issued content.
+- Do NOT use "no byline" as a reason to pick Press release. Absence of a byline does not make it a release —
+  most third-party coverage of Bentley is **Unique**. Choose Press release only on clear Bentley-issued signals.
 
-## REGION — publication country of origin, NOT the location in the story.
-US publication → NALA · UAE/UK/Germany/South Africa → EMEA · India/Singapore/Australia/China/Cambodia → APAC.
+## REGION — the PUBLICATION's country of origin (NOT the location in the story).
+Determine it from the OUTLET — its name and its URL DOMAIN — exactly as a person would:
+  - domain/TLD clues: sg.* or .sg -> Singapore (APAC); Gulf outlets / .sa / .ae -> Middle East (EMEA);
+    .in -> India (APAC); .co.uk / .de / .fr / .za -> Europe/Africa (EMEA); .com.au -> Australia (APAC);
+    US outlets (.com US-based) -> NALA.
+  - Buckets: NALA = North & Latin America · EMEA = Europe, Middle East, Africa · APAC = Asia-Pacific.
+Do NOT default to NALA, and do NOT use the country the STORY is about. If you genuinely cannot tell the
+publication's country from the outlet/domain, leave Region EMPTY (it will be flagged for review) — never guess.
 
 ## CRITICAL QA CORRECTIONS (the traps the client keeps flagging)
 {qa}
@@ -101,9 +114,11 @@ US publication → NALA · UAE/UK/Germany/South Africa → EMEA · India/Singapo
 ## TAG MENU — assign ONLY from this list; use the label EXACTLY as written
 {menu}
 
-## MANDATORY for every IN-SCOPE article
-Always assign Type of Publication AND Region (the minimum). Then add every other tag that genuinely applies.
-(If you cannot tell Publication or Region from the text, still make your best guess and note it in qa_validation.)
+## PUBLICATION & REGION — infer, NEVER default
+Type of Publication and Region are normally inferable from the outlet + its domain, so INFER them from there.
+Do NOT fall back to a "safe default" — no automatic NALA, no automatic Mainstream/Business. If, and ONLY if,
+you genuinely cannot determine one from the outlet/domain, leave that field EMPTY; it will be flagged for a
+human to fill (that is better than a wrong guess). Then add every other tag that genuinely applies.
 
 ## HOW TO ANSWER
 Return the structured decision:
