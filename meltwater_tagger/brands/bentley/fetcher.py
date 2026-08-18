@@ -18,7 +18,10 @@ can decide Unique-vs-Press-release even when the byline isn't in the body.
 If nothing usable is found, ok=False and the caller flags for review.
 """
 
+import os
 import re
+import subprocess
+import sys
 import threading
 from html import unescape
 from urllib.parse import urlparse
@@ -130,6 +133,7 @@ def _retrieve_httpx(url: str, timeout: float = 20.0) -> tuple[str, int]:
 
 
 def _retrieve_playwright(url: str, timeout_ms: int = 15000) -> str:
+    """Direct sync Playwright — only safe in the MAIN thread (used by the CLI)."""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -140,6 +144,22 @@ def _retrieve_playwright(url: str, timeout_ms: int = 15000) -> str:
             return page.content()
         finally:
             browser.close()
+
+
+def _retrieve_playwright_subprocess(url: str, timeout_s: int = 25) -> str:
+    """Render via a separate Python process (its own main thread) so it works
+    from a webapp request worker thread WITHOUT hanging. A hard timeout kills a
+    stuck child so the caller is never blocked. Returns '' on timeout/failure."""
+    proj = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "brands.bentley.playwright_fetch", url],
+            cwd=proj, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout_s,
+        )
+        return r.stdout or ""
+    except Exception:
+        return ""  # TimeoutExpired (child killed) or any spawn error -> no HTML
 
 
 def fetch_article(url: str, _depth: int = 0) -> dict:
@@ -181,23 +201,30 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
                 deep["url"] = url                          # report the input URL
                 return deep
 
-    # 3) Playwright body (JS-heavy pages) — MAIN THREAD ONLY.
-    # Playwright's sync API spawns a subprocess-backed event loop that hangs in
-    # worker threads on Windows (e.g. Flask request threads). So the CLI (main
-    # thread) gets full JS rendering, while the webapp skips straight to the meta
-    # fallback below — fast, never hangs. (In the webapp, JS/bot-walled pages
-    # that yield no text get flagged for review instead of stalling.)
+    # 3) Playwright body (JS-heavy pages).
+    #  - MAIN thread (CLI): direct sync Playwright (fast, Windows-safe here).
+    #  - WORKER thread (webapp request): a separate subprocess renderer — sync
+    #    Playwright hangs in worker threads on Windows, so we run it in its own
+    #    process (its own main thread) with a hard timeout. Toggle off with
+    #    MELTWATER_PLAYWRIGHT_SUBPROCESS=false to fall back to skip->review.
     pw_html = None
-    if threading.current_thread() is threading.main_thread():
-        try:
+    try:
+        if threading.current_thread() is threading.main_thread():
             pw_html = _retrieve_playwright(url)
+        elif os.environ.get("MELTWATER_PLAYWRIGHT_SUBPROCESS", "false").lower() == "true":
+            # OFF by default: the subprocess renderer's timeout doesn't reliably
+            # free us on Windows (Playwright's Chromium grandchild holds the
+            # stdout pipe open, so a stuck child can still block). Until that
+            # process-tree kill is solved, worker threads skip -> review flag.
+            pw_html = _retrieve_playwright_subprocess(url)
+        if pw_html:
             body = _extract_body(pw_html, url)
             if _body_ok(body):
                 _finish(body, "playwright", "body", pw_html)
                 return out
-        except Exception as e:
-            if not out["error"]:
-                out["error"] = f"playwright: {type(e).__name__}: {e}"
+    except Exception as e:
+        if not out["error"]:
+            out["error"] = f"playwright: {type(e).__name__}: {e}"
 
     # 4) meta fallback (summary) — from whichever HTML we have
     for src, html in (("playwright", pw_html), ("httpx", httpx_html)):

@@ -20,6 +20,7 @@ CLI:
 import argparse
 import json
 import sys
+from urllib.parse import urlparse
 
 from anthropic import Anthropic
 
@@ -30,6 +31,14 @@ from brands.bentley.live_rules import rules_block
 
 _SINGLE = ["type_of_publication", "type_of_coverage", "region"]
 _MULTI = ["corporate", "pillar", "industry", "product", "spokesperson"]
+
+
+def _domain(url: str) -> str:
+    """Bare outlet domain (no www.) — a strong signal for region/publication."""
+    try:
+        return urlparse(url).netloc.replace("www.", "")
+    except Exception:
+        return ""
 
 
 def _to_families(d: dict) -> dict:
@@ -98,8 +107,8 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
             messages=[{
                 "role": "user",
                 "content": prompts.ARTICLE_TEMPLATE.format(
-                    source=source or "(unknown)",
-                    pub_country=pub_country or "(unknown)",
+                    source=source or _domain(url) or "(unknown outlet)",
+                    pub_country=(pub_country or "(not provided - infer the region from the outlet's domain)"),
                     byline=(byline or fetched.get("author") or "(none)"),
                     url=url,
                     text=text,

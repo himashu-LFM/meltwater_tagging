@@ -23,9 +23,12 @@ engine change needed. That is the whole point of keeping this separate.
 # match against the URL / source name.)
 # ---------------------------------------------------------------------------
 NOT_IN_SCOPE_DOMAINS = [
-    "seequent.com",        # internal subsidiary source
-    "newsbreak.com",       # client-flagged not-in-scope source
-    "github.com",          # code repos / developer releases
+    "seequent.com",             # internal subsidiary source
+    "newsbreak.com",            # client-flagged not-in-scope source
+    "github.com",               # code repos / developer releases
+    "pulse.bot",                # client-flagged not-in-scope source
+    "vocal.media",              # client-flagged not-in-scope source
+    "infrastructure-now.co.uk", # client-flagged not-in-scope source
 ]
 
 # ---------------------------------------------------------------------------
