@@ -40,7 +40,7 @@ def _menu() -> str:
     block("Industry (usually ONE)", tax.INDUSTRY)
     block("Product (0+; explicit name only)", tax.PRODUCT)
     lines.append("\n### Spokesperson (0+; only if quoted / a significant source)")
-    lines.append("Use exactly 'Spokesperson - <Name>'. Known people include: "
+    lines.append("Use exactly 'Spokesperson | <Name>'. Known people include: "
                  + ", ".join(sp["name"] for sp in tax.SPOKESPEOPLE) + ".")
     return "\n".join(lines)
 
@@ -201,7 +201,7 @@ DECISION_SCHEMA = {
         "spokesperson": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Format 'Spokesperson - <Name>', only if quoted / a significant source.",
+            "description": "Format 'Spokesperson | <Name>', only if quoted / a significant source.",
         },
         "qa_validation": {
             "type": "string",

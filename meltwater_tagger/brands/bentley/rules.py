@@ -62,6 +62,34 @@ CORP_PRODUCT_TECH_LABEL = "Corporate - Product & Technology"
 
 
 # ---------------------------------------------------------------------------
+# Deterministic Bentley-ISSUED press-release detection.
+#
+# A Bentley press release is often republished verbatim on a third-party site or
+# wire (citybiz, MENAFN, PR Newswire, …), sometimes with a dateline or auto-
+# byline. The model then tends to call it "Unique" (third-party outlet), but the
+# CONTENT is Bentley-issued, so the protocol (and the client) call it a Press
+# release. These markers appear in Bentley's own releases (and their verbatim
+# pickups) but effectively never in a journalist's original reporting, so they
+# reliably flag Type of Coverage = Press release regardless of who republished it.
+# Kept high-precision on purpose to avoid mislabeling genuine third-party
+# analysis that merely quotes a Bentley announcement.
+# ---------------------------------------------------------------------------
+BENTLEY_PRESS_RELEASE_MARKERS = (
+    "bentley systems today announced",
+    "nasdaq: bsy",
+    "nasdaq:bsy",
+    "infrastructure engineering software company",   # standard "About Bentley Systems" boilerplate
+)
+PRESS_RELEASE_LABEL = "Type of Coverage - Press release"
+
+
+def is_bentley_press_release(text: str) -> bool:
+    """True if the text carries a definitive Bentley-issued press-release signal."""
+    low = (text or "").lower()
+    return any(m in low for m in BENTLEY_PRESS_RELEASE_MARKERS)
+
+
+# ---------------------------------------------------------------------------
 # JUDGMENT — the critical QA corrections, injected verbatim into the prompt.
 # These are the "commonly confused" traps the client keeps flagging.
 # ---------------------------------------------------------------------------
@@ -69,8 +97,8 @@ QA_CORRECTIONS = [
     "Digital Twin ≠ Product - iTwin. Only tag iTwin when the product name 'iTwin' is explicitly written.",
     "Mention of AI ≠ Pillar - Infrastructure AI. AI must be a genuine focus (innovation or 'do more with less'), not a passing mention.",
     "Mention of sustainability ≠ Corporate - Sustainability. If the real theme is resilience / risk reduction / asset longevity, use Pillar - Resilient Built World instead.",
-    "Mention of water ≠ Industry - Water. The story must materially focus on water infrastructure.",
-    "Mention of cities ≠ Industry - Cities. Same bar — must be a material focus.",
+    "Mention of water ≠ Industry | Water. The story must materially focus on water infrastructure.",
+    "Mention of cities ≠ Industry | Cities. Same bar — must be a material focus.",
     "Product tags require the explicit product name. Never infer a product.",
     "Region = PUBLICATION country of origin, NOT the location discussed in the article.",
     "Bylined articles are usually Type of Coverage - Unique (even a press-release pickup with a byline).",

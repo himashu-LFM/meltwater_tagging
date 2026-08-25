@@ -12,16 +12,25 @@ Unlike Kaseya (one sentiment tag per post), Bentley applies MANY tags per
 article across several families, and first decides in-scope vs not-in-scope.
 
 ────────────────────────────────────────────────────────────────────────────
-⚠️  EXACT MELTWATER TAG STRINGS — MUST CONFIRM BEFORE PHASE 2 (apply)
-The protocol sheet and the client correction docs disagree on punctuation:
-  • sheet "Tag name" col uses  "Corporate - General",  "Industry | AEC"
-  • correction docs use        "Corporate – General",  "Industry – AEC"  (en dash)
-  • Pillar spelled "Resillient Built World" in the sheet vs "Resilient" in docs.
-For CLASSIFY (Phase 1) we only need a canonical key to identify the tag, so this
-mismatch is harmless here. For APPLY (Phase 2) the string must match Meltwater's
-Tag-content modal CHARACTER-FOR-CHARACTER (same lesson as Kaseya). So each tag
-below carries a canonical `label`; when the Bentley tags are created in
-Meltwater, capture the exact strings from the modal and reconcile them here.
+✅  EXACT MELTWATER TAG STRINGS — RECONCILED FROM THE LIVE TAG MODAL (Aug 2026)
+Every `label` below is now the EXACT string as it appears in Meltwater's
+Tag-content modal, captured from the live account and verified 2026-08-21. This
+is the source of truth for BOTH classify (Phase 1) and apply (Phase 2), so the
+strings can be applied to Meltwater character-for-character.
+
+Separators are NOT uniform in Meltwater — reproduce them exactly:
+  • hyphen " - "  →  Type of Publication, Type of Coverage, Corporate, Region,
+                     Pillar, Product
+  • pipe   " | "  →  Industry (multi-level, e.g. "Industry | Energy | Electric
+                     Utilities") and Spokesperson ("Spokesperson | <Name>")
+Note the sheet used an en dash "–" for Publication/Coverage, but Meltwater uses
+a plain hyphen "-" — Meltwater wins. The Pillar typo "Resillient Built World" is
+real in Meltwater too, so it is preserved here deliberately.
+
+Some Bentley spokespeople named in the protocol sheet's context columns have NO
+tag in Meltwater yet (see `no_mw_tag`). They are kept here for text detection,
+but apply must NOT try to apply them (there is no tag to check) — flag them for
+review / ask the client to create the tag instead.
 ────────────────────────────────────────────────────────────────────────────
 """
 
@@ -140,41 +149,41 @@ PILLAR = [
 # keywords are the strongest signals distilled from the protocol; products help.
 # ---------------------------------------------------------------------------
 INDUSTRY = [
-    {"key": "ind_aec", "label": "Industry - AEC",
+    {"key": "ind_aec", "label": "Industry | AEC",
      "keywords": ["construction", "construction planning", "construction design", "engineering firm",
                   "megaproject", "building", "owner operator", "BIM", "project management", "supply chain"],
      "products": ["MicroStation", "STAAD", "RAM", "ADINA", "OpenBuildings", "ProStructures", "SYNCHRO"]},
-    {"key": "ind_cities", "label": "Industry - Cities",
+    {"key": "ind_cities", "label": "Industry | Cities",
      "keywords": ["cities", "urban planning", "smart cities", "campus", "municipal", "local government",
                   "public works", "mobility simulation", "city infrastructure"],
      "products": ["MicroStation", "OpenCities Map", "OpenCities Planner", "OpenPlant", "PlantSight"]},
-    {"key": "ind_energy_utilities", "label": "Industry - Energy - Electric Utilities",
+    {"key": "ind_energy_utilities", "label": "Industry | Energy | Electric Utilities",
      "keywords": ["electric utilities", "transmission", "distribution", "power grid", "grid reliability",
                   "smart grid", "electrification", "dam monitoring", "distribution network"],
      "products": ["MicroStation", "PLS", "SPIDA", "OpenUtilities", "EasyPower", "OpenWindpower", "SACS", "MOSES", "MAXSURF", "AutoPIPE"]},
-    {"key": "ind_energy_powergen", "label": "Industry - Energy - Power Generation",
+    {"key": "ind_energy_powergen", "label": "Industry | Energy | Power Generation",
      "keywords": ["power generation", "power plant", "energy production", "renewable energy", "wind", "solar",
                   "offshore", "hydrocarbon", "geothermal", "oil & gas", "nuclear", "SMR", "decarbonization", "energy transition"],
      "products": ["MicroStation", "EasyPower", "SACS", "MOSES", "MAXSURF", "AutoPIPE", "AssetWise", "PlantSight", "OpenPlant", "Leapfrog Energy"]},
-    {"key": "ind_mining", "label": "Industry - Mining",
+    {"key": "ind_mining", "label": "Industry | Mining",
      "keywords": ["mining", "critical minerals", "mine planning", "mineral exploration", "resource estimation",
                   "ore body", "geological modeling", "drillhole", "geoscience", "subsurface", "open pit"],
      "products": ["Seequent", "Leapfrog", "Plaxis", "MicroStation", "Evo"]},
-    {"key": "ind_trans_rail", "label": "Industry - Transportation - Rail & Transit",
+    {"key": "ind_trans_rail", "label": "Industry | Transportation | Rail & Transit",
      "keywords": ["rail", "metro", "transit", "track", "signaling", "freight rail", "railway", "ERTMS", "powerline"],
      "products": ["OpenRail", "OpenTunnel", "OpenBridge", "OpenBuildings", "OpenPaths", "AssetWise", "ProjectWise", "SYNCHRO", "Blyncsy"]},
-    {"key": "ind_trans_airports", "label": "Industry - Transportation - Airports & Ports",
+    {"key": "ind_trans_airports", "label": "Industry | Transportation | Airports & Ports",
      "keywords": ["airport", "port", "runway", "passenger experience", "throughput", "harbour", "harbor"],
      "products": ["MicroStation", "ProjectWise", "SYNCHRO", "iTwin Experience", "iTwin Capture",
                   "OpenCities Planner", "OpenRoads", "OpenBuildings", "STAAD", "Blyncsy"]},
-    {"key": "ind_trans_roads", "label": "Industry - Transportation - Roads & Highways",
+    {"key": "ind_trans_roads", "label": "Industry | Transportation | Roads & Highways",
      "keywords": ["road", "highway", "traffic simulation", "road asset", "autonomous vehicle", "road monitoring", "civil engineering"],
      "products": ["OpenRoads", "OpenBridge", "OpenTunnel", "SUPERLOAD", "OpenSite", "OpenSite+", "Blyncsy"]},
-    {"key": "ind_trans_bridges", "label": "Industry - Transportation - Bridges & Tunnels",
+    {"key": "ind_trans_bridges", "label": "Industry | Transportation | Bridges & Tunnels",
      "keywords": ["bridge", "tunnel", "geotechnical", "predictive maintenance", "rehabilitation", "deficient bridge"],
      "products": ["OpenBridge", "OpenTunnel", "Bentley Infrastructure Cloud", "PLAXIS 2D", "PLAXIS 3D",
                   "Leapfrog", "OpenGround", "iTwin Capture", "iTwin IoT", "AssetWise"]},
-    {"key": "ind_water", "label": "Industry - Water",
+    {"key": "ind_water", "label": "Industry | Water",
      "keywords": ["hydraulics", "hydrology", "water", "wastewater", "stormwater", "smart water", "water loss",
                   "desalination", "water utility", "flood"],
      "products": ["MicroStation", "OpenFlows", "OpenFlows WaterSight"]},
@@ -292,7 +301,9 @@ SPOKESPEOPLE = [
     {"name": "Slavco Velickov", "context": "Water"},
     {"name": "Dr. Tom Walski", "context": "Water", "aliases": ["Dr. Thom Krom"]},
     {"name": "Shar Govindan"},
-    {"name": "Cecelia Correia", "aliases": ["Cecila Correia"]},
+    # Meltwater's tag is the misspelled "Cecila Correia" — that is the canonical
+    # label to apply; the correct spelling stays as an alias for text detection.
+    {"name": "Cecila Correia", "aliases": ["Cecelia Correia"]},
     {"name": "Amritanshu Kumar"},
     {"name": "Brad Johnson", "context": "Energy - Electric Utilities"},
     {"name": "Kevin Bates"},
@@ -313,14 +324,16 @@ SPOKESPEOPLE = [
     {"name": "Pat McLarin", "context": "Mining"},
     {"name": "Jeremy O'Brien", "context": "Mining"},
     {"name": "Janina Elliott", "context": "Mining"},
-    {"name": "Kevin Hunt", "context": "Energy - Electric Utilities"},
-    {"name": "Alan Ridgeway", "context": "Energy"},
-    {"name": "Bill Panos", "context": "Roads"},
-    {"name": "Bob Mankowski", "context": "Open Apps"},
-    {"name": "Pavan Emani", "context": "iTwin Platform"},
-    {"name": "Ken Adamson", "context": "iTwin Studio"},
-    {"name": "Suzanne Little", "context": "HR / Colleague Success"},
-    {"name": "Kristin Fallon", "context": "HR / Colleague Success"},
+    {"name": "Kevin Hunt", "context": "Energy - Electric Utilities", "no_mw_tag": True},
+    {"name": "Alan Ridgeway", "context": "Energy", "no_mw_tag": True},
+    {"name": "Bill Panos", "context": "Roads", "no_mw_tag": True},
+    {"name": "Bob Mankowski", "context": "Open Apps", "no_mw_tag": True},
+    {"name": "Pavan Emani", "context": "iTwin Platform", "no_mw_tag": True},
+    {"name": "Ken Adamson", "context": "iTwin Studio", "no_mw_tag": True},
+    {"name": "Suzanne Little", "context": "HR / Colleague Success", "no_mw_tag": True},
+    {"name": "Kristin Fallon", "context": "HR / Colleague Success", "no_mw_tag": True},
+    # Present as a tag in Meltwater; was missing from the protocol-derived list.
+    {"name": "Morgan Hays"},
 ]
 
 
@@ -328,7 +341,16 @@ SPOKESPEOPLE = [
 # Convenience: flat views + the full canonical label set (for validation).
 # ---------------------------------------------------------------------------
 def spokesperson_label(name: str) -> str:
-    return f"Spokesperson - {name}"
+    # Meltwater uses a PIPE separator for spokespeople (e.g. "Spokesperson | Jim
+    # Dobbs"), unlike the hyphen used by the other families.
+    return f"Spokesperson | {name}"
+
+
+def spokespeople_without_mw_tag() -> set[str]:
+    """Spokesperson labels for people who exist in the protocol but have NO tag
+    in Meltwater yet. Kept for text detection, but Phase-2 apply cannot apply
+    them (there is nothing to check) — it must flag them for review instead."""
+    return {spokesperson_label(sp["name"]) for sp in SPOKESPEOPLE if sp.get("no_mw_tag")}
 
 
 ALL_TAG_GROUPS = {
@@ -357,6 +379,15 @@ def is_valid_label(label: str) -> bool:
     return label in all_labels()
 
 
+def applicable_labels() -> set[str]:
+    """Every Bentley tag that ACTUALLY EXISTS in Meltwater and may be applied in
+    Phase 2 — i.e. all_labels() minus spokespeople who have no Meltwater tag yet.
+    This is the allowlist Phase-2 apply should validate against so it never tries
+    to apply a tag that isn't in the modal (and never touches another brand's
+    tags like the Kaseya/Ninja sentiment tags that share the same account)."""
+    return all_labels() - spokespeople_without_mw_tag()
+
+
 # ---------------------------------------------------------------------------
 # Deterministic name scans — Product and Spokesperson are LITERAL-NAME
 # categories (protocol: "product tags require explicit names, never infer";
@@ -372,12 +403,40 @@ def products_in_text(text: str) -> list[str]:
     return out
 
 
-def spokespeople_in_text(text: str) -> list[str]:
+def spokespeople_in_text(text: str, require_bentley_context: bool = False,
+                         window: int = 300) -> list[str]:
+    """Spokesperson tags for people NAMED in the text.
+
+    Many spokespeople have common names (Brad Johnson, James Lee, Andrew Smith,
+    Molly Brown, Paul King …) that also belong to unrelated people at other
+    companies — e.g. "Exacter appoints Brad Johnson" is NOT Bentley's Brad
+    Johnson. With require_bentley_context=True, a name only counts when the word
+    "Bentley" appears within `window` characters of an occurrence of that name,
+    so a same-name person at another company is not tagged."""
     low = (text or "").lower()
     out = []
     for sp in SPOKESPEOPLE:
         names = [sp["name"]] + sp.get("aliases", [])
-        if any(n.lower() in low for n in names):
+        hit = False
+        for n in names:
+            nlow = n.lower()
+            if not require_bentley_context:
+                if nlow in low:
+                    hit = True
+                    break
+                continue
+            # require "Bentley" near at least one occurrence of the name
+            idx = low.find(nlow)
+            while idx != -1:
+                lo = max(0, idx - window)
+                hi = idx + len(nlow) + window
+                if "bentley" in low[lo:hi]:
+                    hit = True
+                    break
+                idx = low.find(nlow, idx + 1)
+            if hit:
+                break
+        if hit:
             out.append(spokesperson_label(sp["name"]))
     return out
 
