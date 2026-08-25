@@ -59,10 +59,73 @@ def _flatten(fam: dict) -> list[str]:
     return out
 
 
-def classify_url(url: str, source: str = "", pub_country: str = "", byline: str = "") -> dict:
+def _snippet_text(headline: str, snippet: str) -> str:
+    """Combine a Meltwater export's headline + snippet into a small classifiable
+    body. The headline carries a lot of the topic signal, so we prepend it."""
+    parts = [p.strip() for p in (headline, snippet) if p and p.strip()]
+    return "\n\n".join(parts)
+
+
+# Signals that a link is genuinely DEAD (the resource is gone or the host does
+# not exist) — as opposed to merely blocked/paywalled. Per the client rule:
+# dead -> "Not in scope"; blocked -> manual review.
+#
+# DEAD errors are limited to DNS-resolution failures (the domain does not
+# resolve). Deliberately NOT included: "connection reset by peer", generic
+# connect errors, or timeouts — those are often bot-walls/paywalls actively
+# refusing us, which must go to manual review, never be dropped as Not in scope.
+_DEAD_STATUS = {404, 410}
+_DEAD_ERR_MARKERS = (
+    "nameresolutionerror", "name or service not known", "getaddrinfo",
+    "no address associated", "gaierror", "nodename nor servname",
+    "failed to resolve", "could not resolve", "name not known",
+)
+
+
+def _reachability(fetched: dict) -> str:
+    """Classify a fetch result as 'readable', 'dead', or 'blocked'.
+
+      readable — got a real article body (classify it).
+      dead     — 404/410, or the host could not be reached (DNS fail / refused).
+                 Client rule: tag these "Not in scope".
+      blocked  — reachable but unreadable: paywall/bot-wall (401/403/429), a
+                 server error (5xx), a timeout, a JS-only/empty page, or only a
+                 meta summary. Client rule: send these to manual review, NOT
+                 "Not in scope" (they are often genuine, just unreadable).
+    """
+    if fetched.get("ok") and not fetched.get("summary_only"):
+        return "readable"
+    status = fetched.get("status")
+    err = (fetched.get("error") or "").lower()
+    if status in _DEAD_STATUS:
+        return "dead"
+    # No HTTP response at all + a host-unreachable error => dead link. (Timeouts
+    # and other transient errors are deliberately treated as 'blocked', not dead,
+    # so a slow-but-real article is never wrongly dropped as Not in scope.)
+    if status is None and any(m in err for m in _DEAD_ERR_MARKERS):
+        return "dead"
+    return "blocked"
+
+
+def classify_url(url: str, source: str = "", pub_country: str = "", byline: str = "",
+                 snippet: str = "", headline: str = "", body: str = "",
+                 prefer_snippet: bool = False) -> dict:
+    """Classify one Bentley item.
+
+    Text comes from the best source available, in this order of quality:
+      1. `body`     — the export's full article text (best; no web fetch needed);
+      2. a web fetch of the URL (when there is no body and prefer_snippet is off);
+      3. `headline` + `snippet` — the export's short snippet (coarse; used as the
+         fetch fallback, or directly when prefer_snippet is on).
+
+    prefer_snippet=True classifies from the export text ONLY (body or snippet),
+    never fetching — fast and reliable for a big export (skips paywall/JS/bot
+    walls). prefer_snippet=False fetches the full article but falls back to the
+    snippet instead of sending fetch failures to review.
+    """
     result = {"url": url, "scope": None, "tags": [], "tags_by_family": {},
               "reason": "", "qa": "", "needs_review": [], "fetch": {},
-              "live_rules_applied": 0}
+              "live_rules_applied": 0, "text_source": None}
 
     # 1) deterministic block-list — no LLM, no fetch needed
     blocked = rules.blocked_source(url=url, source=source)
@@ -71,23 +134,65 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
                       tags=["Not in scope"], tags_by_family={"type_of_coverage": ["Not in scope"]})
         return result
 
-    # 2) fetch article text
-    fetched = fetch_article(url)
-    result["fetch"] = {"ok": fetched["ok"], "chars": fetched["chars"],
-                       "status": fetched["status"], "error": fetched["error"]}
+    body = (body or "").strip()
+    snippet_body = _snippet_text(headline, snippet)
+    export_text = body or snippet_body          # best text the export row carries
+    export_src = "export-body" if body else ("snippet" if snippet_body else "")
 
-    # Fail-safe: if we couldn't read the real article (paywall / JS-only /
-    # aggregator boilerplate), do NOT let the model guess — that produces false
-    # "Not in scope" verdicts. Flag it for a human instead. (In export mode a
-    # Meltwater snippet would be passed as text and this branch wouldn't trigger.)
-    if not fetched["ok"]:
-        result.update(scope="review",
-                      reason=f"Could not read the article ({fetched['error']}). "
-                             "Needs manual check — not classified.",
-                      needs_review=["article-text-not-fetched"])
-        return result
+    def _skip_fetch(reason):
+        result["fetch"] = {"ok": False, "chars": len(text), "status": None,
+                           "error": None, "skipped": reason}
 
-    text = fetched["text"]
+    # 2) resolve the text to classify.
+    if prefer_snippet:
+        #   export-text-only mode — never fetch.
+        if not export_text:
+            result.update(scope="review",
+                          reason="Snippet-only mode, but the export row has no body or snippet text.",
+                          needs_review=["no-export-text"])
+            return result
+        text = export_text
+        result["text_source"] = export_src
+        _skip_fetch("prefer_snippet")
+    elif body:
+        #   the export already carries the full article body — no fetch needed.
+        text = body
+        result["text_source"] = "export-body"
+        _skip_fetch("export-body")
+    else:
+        #   open (fetch) the document URL and classify from its content. Then,
+        #   per the client rule, branch on reachability:
+        #     readable -> classify;  dead link -> Not in scope;  blocked -> review.
+        fetched = fetch_article(url)
+        result["fetch"] = {"ok": fetched["ok"], "chars": fetched["chars"],
+                           "status": fetched["status"], "error": fetched["error"]}
+        reach = _reachability(fetched)
+        if reach == "readable":
+            text = fetched["text"]
+            result["text_source"] = "fetch"
+            if fetched.get("author") and not byline:
+                byline = fetched["author"]
+        elif reach == "dead":
+            # Dead / unreachable link (404/410 or host unreachable) -> Not in scope.
+            detail = fetched.get("status") or (fetched.get("error") or "unreachable")
+            result.update(scope="out", tags=["Not in scope"],
+                          tags_by_family={"type_of_coverage": ["Not in scope"]},
+                          reason=f"Dead / unreachable link ({detail}) — tagged Not in scope.",
+                          text_source="dead-link")
+            return result
+        else:
+            # Reachable but unreadable (paywall / bot-wall / JS-only / server
+            # error / partial) -> manual review, NOT Not in scope. The export
+            # snippet (if any) is kept on the result so a reviewer can use it.
+            detail = fetched.get("status") or (fetched.get("error") or "unreadable")
+            result.update(scope="review",
+                          reason=f"Source reachable but not readable ({detail}) — likely a "
+                                 "paywall/bot-wall or JS-only page. Flagged for manual review.",
+                          needs_review=["manual-review-required: source unreadable (paywall/blocked)"],
+                          text_source="blocked")
+            if snippet_body:
+                result["snippet_for_review"] = snippet_body
+            return result
 
     # 3) ask Claude — base protocol prompt + any DB-stored client-feedback rules
     learned, n_learned = rules_block(taxonomy.RUN_BRAND)
@@ -109,7 +214,7 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
                 "content": prompts.ARTICLE_TEMPLATE.format(
                     source=source or _domain(url) or "(unknown outlet)",
                     pub_country=(pub_country or "(not provided - infer the region from the outlet's domain)"),
-                    byline=(byline or fetched.get("author") or "(none)"),
+                    byline=(byline or "(none)"),
                     url=url,
                     text=text,
                 ),
@@ -118,9 +223,9 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         )
     except Exception as e:
         result.update(scope="review",
-                      reason=f"Classification did not complete ({type(e).__name__}) — timed out or "
-                             "errored. Flagged for manual tagging.",
-                      needs_review=["classification-timed-out"])
+                      reason=f"Classification did not complete ({type(e).__name__}: {e}) — timed out "
+                             "or errored. Flagged for manual tagging.",
+                      needs_review=[f"classification-error: {type(e).__name__}"])
         return result
     raw = next((b.text for b in resp.content if b.type == "text"), None)
     if raw is None:
@@ -155,7 +260,10 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
 
     valid_sp = taxonomy.valid_spokesperson_labels()
     kept = [s for s in fam.get("spokesperson", []) if s in valid_sp]
-    for lbl in taxonomy.spokespeople_in_text(text):
+    # Deterministic name-scan to boost recall — but require the name to appear
+    # near "Bentley" so a same-name person at another company (e.g. "Brad Johnson"
+    # appointed at Exacter) is NOT tagged as the Bentley spokesperson.
+    for lbl in taxonomy.spokespeople_in_text(text, require_bentley_context=True):
         if lbl not in kept:
             kept.append(lbl)
     fam["spokesperson"] = kept
@@ -164,12 +272,18 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     # remove it when no product) AFTER the product scan
     fam = rules.enforce_structural_rules(fam)
 
-    # Deterministic Coverage rule (protocol: a byline => Unique, even if the piece
-    # reads like a wire/earnings release). The model is inconsistent on this, so
-    # enforce it when we actually have a byline (passed in or scraped as author).
-    byline_present = bool((byline or "").strip() or fetched.get("author"))
+    # Deterministic Coverage overrides (protocol), in priority order:
+    #  1. Definitive Bentley-issued press-release boilerplate ("About Bentley
+    #     Systems" tagline, "Nasdaq: BSY", "Bentley Systems today announced")
+    #     => Press release, EVEN when a third-party site republished it with a
+    #     byline. This is the strongest signal and wins over the byline rule.
+    #  2. Otherwise a byline => Unique (a journalist wrote it), even if the piece
+    #     reads like a wire/earnings release.
+    byline_present = bool((byline or "").strip())
     cov = (fam.get("type_of_coverage") or [""])[0]
-    if byline_present and ("Press release" in cov or "3rd party" in cov):
+    if rules.is_bentley_press_release(text):
+        fam["type_of_coverage"] = [rules.PRESS_RELEASE_LABEL]
+    elif byline_present and ("Press release" in cov or "3rd party" in cov):
         fam["type_of_coverage"] = ["Type of Coverage - Unique"]
     result["scope"] = "in"
     result["tags_by_family"] = fam
@@ -177,10 +291,16 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
 
     # 5) flag for human review
     review = rules.missing_mandatory(fam)
-    if fetched.get("summary_only"):
-        # classified from headline + summary meta only (body not extractable,
-        # e.g. paywalled aggregator) — tags are coarse, a human should confirm
-        review.append("summary-only-extraction")
+    if result.get("text_source") in ("snippet", "snippet-fallback"):
+        # classified from the Meltwater export snippet, not the full article —
+        # tags are coarse, so a human should confirm.
+        review.append("classified-from-snippet")
+    # Spokespeople with no Meltwater tag can't be applied in Phase 2 — surface
+    # them so a person can confirm / ask the client to create the tag.
+    no_tag_sp = taxonomy.spokespeople_without_mw_tag()
+    for sp in fam.get("spokesperson", []):
+        if sp in no_tag_sp:
+            review.append(f"spokesperson-no-meltwater-tag: {sp}")
     # tags the model itself was unsure about -> route to a human
     for u in (d.get("uncertain") or []):
         u = (u or "").strip()
@@ -225,10 +345,17 @@ def main():
     ap.add_argument("--source", default="")
     ap.add_argument("--country", default="")
     ap.add_argument("--byline", default="")
+    ap.add_argument("--snippet", default="", help="Meltwater export snippet / hit sentence")
+    ap.add_argument("--headline", default="", help="Meltwater export headline / title")
+    ap.add_argument("--body", default="", help="Meltwater export full body text")
+    ap.add_argument("--snippet-only", action="store_true",
+                    help="classify from the export text (body/snippet) only, no web fetch")
     ap.add_argument("--json", action="store_true", help="print raw JSON result")
     args = ap.parse_args()
 
-    r = classify_url(args.url, source=args.source, pub_country=args.country, byline=args.byline)
+    r = classify_url(args.url, source=args.source, pub_country=args.country, byline=args.byline,
+                     snippet=args.snippet, headline=args.headline, body=args.body,
+                     prefer_snippet=args.snippet_only)
     if args.json:
         print(json.dumps(r, indent=2, ensure_ascii=False))
     else:
