@@ -1,19 +1,20 @@
 """
 Bentley batch classifier.
 
-Runs the single-article Bentley classifier over MANY URLs concurrently and
+Runs the single-article Bentley classifier over MANY items concurrently and
 writes a decisions.json. Input can be:
-  • a text file with one URL per line (blank lines / '#' comments ignored), or
+  • a Meltwater export (.xlsx / .csv) — the REAL production input: each row
+    carries the URL plus publication country, byline, headline and snippet, so
+    classification uses that metadata directly (and can skip web fetching);
+  • a text file with one URL per line (blank lines / '#' comments ignored); or
   • URLs passed directly as arguments.
 
-When a real Meltwater export is available we'll add a mode that reads the .xlsx
-and passes the per-row metadata (publication country, byline, snippet text) to
-each classification — for now, bare URLs are fine for accuracy testing.
-
 CLI:
+    python -m brands.bentley.classify_batch export.xlsx
+    python -m brands.bentley.classify_batch export.xlsx --snippet-only   # no web fetch
     python -m brands.bentley.classify_batch urls.txt
     python -m brands.bentley.classify_batch https://a.com/x https://b.com/y
-    python -m brands.bentley.classify_batch urls.txt --out decisions_bentley.json --workers 6
+    python -m brands.bentley.classify_batch export.xlsx --out decisions_bentley.json --workers 6
 """
 
 import argparse
@@ -23,40 +24,78 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from brands.bentley.classify_bentley import classify_url
+from brands.bentley.export_reader import read_export
 
 RUN_BRAND = "Bentley"
 
+_EXPORT_EXTS = (".xlsx", ".xls", ".csv")
 
-def _read_urls(args_urls: list[str]) -> list[str]:
-    urls: list[str] = []
-    for item in args_urls:
-        # a .txt file of URLs, or a literal URL
-        if item.lower().endswith(".txt"):
+
+def _build_jobs(args_inputs: list[str]) -> list[dict]:
+    """Turn CLI inputs into classification jobs (dicts with a url + any export
+    metadata). Accepts a Meltwater export (.xlsx/.csv), a .txt of URLs, and/or
+    literal URLs, mixed freely. De-duped by URL, input order preserved."""
+    jobs: list[dict] = []
+    for item in args_inputs:
+        low = item.lower()
+        if low.endswith(_EXPORT_EXTS):
+            rows, cols = read_export(item)
+            detected = {k: v for k, v in cols.items() if v}
+            print(f"Loaded {len(rows)} row(s) from {item}\n  detected columns: {detected}\n")
+            jobs.extend(rows)
+        elif low.endswith(".txt"):
             with open(item, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#"):
-                        urls.append(line)
+                        jobs.append({"url": line})
         else:
-            urls.append(item.strip())
-    # de-dupe, keep order
+            jobs.append({"url": item.strip()})
+    # de-dupe by url, keep order
     seen, out = set(), []
-    for u in urls:
+    for j in jobs:
+        u = j.get("url", "")
         if u and u not in seen:
             seen.add(u)
-            out.append(u)
+            out.append(j)
     return out
 
 
-def run(urls: list[str], workers: int = 6) -> list[dict]:
+def _classify_job(job: dict, prefer_snippet: bool) -> dict:
+    r = classify_url(
+        job["url"],
+        source=job.get("source", ""),
+        pub_country=job.get("pub_country", ""),
+        byline=job.get("byline", ""),
+        snippet=job.get("snippet", ""),
+        headline=job.get("headline", ""),
+        body=job.get("body", ""),
+        prefer_snippet=prefer_snippet,
+    )
+    # Carry apply-critical export metadata onto the result so decisions.json is
+    # ready for Phase-2 apply: `document_id` is what Meltwater's tag API targets,
+    # and `document_tags` are the tags ALREADY applied (additive-skip + a
+    # ground-truth reference for accuracy checks).
+    for k in ("document_id", "document_tags", "source", "pub_country", "byline", "headline", "date"):
+        if job.get(k):
+            r.setdefault(k, job[k])
+    return r
+
+
+def run(jobs: list, workers: int = 6, prefer_snippet: bool = False) -> list[dict]:
+    # Accept a list of URL strings (the dashboard passes these) OR job dicts
+    # (the export path). Normalize bare strings to {"url": ...}.
+    jobs = [{"url": j} if isinstance(j, str) else j for j in jobs]
     results: list[dict] = []
-    total = len(urls)
-    print(f"Classifying {total} URL(s) with {workers} workers...\n")
+    total = len(jobs)
+    mode = "snippet-only (no fetch)" if prefer_snippet else "fetch + snippet-fallback"
+    print(f"Classifying {total} item(s) with {workers} workers [{mode}]...\n")
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(classify_url, u): u for u in urls}
+        futures = {ex.submit(_classify_job, job, prefer_snippet): job for job in jobs}
         for i, fut in enumerate(as_completed(futures), 1):
-            u = futures[fut]
+            job = futures[fut]
+            u = job.get("url", "")
             try:
                 r = fut.result()
             except Exception as e:
@@ -65,11 +104,12 @@ def run(urls: list[str], workers: int = 6) -> list[dict]:
             results.append(r)
             scope = (r.get("scope") or "?").upper()
             ntags = len(r.get("tags", []))
+            src = (r.get("text_source") or "?")
             flag = " [review]" if r.get("needs_review") else ""
-            print(f"[{i}/{total}] {scope:6s} {ntags:2d} tags{flag}  {u[:80]}")
+            print(f"[{i}/{total}] {scope:6s} {ntags:2d} tags via {src:16s}{flag}  {u[:70]}")
 
     # keep input order in the output
-    order = {u: i for i, u in enumerate(urls)}
+    order = {j["url"]: i for i, j in enumerate(jobs)}
     results.sort(key=lambda r: order.get(r["url"], 1e9))
     return results
 
@@ -118,22 +158,31 @@ def _save_to_db(results: list[dict], user_id: str) -> None:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Classify many Bentley URLs → decisions.json")
-    ap.add_argument("urls", nargs="+", help="URLs and/or a .txt file of URLs")
+    ap = argparse.ArgumentParser(
+        description="Classify a Meltwater export / URLs → decisions.json")
+    ap.add_argument("inputs", nargs="+",
+                    help="a Meltwater export (.xlsx/.csv), a .txt of URLs, and/or literal URLs")
     ap.add_argument("--out", default="decisions_bentley.json")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--snippet-only", action="store_true",
+                    help="classify from the export snippet/headline only — no web fetch "
+                         "(fast + avoids paywall/JS/bot walls; recommended for big exports)")
     ap.add_argument("--save-db", action="store_true",
                     help="also save the run to the shared tagging_runs table")
     ap.add_argument("--user-id", default=os.environ.get("MELTWATER_USER_ID", ""),
                     help="Supabase user id to attach the run to (or set MELTWATER_USER_ID)")
     args = ap.parse_args()
 
-    urls = _read_urls(args.urls)
-    if not urls:
+    try:
+        jobs = _build_jobs(args.inputs)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Could not read input: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not jobs:
         print("No URLs found.", file=sys.stderr)
         sys.exit(1)
 
-    results = run(urls, workers=args.workers)
+    results = run(jobs, workers=args.workers, prefer_snippet=args.snippet_only)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
