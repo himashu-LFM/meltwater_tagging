@@ -105,7 +105,13 @@ def run(jobs: list, workers: int = 6, prefer_snippet: bool = False) -> list[dict
             scope = (r.get("scope") or "?").upper()
             ntags = len(r.get("tags", []))
             src = (r.get("text_source") or "?")
-            flag = " [review]" if r.get("needs_review") else ""
+            # distinguish "held for a human to read" from "tagged, just confirm"
+            if (r.get("scope") or "") in ("review", "error"):
+                flag = " [needs-read]"
+            elif r.get("needs_review"):
+                flag = " [confirm]"
+            else:
+                flag = ""
             print(f"[{i}/{total}] {scope:6s} {ntags:2d} tags via {src:16s}{flag}  {u[:70]}")
 
     # keep input order in the output
@@ -117,12 +123,19 @@ def run(jobs: list, workers: int = 6, prefer_snippet: bool = False) -> list[dict
 def _summary(results: list[dict]) -> None:
     inn = sum(1 for r in results if r.get("scope") == "in")
     out = sum(1 for r in results if r.get("scope") == "out")
-    rev = sum(1 for r in results if r.get("needs_review"))
-    err = sum(1 for r in results if r.get("scope") in ("error", "review"))
-    print("\n" + "=" * 60)
-    print(f"TOTAL {len(results)}  |  in-scope {inn}  |  not-in-scope {out}  "
-          f"|  needs-review {rev}  |  errors/unresolved {err}")
-    print("=" * 60)
+    held = sum(1 for r in results if r.get("scope") == "review")   # couldn't read -> a human must read it
+    err = sum(1 for r in results if r.get("scope") == "error")
+    # in-scope items that ARE tagged but carry a soft "confirm" flag (uncertain / snippet-based)
+    confirm = sum(1 for r in results if r.get("scope") == "in" and r.get("needs_review"))
+    tagged = inn + out
+    print("\n" + "=" * 66)
+    print(f"TOTAL {len(results)}")
+    print(f"  TAGGED automatically: {tagged}   (in-scope {inn} | not-in-scope {out})")
+    print(f"     ...of which flagged to CONFIRM (already tagged, optional check): {confirm}")
+    print(f"  NEEDS A HUMAN to read (blocked/unreadable, NOT tagged): {held}")
+    if err:
+        print(f"  errors: {err}")
+    print("=" * 66)
 
 
 def _save_to_db(results: list[dict], user_id: str) -> None:
