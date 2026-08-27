@@ -191,7 +191,7 @@ async def apply_plan_to_card(page, card, to_add, dry_run, delay):
     return applied, skipped, failed
 
 
-async def run_live(plans: list[dict], apply_changes: bool):
+async def run_live(plans: list[dict], apply_changes: bool, capture_only: bool = False):
     """Walk the Meltwater feed and apply each plan's missing tags by matching the
     feed card's article URL to the plan's URL. Reuses apply_tags' feed + modal
     primitives and a persistent browser profile (log in manually on first run).
@@ -206,41 +206,135 @@ async def run_live(plans: list[dict], apply_changes: bool):
 
     # index plans by canonical URL; only items that actually need tags added
     want = {norm_permalink(p["url"]): p for p in plans if p["action"] == "apply" and p["to_add"]}
-    if not want:
+    if not want and not capture_only:
         print("Nothing to apply (no items with missing Bentley tags).")
         return
     delay = config.ACTION_DELAY_MS / 1000.0
     done, applied_all, skipped_all, failed_all = set(), [], [], []
 
+    CARD_SEL = ('[data-testid="virtuoso-item-list"] > div, '
+                '[data-testid="result-card"], article')
+
+    async def _scroll(page):
+        """Scroll Meltwater's virtualized (Virtuoso) list — mouse.wheel is a
+        no-op on it, so scrollBy the actual scroller. Returns True if it moved."""
+        try:
+            return await page.evaluate("""() => {
+                const s = document.querySelector('[data-testid="virtuoso-scroller"]')
+                    || document.scrollingElement || document.documentElement;
+                if (!s) return false;
+                const before = s.scrollTop;
+                s.scrollBy(0, Math.max(600, s.clientHeight * 0.85));
+                return s.scrollTop !== before;
+            }""")
+        except Exception:
+            try:
+                await page.mouse.wheel(0, 3000)
+            except Exception:
+                pass
+            return True
+
+    import os
     async with async_playwright() as pw:
         ctx = await pw.chromium.launch_persistent_context(config.USER_DATA_DIR, headless=config.HEADLESS)
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
+        # Capture the real enqueue-document-tagging request(s) this run makes, so
+        # the API apply path (api_apply.py --capture) can be finalized from a
+        # genuine call rather than a guessed payload.
+        cap_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "mw_capture.log"))
+
+        async def _capture(req):
+            try:
+                if "enqueue-document-tagging" in req.url:
+                    try:
+                        hdrs = await req.all_headers()
+                    except Exception:
+                        hdrs = {}
+                    with open(cap_file, "a", encoding="utf-8") as f:
+                        f.write(f"REQUEST {req.method} {req.url}\n"
+                                f"headers={json.dumps(hdrs)}\nbody={req.post_data or ''}\n"
+                                + "-" * 80 + "\n")
+            except Exception:
+                pass
+        ctx.on("request", _capture)
+
+        async def _capture_resp(resp):
+            # Grab tag-related BFF responses — the tag LIST (name -> internal id)
+            # comes back here, which is exactly what api_apply needs to resolve
+            # tag names to the tagIds the enqueue endpoint expects.
+            try:
+                u = resp.url
+                if "content-stream-bff" in u and "tag" in u.lower() and "enqueue" not in u:
+                    body = await resp.text()
+                    if "tag" in body.lower():
+                        with open(cap_file, "a", encoding="utf-8") as f:
+                            f.write(f"RESPONSE {resp.status} {u}\nbody={body[:60000]}\n"
+                                    + "-" * 80 + "\n")
+            except Exception:
+                pass
+        ctx.on("response", _capture_resp)
+
+        if capture_only:
+            if not config.HEADLESS:
+                await page.goto(config.MELTWATER_URL)
+            print(f"\nCAPTURE MODE — capturing to {cap_file}", flush=True)
+            input(">>> In the opened window: open any article's Tag modal and APPLY one tag "
+                  "(you can remove it after). That captures the tag list + request headers. "
+                  "Then press Enter here to finish...\n")
+            await ctx.close()
+            print("Capture done. Now run:  python -m brands.bentley.api_apply "
+                  "decisions_bentley.json --capture mw_capture.log", flush=True)
+            return
+
         if not config.HEADLESS:
             await page.goto(config.MELTWATER_URL)
-            input("\n>>> Log into Meltwater, open the Bentley feed, then press Enter to start...\n")
+            input("\n>>> In the NEW browser window Playwright opened, log into Meltwater, open the "
+                  "'Bentley 2026 | All Coverage' feed (set the date range to cover the export dates), "
+                  "then press Enter here...\n")
 
-        stable = 0
-        while stable < 3 and len(done) < len(want):
-            cards = await page.query_selector_all('[data-testid="virtuoso-item-list"] > div, [data-testid="result-card"], article')
+        print(f"Walking the feed to match {len(want)} item(s)...  (Ctrl-C to stop)", flush=True)
+        seen_keys, rounds, no_progress = set(), 0, 0
+        MAX_ROUNDS = 150
+        while rounds < MAX_ROUNDS and len(done) < len(want) and no_progress < 5:
+            rounds += 1
+            cards = await page.query_selector_all(CARD_SEL)
+            matched_this_round = 0
             for card in cards:
                 try:
                     key = await get_card_permalink(card)
                 except Exception:
                     continue
+                if key:
+                    seen_keys.add(key)
                 if not key or key in done or key not in want:
                     continue
                 plan = want[key]
                 done.add(key)
+                matched_this_round += 1
                 a, s, f = await apply_plan_to_card(page, card, plan["to_add"],
                                                    dry_run=not apply_changes, delay=delay)
                 applied_all += [(key, t) for t in a]
                 skipped_all += [(key, t) for t in s]
                 failed_all += [(key, t) for t in f]
-                print(("[WALK] " if not apply_changes else "") +
-                      f"{key[:60]}  +{a}" + (f" skip{s}" if s else "") + (f" FAIL{f}" if f else ""))
-            await page.mouse.wheel(0, 4000)
-            await asyncio.sleep(0.8)
-            stable = stable + 1 if len(done) else 0
+                print(("[WALK] " if not apply_changes else "[APPLY] ") +
+                      f"{key[:58]}  +{a}" + (f" skip{s}" if s else "") + (f" FAIL{f}" if f else ""),
+                      flush=True)
+            print(f"  round {rounds}: {len(cards)} cards on screen, "
+                  f"{len(done)}/{len(want)} matched, {len(seen_keys)} unique articles seen so far",
+                  flush=True)
+            moved = await _scroll(page)
+            await asyncio.sleep(1.0)
+            no_progress = 0 if (matched_this_round or moved) else no_progress + 1
+
+        # Diagnostic when matching is poor — show feed keys vs what we wanted.
+        if len(done) < len(want):
+            print("\n[diagnostic] a few ARTICLE URLS SEEN in the feed:", flush=True)
+            for k in list(seen_keys)[:8]:
+                print("   feed:", k, flush=True)
+            print("[diagnostic] a few URLS WE WANTED to match:", flush=True)
+            for k in list(want)[:8]:
+                print("   want:", k, flush=True)
 
         await ctx.close()
 
@@ -261,6 +355,9 @@ def main():
                     help="open a browser and match against the live Meltwater feed")
     ap.add_argument("--apply", action="store_true",
                     help="with --live: actually APPLY tags (default is walk-only, applies nothing)")
+    ap.add_argument("--capture-only", action="store_true",
+                    help="open the browser and capture one manual tag (headers + tag-id list) to "
+                         "mw_capture.log for api_apply; applies nothing itself")
     args = ap.parse_args()
 
     decisions = load_decisions(args.decisions)
@@ -270,6 +367,11 @@ def main():
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(plans, f, indent=2, ensure_ascii=False)
         print(f"Wrote plan -> {args.out}")
+
+    if args.capture_only:
+        import asyncio
+        asyncio.run(run_live(plans, apply_changes=False, capture_only=True))
+        return
 
     if not args.live:
         print_dry_run(plans)
