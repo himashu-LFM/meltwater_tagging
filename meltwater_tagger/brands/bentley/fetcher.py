@@ -20,8 +20,10 @@ If nothing usable is found, ok=False and the caller flags for review.
 
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from html import unescape
 from urllib.parse import urlparse
@@ -146,20 +148,85 @@ def _retrieve_playwright(url: str, timeout_ms: int = 15000) -> str:
             browser.close()
 
 
+def _kill_process_tree(proc) -> None:
+    """Kill the child AND all its descendants (Playwright's Chromium and its
+    helper processes). Without this, killing only the Python child leaves
+    Chromium alive holding resources — the root cause of the old hang."""
+    try:
+        if os.name == "nt":
+            # /T kills the whole tree; /F forces it.
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True)
+        else:
+            # The child was started in its own session (setsid), so its pgid ==
+            # its pid and every descendant shares it — one killpg takes them all.
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def _retrieve_playwright_subprocess(url: str, timeout_s: int = 25) -> str:
     """Render via a separate Python process (its own main thread) so it works
-    from a webapp request worker thread WITHOUT hanging. A hard timeout kills a
-    stuck child so the caller is never blocked. Returns '' on timeout/failure."""
+    from a webapp request worker thread WITHOUT hanging. Windows-/thread-safe.
+
+    Two things make the timeout reliable (the old version hung despite a
+    timeout):
+      1. The child writes the HTML to a TEMP FILE, not stdout — so Chromium can't
+         keep an output PIPE open and block the parent's read.
+      2. The child runs in its OWN process group; on timeout we kill the whole
+         tree (Chromium included), not just the Python child.
+    Returns '' on timeout/failure."""
     proj = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    fd, tmp = tempfile.mkstemp(prefix="mw_pw_", suffix=".html")
+    os.close(fd)
+    popen_kwargs = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True  # setsid -> own process group
     try:
-        r = subprocess.run(
-            [sys.executable, "-m", "brands.bentley.playwright_fetch", url],
-            cwd=proj, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout_s,
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "brands.bentley.playwright_fetch", url, tmp],
+            cwd=proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **popen_kwargs,
         )
-        return r.stdout or ""
     except Exception:
-        return ""  # TimeoutExpired (child killed) or any spawn error -> no HTML
+        _safe_unlink(tmp)
+        return ""
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        _safe_unlink(tmp)
+        return ""  # timed out -> no HTML (item gets flagged for review)
+    except Exception:
+        _kill_process_tree(proc)
+        _safe_unlink(tmp)
+        return ""
+    # process finished on its own -> read whatever HTML it wrote
+    html = ""
+    try:
+        with open(tmp, encoding="utf-8", errors="replace") as f:
+            html = f.read()
+    except Exception:
+        html = ""
+    finally:
+        _safe_unlink(tmp)
+    return html
+
+
+def _safe_unlink(path: str) -> None:
+    try:
+        os.remove(path)
+    except Exception:
+        pass
 
 
 def fetch_article(url: str, _depth: int = 0) -> dict:
@@ -205,17 +272,16 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
     #  - MAIN thread (CLI): direct sync Playwright (fast, Windows-safe here).
     #  - WORKER thread (webapp request): a separate subprocess renderer — sync
     #    Playwright hangs in worker threads on Windows, so we run it in its own
-    #    process (its own main thread) with a hard timeout. Toggle off with
-    #    MELTWATER_PLAYWRIGHT_SUBPROCESS=false to fall back to skip->review.
+    #    process (its own main thread) with a hard timeout.
+    #  ON by default now: the subprocess renderer writes to a temp file (no held
+    #  pipe) and its timeout kills the whole process tree (Chromium included), so
+    #  a stuck child can no longer block the caller. Set
+    #  MELTWATER_PLAYWRIGHT_SUBPROCESS=false to fall back to skip->review.
     pw_html = None
     try:
         if threading.current_thread() is threading.main_thread():
             pw_html = _retrieve_playwright(url)
-        elif os.environ.get("MELTWATER_PLAYWRIGHT_SUBPROCESS", "false").lower() == "true":
-            # OFF by default: the subprocess renderer's timeout doesn't reliably
-            # free us on Windows (Playwright's Chromium grandchild holds the
-            # stdout pipe open, so a stuck child can still block). Until that
-            # process-tree kill is solved, worker threads skip -> review flag.
+        elif os.environ.get("MELTWATER_PLAYWRIGHT_SUBPROCESS", "true").lower() == "true":
             pw_html = _retrieve_playwright_subprocess(url)
         if pw_html:
             body = _extract_body(pw_html, url)
