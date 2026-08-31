@@ -76,7 +76,8 @@ def _classify_job(job: dict, prefer_snippet: bool) -> dict:
     # ready for Phase-2 apply: `document_id` is what Meltwater's tag API targets,
     # and `document_tags` are the tags ALREADY applied (additive-skip + a
     # ground-truth reference for accuracy checks).
-    for k in ("document_id", "document_tags", "source", "pub_country", "byline", "headline", "date"):
+    for k in ("document_id", "document_tags", "source", "pub_country", "byline",
+              "headline", "date", "snippet", "keywords"):
         if job.get(k):
             r.setdefault(k, job[k])
     return r

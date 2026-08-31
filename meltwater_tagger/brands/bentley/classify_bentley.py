@@ -222,6 +222,14 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
             output_config={"format": {"type": "json_schema", "schema": prompts.DECISION_SCHEMA}},
         )
     except Exception as e:
+        emsg = str(e).lower()
+        if "credit balance" in emsg or "billing" in emsg:
+            # Systemic, not per-article: the Anthropic account is out of credits.
+            result.update(scope="review",
+                          reason="Anthropic API is out of credits — add credits in Plans & Billing "
+                                 "and re-run. (This article was NOT classified.)",
+                          needs_review=["anthropic-credits-exhausted"])
+            return result
         result.update(scope="review",
                       reason=f"Classification did not complete ({type(e).__name__}: {e}) — timed out "
                              "or errored. Flagged for manual tagging.",

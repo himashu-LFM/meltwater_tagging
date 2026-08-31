@@ -245,8 +245,19 @@ async def run_live(plans: list[dict], apply_changes: bool, capture_only: bool = 
         cap_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "mw_capture.log"))
 
         async def _capture(req):
+            # Capture ALL tag-related writes (any method) so we can find the call
+            # that actually persists a manual tag — it may NOT be
+            # enqueue-document-tagging. Log method + url + headers + body.
             try:
-                if "enqueue-document-tagging" in req.url:
+                u = req.url.lower()
+                interesting = (
+                    "enqueue-document-tagging" in u
+                    or ("content-stream-bff" in u and "tag" in u)
+                    or ("fhaicoreapps" in u and "tag" in u)
+                    or (req.method in ("POST", "PUT", "PATCH", "DELETE")
+                        and ("tag" in u or "document" in u) and "meltwater" in u)
+                )
+                if interesting:
                     try:
                         hdrs = await req.all_headers()
                     except Exception:
