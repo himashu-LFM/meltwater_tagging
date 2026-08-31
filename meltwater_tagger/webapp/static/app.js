@@ -110,8 +110,8 @@ async function run() {
     state.runId = data.run_id || null;
     renderResults(data);
     showView("resultsView");
-    const applied = data.results.filter(x => x.tag).length;
-    Toast.success(`Classified ${data.results.length} posts · ${applied} tagged.`, "Classification done");
+    const taggable = data.results.filter(x => x.action === "apply").length;
+    Toast.success(`Classified ${data.results.length} items · ${taggable} taggable.`, "Classification done");
   } catch (err) {
     showView("inputView");
     $("inputErr").textContent = err.message;
@@ -121,7 +121,7 @@ async function run() {
 
 let loaderTimer;
 function cycleLoaderText() {
-  const msgs = ["Fetching post text…", "Reading full threads…", "Judging sentiment…", "Applying brand rules…"];
+  const msgs = ["Reading articles…", "Understanding coverage…", "Applying tagging rules…", "Assigning tags…"];
   let i = 0;
   $("loaderText").textContent = msgs[0];
   clearInterval(loaderTimer);
@@ -136,6 +136,12 @@ function renderResults(data) {
   $("applyStatus").className = "apply-status";
   const res = data.results;
 
+  // Taxonomy brands (Bentley) carry a `scope` field -> multi-tag table.
+  if (res.some(r => r.scope)) return renderBentleyResults(data, res);
+
+  // sentiment header (restore in case a Bentley run swapped it)
+  $("resHead").innerHTML =
+    `<th>#</th><th>Type</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Applied</th>`;
   const counts = { positive: 0, negative: 0, neutral: 0, other: 0 };
   res.forEach(r => {
     const s = (r.sentiment || "").toLowerCase();
@@ -175,6 +181,54 @@ function renderResults(data) {
       <td class="reason">${escapeHtml(r.reason || "")}</td>
       <td><a href="${encodeURI(r.permalink)}" target="_blank" rel="noopener">${escapeHtml(shorten(r.permalink))}</a></td>
       <td>${r.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+// Bentley (taxonomy) results: scope + multi-tag chips + status.
+function renderBentleyResults(data, res) {
+  const inScope = res.filter(r => r.scope === "in").length;
+  const outScope = res.filter(r => r.scope === "out").length;
+  const needsRead = res.filter(r => r.scope === "review").length;
+  const confirm = res.filter(r => r.confirm).length;
+  const tagged = inScope + outScope;
+  $("stats").innerHTML =
+    `<span class="stat">${res.length} items</span>` +
+    `<span class="chip positive">🏷 ${tagged} tagged</span>` +
+    `<span class="stat">✓ ${inScope} in-scope</span>` +
+    `<span class="stat">🚫 ${outScope} not in scope</span>` +
+    (confirm ? `<span class="stat">⚑ ${confirm} to confirm</span>` : "") +
+    (needsRead ? `<span class="chip flag">👁 ${needsRead} needs read</span>` : "");
+
+  // Bentley applies by Document ID via the tagging API.
+  const taggable = res.some(r => r.action === "apply");
+  $("applyBtn").disabled = !taggable;
+  $("applyBtn").title = taggable ? "Apply Bentley tags to Meltwater by Document ID" : "Nothing to apply";
+
+  $("resHead").innerHTML =
+    `<th>#</th><th>Scope</th><th>Tags</th><th>Status</th><th>Reason</th><th>Article</th>`;
+  const body = $("resBody");
+  body.innerHTML = "";
+  res.forEach((r, idx) => {
+    const scope = r.scope || "";
+    const scopeChip = scope === "in" ? '<span class="chip positive">In scope</span>'
+      : scope === "out" ? '<span class="chip neutral">Not in scope</span>'
+      : '<span class="chip flag">Needs read</span>';
+    const tagChips = (r.tags && r.tags.length)
+      ? r.tags.map(t => `<span class="chip tag">${escapeHtml(t)}</span>`).join(" ")
+      : (scope === "out" ? '<span class="chip neutral">Not in scope</span>' : "—");
+    const status = scope === "review" ? '<span class="chip flag">👁 read</span>'
+      : r.confirm ? '<span class="chip warn">⚑ confirm</span>'
+      : '<span class="chip positive">✓ tagged</span>';
+    const tr = document.createElement("tr");
+    tr.style.animationDelay = (idx * 25) + "ms";
+    tr.innerHTML = `
+      <td>${idx + 1}</td>
+      <td>${scopeChip}</td>
+      <td class="tags-cell">${tagChips}</td>
+      <td>${status}</td>
+      <td class="reason">${escapeHtml(r.reason || "")}</td>
+      <td><a href="${encodeURI(r.permalink)}" target="_blank" rel="noopener">${escapeHtml(shorten(r.permalink))}</a></td>`;
     body.appendChild(tr);
   });
 }
@@ -310,7 +364,26 @@ $("applyBtn").addEventListener("click", async () => {
       body: JSON.stringify({ results: state.results, run_brand: state.brand, run_id: state.runId }),
     });
     const data = await r.json();
-    if (r.ok) {
+    if (r.ok && state.results.some(x => x.scope)) {
+      // Bentley: report is {applied, failed, total, message, unmapped, failures}
+      const rep = data.report || {};
+      const applied = rep.applied || 0, failed = rep.failed || 0, total = rep.total || 0;
+      if (applied) {
+        t.success(`Applied tags to ${applied}/${total} document(s)${failed ? `, ${failed} failed` : ""}.`, "Applied to Meltwater");
+        if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      } else {
+        const why = rep.sample_error || (rep.message && rep.message !== "ok" ? rep.message : "No tags were applied.");
+        t.error(why, "Apply failed");
+      }
+      const um = (rep.unmapped || []).length;
+      $("applyStatus").innerHTML =
+        `<span class="chip positive">✓ ${applied} applied</span>` +
+        (failed ? ` <span class="chip negative">✗ ${failed} failed</span>` : "") +
+        (um ? ` <span class="chip flag">${um} tag(s) not in Meltwater</span>` : "") +
+        (rep.sample_error ? ` <span class="chip neutral" title="${escAttr(rep.sample_error)}">${escapeHtml(String(rep.sample_error).slice(0,60))}</span>` : "") +
+        `<span class="apply-time">${new Date().toLocaleTimeString()}</span>`;
+      $("applyStatus").className = "apply-status";
+    } else if (r.ok) {
       const applied = (data.applied || []).length;
       if (applied) {
         t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");

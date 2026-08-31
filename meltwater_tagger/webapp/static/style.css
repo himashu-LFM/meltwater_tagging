@@ -183,3 +183,8 @@ td a:hover{text-decoration:underline}
 .chip.flag{background:rgba(255,190,80,.14);color:#ffbe50;border:1px solid rgba(255,190,80,.3)}
 .chip.type-post{background:rgba(138,160,200,.12);color:#aab6d4;border:1px solid rgba(138,160,200,.28)}
 .chip.type-comment{background:rgba(120,180,255,.14);color:#8bb8ff;border:1px solid rgba(120,180,255,.32)}
+/* Bentley taxonomy: tag chips + a "confirm" status chip */
+.chip.tag{background:rgba(253,185,19,.12);color:#fdb913;border:1px solid rgba(253,185,19,.32);
+  font-weight:600;padding:4px 10px;font-size:11px}
+.chip.warn{background:rgba(255,190,80,.14);color:#ffbe50;border:1px solid rgba(255,190,80,.3)}
+.tags-cell{display:flex;flex-wrap:wrap;gap:5px;max-width:420px}

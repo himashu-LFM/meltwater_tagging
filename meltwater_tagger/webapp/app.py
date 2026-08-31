@@ -676,6 +676,11 @@ async def _check_reddit_cookie(cookie: str) -> bool:
 
 # --- classification --------------------------------------------------------
 
+# Full Meltwater taxonomy-export rows stashed at /api/extract, keyed by user id,
+# so /api/classify can use each item's metadata + Document ID (consumed once).
+_BENTLEY_UPLOADS: dict = {}
+
+
 @app.route("/api/extract", methods=["POST"])
 @require_auth
 def extract():
@@ -697,8 +702,27 @@ def extract():
 
     urls = [str(u).strip() for u in df[url_col].dropna() if str(u).strip().lower() != "nan"]
     brand = infer_brand(df, _find_col(df, TOPIC_HINTS)) or ""
-    log.info("extracted %d URLs from %r, inferred brand=%r (user=%s)", len(urls), f.filename, brand, g.user.id)
-    return jsonify({"urls": urls, "brand": brand, "count": len(urls)})
+
+    # If this is a Meltwater taxonomy export (carries a Document ID), stash the
+    # FULL rows (country, byline, snippet, body, document id, existing tags) so
+    # the Bentley classify path uses that metadata instead of bare URLs — and so
+    # apply can target each item by its Document ID.
+    taxonomy_export = False
+    try:
+        from brands.bentley.export_reader import rows_from_df
+        rows, _cols = rows_from_df(df)
+        if rows and any(r.get("document_id") for r in rows):
+            _BENTLEY_UPLOADS[g.user.id] = rows
+            taxonomy_export = True
+            if not brand:
+                brand = "Bentley"
+    except Exception:
+        log.debug("extract: not a taxonomy export (or reader failed) — URL-only mode")
+
+    log.info("extracted %d URLs from %r, brand=%r, taxonomy_export=%s (user=%s)",
+             len(urls), f.filename, brand, taxonomy_export, g.user.id)
+    return jsonify({"urls": urls, "brand": brand, "count": len(urls),
+                    "taxonomy_export": taxonomy_export})
 
 
 @app.route("/api/classify", methods=["POST"])
@@ -729,7 +753,13 @@ def classify():
               brand, "taxonomy" if is_taxonomy else "sentiment", len(urls), fetch_mode, config.MODEL, g.user.id)
     try:
         if is_taxonomy:
-            results = _classify_bentley_urls(urls)
+            # Prefer the full uploaded export (metadata + document ids) captured
+            # by /api/extract; fall back to bare URLs (pasted / no export cached).
+            cached_rows = _BENTLEY_UPLOADS.pop(g.user.id, None)
+            if cached_rows:
+                results = _classify_bentley_rows(cached_rows)
+            else:
+                results = _classify_bentley_urls(urls)
         else:
             results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id))
     except AuthenticationError:
@@ -762,33 +792,45 @@ def classify():
                      "run_id": run_record["id"] if run_record else None})
 
 
-def _classify_bentley_urls(urls):
-    """Bentley (taxonomy) classify path for the dashboard.
+def _bentley_result(r: dict) -> dict:
+    """Map one Bentley classifier result to the dashboard/history row shape.
 
-    Reuses the CLI batch runner (its own news fetcher + feedback-rule injection),
-    then maps each result to the shape the results table/history expect. The
-    'Apply to Meltwater' button stays disabled for now (action='review') because
-    Bentley Phase-2 apply (multi-tag) isn't wired yet.
-    """
+    action: 'apply' for anything we CAN tag (in-scope → real tags; out → the
+    single 'Not in scope' tag); 'review' only for items we couldn't read
+    (blocked/paywalled) — those a human must open. An in-scope item flagged
+    'uncertain' is still 'apply' (tagged) + confirm=True (optional check)."""
+    tags = r.get("tags") or []
+    scope = r.get("scope")
+    action = "apply" if scope in ("in", "out") else "review"
+    return {
+        "permalink": r.get("url"),
+        "document_id": r.get("document_id", ""),
+        "match_sentence": r.get("snippet", ""),   # for the tagging API body
+        "keywords": r.get("keywords", ""),
+        "content_type": "post",
+        "sentiment": "",                     # Bentley has no sentiment
+        "scope": scope,
+        "tags": tags,                        # list -> brand-aware chip table
+        "tags_by_family": r.get("tags_by_family") or {},
+        "tag": ", ".join(tags) if tags else ("Not in scope" if scope == "out" else "—"),
+        "action": action,
+        "confirm": bool(scope == "in" and r.get("needs_review")),
+        "reason": r.get("reason", ""),
+        "needs_review": r.get("needs_review") or [],
+    }
+
+
+def _classify_bentley_rows(rows):
+    """Bentley classify from FULL export rows (metadata + document ids)."""
     from brands.bentley.classify_batch import run as bentley_run
-    raw = bentley_run(urls, workers=6)
-    out = []
-    for r in raw:
-        tags = r.get("tags") or []
-        in_scope = r.get("scope") == "in"
-        out.append({
-            "permalink": r.get("url"),
-            "content_type": "post",
-            "sentiment": "",                 # Bentley has no sentiment
-            "scope": r.get("scope"),
-            "tags": tags,                    # list — for the future brand-aware table
-            "tags_by_family": r.get("tags_by_family") or {},
-            "tag": ", ".join(tags) if tags else ("Not in scope" if r.get("scope") == "out" else "—"),
-            "action": "review",             # keep Apply disabled until Phase-2 apply exists
-            "reason": r.get("reason", ""),
-            "needs_review": r.get("needs_review") or [],
-        })
-    return out
+    raw = bentley_run(rows, workers=10)   # run() accepts row dicts, fetch mode
+    return [_bentley_result(r) for r in raw]
+
+
+def _classify_bentley_urls(urls):
+    """Bentley classify from bare URLs (pasted / no export uploaded)."""
+    from brands.bentley.classify_batch import run as bentley_run
+    return [_bentley_result(r) for r in bentley_run(urls, workers=10)]
 
 
 async def _classify_urls(urls, brand, fetch_mode, user_id):
@@ -874,21 +916,59 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
 
 # --- export ------------------------------------------------------------------
 
+def _bentley_export_row(r: dict) -> dict:
+    """One spreadsheet row for a Bentley result: scope + status + a column per
+    tag family + document id + all-tags + reason."""
+    fam = r.get("tags_by_family") or {}
+
+    def j(k):
+        return "; ".join(fam.get(k) or [])
+
+    scope = r.get("scope")
+    status = ("Needs read" if scope == "review"
+              else "Confirm" if r.get("confirm") else "Tagged")
+    scope_label = {"in": "In scope", "out": "Not in scope",
+                   "review": "Needs read"}.get(scope, scope or "")
+    tags = r.get("tags") or []
+    return {
+        "Article URL": r.get("permalink", ""),
+        "Document ID": r.get("document_id", ""),
+        "Scope": scope_label,
+        "Status": status,
+        "Type of Publication": j("type_of_publication"),
+        "Type of Coverage": j("type_of_coverage"),
+        "Region": j("region"),
+        "Corporate": j("corporate"),
+        "Pillar": j("pillar"),
+        "Industry": j("industry"),
+        "Product": j("product"),
+        "Spokesperson": j("spokesperson"),
+        "All Tags": ", ".join(tags) if tags else ("Not in scope" if scope == "out" else ""),
+        "Reason": r.get("reason", ""),
+    }
+
+
 @app.route("/api/export", methods=["POST"])
 @require_auth
 def export():
     data = request.get_json(force=True)
     results = data.get("results", [])
     brand = data.get("run_brand", "run")
-    rows = [{
-        "permalink": r.get("permalink"),
-        "type": (r.get("content_type") or "post").capitalize(),
-        "tag": r.get("tag", ""),
-        "sentiment": r.get("sentiment", ""),
-        "action": r.get("action", ""),
-        "reason": r.get("reason", ""),
-        "applied": "Yes" if r.get("applied") else "",
-    } for r in results]
+
+    # Taxonomy brands (Bentley) carry `scope` -> multi-tag layout: scope, status,
+    # one column per tag family, doc id, all-tags, reason.
+    if any(r.get("scope") for r in results):
+        rows = [_bentley_export_row(r) for r in results]
+    else:
+        rows = [{
+            "permalink": r.get("permalink"),
+            "type": (r.get("content_type") or "post").capitalize(),
+            "tag": r.get("tag", ""),
+            "sentiment": r.get("sentiment", ""),
+            "action": r.get("action", ""),
+            "reason": r.get("reason", ""),
+            "applied": "Yes" if r.get("applied") else "",
+        } for r in results]
     df = pd.DataFrame(rows)
     buf = io.BytesIO()
     df.to_excel(buf, index=False)
@@ -967,6 +1047,32 @@ def apply_to_meltwater():
     # server-side session validation than a locally-cached token satisfies, so
     # it isn't reliable as a standalone method.
     creds = db.get_meltwater_creds_full(g.user.id) if db.is_configured() else None
+
+    # Bentley (taxonomy) apply: tag by Document ID via the tagging API — no topic
+    # URL, no feed. Needs the analyst's Meltwater email/password to log in.
+    if any(r.get("scope") for r in results):
+        if not creds:
+            return jsonify({"error": "Add your Meltwater email + password on your Profile "
+                                     "page to apply Bentley tags."}), 400
+        import bentley_apply_web
+        with _mfa_lock:
+            _mfa_waiters.pop(g.user.id, None)
+        request_otp = _make_request_otp(g.user.id)
+        try:
+            report = run_async(bentley_apply_web.apply_results(
+                creds["meltwater_email"], creds["meltwater_password"], results, request_otp))
+        except Exception as e:
+            log.exception("bentley apply failed (user=%s)", g.user.id)
+            return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+        # Mark applied results (best-effort) so the table can reflect it.
+        if run_id and db.is_configured() and report.get("applied"):
+            try:
+                db.update_run_status(run_id, "applied")
+            except Exception:
+                pass
+        return jsonify({"report": report, "applied": report.get("applied", 0),
+                        "failed": report.get("failed", 0), "message": report.get("message", "")})
+
     session_value = None
     if not creds:
         session_value = db.get_meltwater_session(g.user.id) if db.is_configured() else None
