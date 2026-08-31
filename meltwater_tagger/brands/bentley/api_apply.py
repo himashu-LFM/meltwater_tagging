@@ -137,7 +137,7 @@ def build_manifest(plans: list[dict], tag_map: dict) -> tuple[list[dict], list[d
     for p in plans:
         if p.get("action") != "apply" or not p.get("to_add"):
             continue
-        doc_id = (p.get("document_id") or "").strip()
+        doc_id = (p.get("document_id") or "").strip().strip('"').strip()
         if not doc_id:
             skipped_docs.append({"url": p.get("url", ""), "reason": "no document_id"})
             continue
@@ -153,6 +153,46 @@ def build_manifest(plans: list[dict], tag_map: dict) -> tuple[list[dict], list[d
         manifest.append({"document_id": doc_id, "url": p.get("url", ""),
                          "tag_ids": ids, "tag_names": names, "unmapped": miss})
     return manifest, skipped_docs, unmapped
+
+
+def manifest_from_results(results: list[dict], tag_map: dict) -> tuple[list[dict], set]:
+    """Build the per-document API manifest straight from dashboard result rows
+    (each has document_id, scope, tags). Resolves tag names -> tagIds; only rows
+    we CAN tag (action == 'apply') with a document id are included."""
+    manifest, unmapped = [], set()
+    for r in results:
+        if r.get("action") != "apply":
+            continue
+        doc_id = (r.get("document_id") or "").strip().strip('"').strip()
+        if not doc_id:
+            continue
+        names = r.get("tags") or (["Not in scope"] if r.get("scope") == "out" else [])
+        ids = []
+        for name in names:
+            tid = _lookup(name, tag_map)
+            if tid is None:
+                unmapped.add(name)
+            else:
+                ids.append(tid)
+        if ids:
+            kw = r.get("keywords") or ""
+            kw_list = [k.strip() for k in re.split(r"[;,]", kw) if k.strip()] if isinstance(kw, str) else list(kw)
+            manifest.append({"document_id": doc_id, "tag_ids": ids,
+                             "url": r.get("permalink", ""),
+                             "match_sentence": r.get("match_sentence") or r.get("snippet") or "",
+                             "keywords": kw_list})
+    return manifest, unmapped
+
+
+def build_body(m: dict) -> dict:
+    """The enqueue-document-tagging request body — MUST include matchSentence and
+    keywords (echoed from the document), or the tagging job is accepted (202) but
+    silently dropped. tagIds is a top-level array."""
+    doc = {"documentId": m["document_id"]}
+    if m.get("match_sentence"):
+        doc["matchSentence"] = m["match_sentence"]
+    doc["keywords"] = m.get("keywords") or []
+    return {"documents": [doc], "tagIds": m["tag_ids"]}
 
 
 def print_dry_run(manifest, skipped_docs, unmapped, tag_map):
@@ -303,7 +343,7 @@ async def run_api_live(manifest, apply_changes: bool, throttle_s: float = 1.5,
             headers.update(extra_headers)
 
         for i, m in enumerate(docs, 1):
-            body = {"documents": [{"documentId": m["document_id"]}], "tagIds": m["tag_ids"]}
+            body = build_body(m)
             if not apply_changes:
                 print(f"[{i}/{len(docs)}] DRY (browser open, token ok, not sending) "
                       f"{m['document_id']} -> {m['tag_ids']}", flush=True)

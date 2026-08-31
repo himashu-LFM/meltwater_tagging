@@ -47,12 +47,15 @@ FIELD_HINTS = {
     "document_id":   ["document id", "doc id", "mention id"],
     # No bare "tags" hint — it would substring-match "Hashtags".
     "document_tags": ["document tags", "existing tags"],
+    # Meltwater's tagging API echoes back the matched keywords; capture them.
+    "keywords":      ["keywords", "keyphrases"],
 }
 
 # Resolve in this order so a column claimed by an earlier field can't be reused
 # (e.g. Source Domain is taken before Source, URL before everything).
 _RESOLVE_ORDER = ["url", "document_id", "source_domain", "headline", "body",
-                  "snippet", "source", "pub_country", "byline", "date", "document_tags"]
+                  "snippet", "source", "pub_country", "byline", "date",
+                  "document_tags", "keywords"]
 
 
 def _matching_cols(df: pd.DataFrame, hints: list[str], taken: set[str]) -> list[str]:
@@ -103,20 +106,12 @@ def _first(row, colnames: list[str]) -> str:
     return ""
 
 
-def read_export(path: str) -> tuple[list[dict], dict]:
-    """Read an export file into (rows, detected_columns).
+def rows_from_df(df) -> tuple[list[dict], dict]:
+    """Turn an already-parsed export DataFrame into (rows, detected_columns).
 
-    Raises FileNotFoundError if the path is missing and ValueError if no URL
-    column can be found (nothing to classify without it)."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
-
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".csv":
-        df = pd.read_csv(path, dtype=str, keep_default_na=True)
-    else:
-        df = pd.read_excel(path, dtype=str)
-
+    Split out from read_export so callers that already have a DataFrame (the web
+    app reads the upload straight into pandas) can reuse the same column
+    detection + row normalization. Raises ValueError if no URL column exists."""
     cols = _detect_columns(df)
     if not cols["url"]:
         raise ValueError(
@@ -124,7 +119,6 @@ def read_export(path: str) -> tuple[list[dict], dict]:
             f"{list(df.columns)}. Add/rename a column so its header contains "
             "'url' or 'link', or extend export_reader.FIELD_HINTS['url']."
         )
-
     rows: list[dict] = []
     seen: set[str] = set()
     for _, r in df.iterrows():
@@ -142,7 +136,27 @@ def read_export(path: str) -> tuple[list[dict], dict]:
             "body":          _first(r, cols["body"]),
             "headline":      _first(r, cols["headline"]),
             "date":          _first(r, cols["date"]),
-            "document_id":   _first(r, cols["document_id"]),
+            # Meltwater exports wrap the Document ID in literal double-quotes
+            # (e.g. "bTZx...") — strip them, or the tagging API silently no-ops
+            # (returns 202 but matches no document).
+            "document_id":   _first(r, cols["document_id"]).strip('"').strip(),
             "document_tags": _first(r, cols["document_tags"]),
+            "keywords":      _first(r, cols["keywords"]),
         })
     return rows, cols
+
+
+def read_export(path: str) -> tuple[list[dict], dict]:
+    """Read an export file into (rows, detected_columns).
+
+    Raises FileNotFoundError if the path is missing and ValueError if no URL
+    column can be found (nothing to classify without it)."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".csv":
+        df = pd.read_csv(path, dtype=str, keep_default_na=True)
+    else:
+        df = pd.read_excel(path, dtype=str)
+    return rows_from_df(df)
