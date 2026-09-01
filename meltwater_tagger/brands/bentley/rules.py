@@ -62,6 +62,34 @@ CORP_PRODUCT_TECH_LABEL = "Corporate - Product & Technology"
 
 
 # ---------------------------------------------------------------------------
+# Deterministic Bentley-ISSUED press-release detection.
+#
+# A Bentley press release is often republished verbatim on a third-party site or
+# wire (citybiz, MENAFN, PR Newswire, …), sometimes with a dateline or auto-
+# byline. The model then tends to call it "Unique" (third-party outlet), but the
+# CONTENT is Bentley-issued, so the protocol (and the client) call it a Press
+# release. These markers appear in Bentley's own releases (and their verbatim
+# pickups) but effectively never in a journalist's original reporting, so they
+# reliably flag Type of Coverage = Press release regardless of who republished it.
+# Kept high-precision on purpose to avoid mislabeling genuine third-party
+# analysis that merely quotes a Bentley announcement.
+# ---------------------------------------------------------------------------
+BENTLEY_PRESS_RELEASE_MARKERS = (
+    "bentley systems today announced",
+    "nasdaq: bsy",
+    "nasdaq:bsy",
+    "infrastructure engineering software company",   # standard "About Bentley Systems" boilerplate
+)
+PRESS_RELEASE_LABEL = "Type of Coverage - Press release"
+
+
+def is_bentley_press_release(text: str) -> bool:
+    """True if the text carries a definitive Bentley-issued press-release signal."""
+    low = (text or "").lower()
+    return any(m in low for m in BENTLEY_PRESS_RELEASE_MARKERS)
+
+
+# ---------------------------------------------------------------------------
 # JUDGMENT — the critical QA corrections, injected verbatim into the prompt.
 # These are the "commonly confused" traps the client keeps flagging.
 # ---------------------------------------------------------------------------
@@ -69,11 +97,14 @@ QA_CORRECTIONS = [
     "Digital Twin ≠ Product - iTwin. Only tag iTwin when the product name 'iTwin' is explicitly written.",
     "Mention of AI ≠ Pillar - Infrastructure AI. AI must be a genuine focus (innovation or 'do more with less'), not a passing mention.",
     "Mention of sustainability ≠ Corporate - Sustainability. If the real theme is resilience / risk reduction / asset longevity, use Pillar - Resilient Built World instead.",
-    "Mention of water ≠ Industry - Water. The story must materially focus on water infrastructure.",
-    "Mention of cities ≠ Industry - Cities. Same bar — must be a material focus.",
+    "Mention of water ≠ Industry | Water. The story must materially focus on water infrastructure.",
+    "Mention of cities ≠ Industry | Cities. Same bar — must be a material focus.",
     "Product tags require the explicit product name. Never infer a product.",
-    "Region = PUBLICATION country of origin, NOT the location discussed in the article.",
-    "Bylined articles are usually Type of Coverage - Unique (even a press-release pickup with a byline).",
+    "Region = PUBLICATION country of origin, NOT the location discussed in the article. (e.g. a Cambodia project covered by a US outlet is NALA; a UAE outlet is EMEA.)",
+    "Coverage type is decided by the AUTHOR BYLINE: a byline → Type of Coverage - Unique (even a press-release pickup with a byline). NO byline + the release was issued BY Bentley → Press release. NO byline + issued by ANOTHER organisation (Bentley only mentioned) → 3rd party press release. A Bentley-issued release is listed on bentley.com/newsroom.",
+    "Bentley subsidiaries/brands (Seequent, Blyncsy, Cohesive) count AS Bentley for scope — coverage about them is IN scope. (Only content published ON a subsidiary's own site, e.g. seequent.com, is a not-in-scope source.)",
+    "A competitor story (Autodesk, Hexagon, Nemetschek, Trimble, …) that mentions Bentley only inside a 3rd-party press release → Type of Coverage - 3rd party press release + Region + Type of Publication ONLY; do NOT add Industry/Pillar/Corporate unless Bentley is a material theme.",
+    "Being named in Bentley's ecosystem/partner catalog (another company chosen for the catalog) is NOT Corporate - Events/Milestones/Awards.",
     "Any Product tag generally also needs Corporate - Product & Technology.",
     "Market reports / investor content about Bentley as a public company → Corporate - Financial / IR.",
     "Substations serving customers/utility networks = Energy - Electric Utilities; assets that GENERATE energy = Energy - Power Generation.",

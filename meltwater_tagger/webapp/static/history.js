@@ -136,38 +136,65 @@ async function showDetail(id) {
   const panel = $("detailPanel");
   panel.classList.remove("hidden");
   if (!data.run) { panel.innerHTML = "Not found."; return; }
-  const taggable = (res) => res.action === "apply" && res.tag;
-  const rows = (data.run.results || []).map((res, idx) => {
-    const s = (res.sentiment || "").toLowerCase();
-    const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
-    // Prefer the stored type; for older runs (saved before content_type existed)
-    // derive it from the URL — a comment URL is unmistakable, so this is exact.
-    const ctype = (res.content_type || deriveContentType(res.permalink)).toLowerCase();
-    const typeChip = ctype === "comment"
-      ? '<span class="chip type-comment">💬 Comment</span>'
-      : '<span class="chip type-post">📄 Post</span>';
-    const canTag = taggable(res) && !res.applied;
-    const actionCell = res.applied
-      ? '<span class="chip positive">✓ Applied</span>'
-      : (canTag ? `<button class="mini-btn" data-tag-idx="${idx}">🏷 Tag this post</button>` : "—");
-    return `<tr><td>${idx + 1}</td><td>${typeChip}</td>
-      <td><span class="chip ${cls}">${escapeHtml(s || res.action)}</span></td>
-      <td>${escapeHtml(res.tag || "—")}</td><td class="reason">${escapeHtml(res.reason || "")}</td>
-      <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td>
-      <td>${actionCell}</td></tr>`;
-  }).join("");
-  const applyCount = (data.run.results || []).filter(r => r.action === "apply").length;
-  const doneCount = (data.run.results || []).filter(r => r.applied).length;
+  const allRes = data.run.results || [];
+  const isBentley = allRes.some(x => x.scope);   // taxonomy runs carry `scope`
+
+  let thead, rows, statsHtml;
+  if (isBentley) {
+    thead = `<th>#</th><th>Scope</th><th>Tags</th><th>Status</th><th>Reason</th><th>Article</th>`;
+    rows = allRes.map((res, idx) => {
+      const scope = res.scope || "";
+      const scopeChip = scope === "in" ? '<span class="chip positive">In scope</span>'
+        : scope === "out" ? '<span class="chip neutral">Not in scope</span>'
+        : '<span class="chip flag">Needs read</span>';
+      const tags = (res.tags && res.tags.length)
+        ? res.tags.map(t => `<span class="chip tag">${escapeHtml(t)}</span>`).join(" ")
+        : (scope === "out" ? '<span class="chip neutral">Not in scope</span>' : "—");
+      const status = res.applied ? '<span class="chip positive">✓ Applied</span>'
+        : scope === "review" ? '<span class="chip flag">👁 read</span>'
+        : res.confirm ? '<span class="chip warn">⚑ confirm</span>'
+        : '<span class="chip positive">✓ tagged</span>';
+      return `<tr><td>${idx + 1}</td><td>${scopeChip}</td><td class="tags-cell">${tags}</td>
+        <td>${status}</td><td class="reason">${escapeHtml(res.reason || "")}</td>
+        <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td></tr>`;
+    }).join("");
+    const inS = allRes.filter(r => r.scope === "in").length;
+    const outS = allRes.filter(r => r.scope === "out").length;
+    const nr = allRes.filter(r => r.scope === "review").length;
+    statsHtml = `<span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${data.run.status === 'applied' ? '✓ applied' : escapeHtml(data.run.status)}</span>
+      <span class="stat">✓ ${inS} in-scope</span><span class="stat">🚫 ${outS} not in scope</span>${nr ? `<span class="chip flag">👁 ${nr} needs read</span>` : ""}`;
+  } else {
+    const taggable = (res) => res.action === "apply" && res.tag;
+    thead = `<th>#</th><th>Type</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Status</th>`;
+    rows = allRes.map((res, idx) => {
+      const s = (res.sentiment || "").toLowerCase();
+      const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
+      const ctype = (res.content_type || deriveContentType(res.permalink)).toLowerCase();
+      const typeChip = ctype === "comment"
+        ? '<span class="chip type-comment">💬 Comment</span>'
+        : '<span class="chip type-post">📄 Post</span>';
+      const canTag = taggable(res) && !res.applied;
+      const actionCell = res.applied
+        ? '<span class="chip positive">✓ Applied</span>'
+        : (canTag ? `<button class="mini-btn" data-tag-idx="${idx}">🏷 Tag this post</button>` : "—");
+      return `<tr><td>${idx + 1}</td><td>${typeChip}</td>
+        <td><span class="chip ${cls}">${escapeHtml(s || res.action)}</span></td>
+        <td>${escapeHtml(res.tag || "—")}</td><td class="reason">${escapeHtml(res.reason || "")}</td>
+        <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td>
+        <td>${actionCell}</td></tr>`;
+    }).join("");
+    const applyCount = allRes.filter(r => r.action === "apply").length;
+    const doneCount = allRes.filter(r => r.applied).length;
+    statsHtml = `<span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${data.run.status === 'applied' ? '✓ applied' : escapeHtml(data.run.status)}</span>
+      <span class="stat">${applyCount} taggable</span>
+      ${doneCount ? `<span class="chip positive">🏷 ${doneCount}/${applyCount} in Meltwater</span>` : ""}
+      ${applyCount && doneCount && doneCount < applyCount ? `<span class="chip flag">${applyCount - doneCount} remaining</span>` : ""}`;
+  }
   panel.innerHTML = `
     <div class="results-head" style="margin-top:0">
       <div>
         <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
-        <div class="stats" style="margin-top:8px">
-          <span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${data.run.status === 'applied' ? '✓ applied' : escapeHtml(data.run.status)}</span>
-          <span class="stat">${applyCount} taggable</span>
-          ${doneCount ? `<span class="chip positive">🏷 ${doneCount}/${applyCount} in Meltwater</span>` : ""}
-          ${applyCount && doneCount && doneCount < applyCount ? `<span class="chip flag">${applyCount - doneCount} remaining</span>` : ""}
-        </div>
+        <div class="stats" style="margin-top:8px">${statsHtml}</div>
       </div>
       <div class="results-actions">
         <button class="btn ghost" id="histExportBtn">
@@ -179,7 +206,7 @@ async function showDetail(id) {
       </div>
     </div>
     <div class="table-wrap" style="margin-top:14px">
-      <table><thead><tr><th>#</th><th>Type</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Status</th></tr></thead>
+      <table><thead><tr>${thead}</tr></thead>
       <tbody>${rows}</tbody></table>
     </div>`;
 
@@ -271,7 +298,19 @@ async function applyRun(run) {
       body: JSON.stringify({ results: run.results, run_brand: run.brand_name, run_id: run.id }),
     });
     const data = await r.json();
-    if (r.ok) {
+    if (r.ok && (run.results || []).some(x => x.scope)) {
+      // Bentley: report is {applied, failed, total, message, unmapped}
+      const rep = data.report || {};
+      const applied = rep.applied || 0, failed = rep.failed || 0, total = rep.total || 0;
+      if (applied) {
+        t.success(`Applied tags to ${applied}/${total} document(s)${failed ? `, ${failed} failed` : ""}.`, "Applied to Meltwater");
+        if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      } else {
+        t.error(rep.message && rep.message !== "ok" ? rep.message : "No tags were applied.");
+      }
+      loadRuns();
+      showDetail(run.id);
+    } else if (r.ok) {
       const appliedNow = (data.applied || []).length;
       if (appliedNow) {
         t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
