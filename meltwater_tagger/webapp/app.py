@@ -1058,12 +1058,32 @@ def apply_to_meltwater():
         with _mfa_lock:
             _mfa_waiters.pop(g.user.id, None)
         request_otp = _make_request_otp(g.user.id)
+
+        # SSO session reuse: load any saved browser session so we skip the full
+        # Microsoft SSO + SMS-OTP login (that flow alone is ~60-90s and was the
+        # main cause of a slow/stalled apply), and capture a fresh one after a
+        # first-time login. While a saved session exists we never auto-prompt
+        # OTP (it's cleared manually from Profile) — same rule as other brands.
+        saved_state = db.get_meltwater_browser_state(g.user.id) if db.is_configured() else None
+        _uid = g.user.id
+
+        def _on_state_captured(state_json):
+            try:
+                db.upsert_meltwater_browser_state(_uid, state_json)
+            except Exception:
+                log.exception("bentley apply: could not save captured Meltwater session (user=%s)", _uid)
+
         try:
             report = run_async(bentley_apply_web.apply_results(
-                creds["meltwater_email"], creds["meltwater_password"], results, request_otp))
+                creds["meltwater_email"], creds["meltwater_password"], results, request_otp,
+                saved_state=saved_state, on_state_captured=_on_state_captured))
         except Exception as e:
             log.exception("bentley apply failed (user=%s)", g.user.id)
             return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+        if report and report.get("_session_expired"):
+            log.warning("bentley apply: saved SSO session expired for user=%s — asking user to clear it",
+                        g.user.id)
+            return jsonify({"error": report.get("message"), "session_expired": True}), 409
         # Mark applied results (best-effort) so the table can reflect it.
         if run_id and db.is_configured() and report.get("applied"):
             try:
