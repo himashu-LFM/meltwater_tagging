@@ -39,7 +39,11 @@ CLASSIFY_CONCURRENCY = int(os.environ.get("MELTWATER_CLASSIFY_CONCURRENCY", "8")
 FETCH_CONCURRENCY = int(os.environ.get("MELTWATER_FETCH_CONCURRENCY", "2"))
 
 # Minimum seconds between Reddit requests (anonymous). Raise if you still see 429s.
-REDDIT_MIN_INTERVAL = float(os.environ.get("MELTWATER_REDDIT_MIN_INTERVAL", "1.5"))
+# Seconds between Reddit requests (global, serialized). Reddit rate-limits the
+# public RSS feed per IP fairly aggressively — bursts of ~6-8 requests start
+# returning 429/403 and the budget then needs a few minutes to recover. 3s keeps
+# a long batch inside the budget; lower it only if you have API credentials.
+REDDIT_MIN_INTERVAL = float(os.environ.get("MELTWATER_REDDIT_MIN_INTERVAL", "3.0"))
 
 # Optional Reddit official API (recommended for Reddit-heavy feeds).
 # Create a free "script" app at https://www.reddit.com/prefs/apps and set:
@@ -51,6 +55,29 @@ REDDIT_USER_AGENT = os.environ.get(
     "REDDIT_USER_AGENT",
     "windows:meltwater-sentiment-tagger:1.0 (by /u/your_reddit_username)",
 )
+
+# --- Apify Reddit scraper (paid, fastest) ---------------------------------
+# Reddit meters anonymous access at ~1 request per 60s per IP, so a 100-mention
+# batch takes ~40 min. Apify's actor returns one record per URL (post OR the
+# specific comment) with no rate limit: measured 36 mentions in 10s.
+# Set APIFY_TOKEN (Apify Console -> Settings -> API & Integrations) to enable.
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
+# Actor slug (username~actor-name). Verified against real Kaseya data.
+APIFY_ACTOR = os.environ.get("APIFY_ACTOR", "fatihtahta~reddit-scraper-search-fast")
+# How long to wait for one synchronous actor run (seconds).
+APIFY_TIMEOUT = int(os.environ.get("APIFY_TIMEOUT", "300"))
+# Mentions per actor run. The actor handles large batches fine; chunking keeps
+# any single run well inside the sync timeout.
+APIFY_BATCH_SIZE = int(os.environ.get("APIFY_BATCH_SIZE", "200"))
+# Comment cap for the parent-thread retry used when the actor's direct
+# comment-permalink lookup returns nothing. Every comment returned is billed, so
+# this is a ceiling on the cost of recovering one missed mention.
+APIFY_THREAD_MAX_COMMENTS = int(os.environ.get("APIFY_THREAD_MAX_COMMENTS", "500"))
+# Bulk OAuth fetch: requests/minute budget and how many calls may be in flight.
+# Reddit's documented budget is ~100 rpm per client id; stay just under it.
+# Concurrency only hides latency — the token bucket is what caps the rate.
+REDDIT_RPM = float(os.environ.get("MELTWATER_REDDIT_RPM", "95"))
+REDDIT_BULK_CONCURRENCY = int(os.environ.get("MELTWATER_REDDIT_BULK_CONCURRENCY", "8"))
 # Option B: attach to a real Chrome you start with --remote-debugging-port.
 # This avoids Playwright's automation fingerprint that Reddit blocks.
 # Use 127.0.0.1 (IPv4), not "localhost" — Chrome's debug port listens on IPv4 and

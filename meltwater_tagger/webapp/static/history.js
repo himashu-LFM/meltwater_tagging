@@ -130,46 +130,30 @@ async function loadRuns() {
   });
 }
 
+// The run currently open in the detail panel. Manual overrides mutate this and
+// are written back to the DB, since History is the durable record.
+let currentRun = null, currentLabels = null;
+
 async function showDetail(id) {
   const r = await Auth.authedFetch(`/api/history/${id}`);
   const data = await r.json();
   const panel = $("detailPanel");
   panel.classList.remove("hidden");
   if (!data.run) { panel.innerHTML = "Not found."; return; }
-  const taggable = (res) => res.action === "apply" && res.tag;
-  const rows = (data.run.results || []).map((res, idx) => {
-    const s = (res.sentiment || "").toLowerCase();
-    const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
-    // Prefer the stored type; for older runs (saved before content_type existed)
-    // derive it from the URL — a comment URL is unmistakable, so this is exact.
-    const ctype = (res.content_type || deriveContentType(res.permalink)).toLowerCase();
-    const typeChip = ctype === "comment"
-      ? '<span class="chip type-comment">💬 Comment</span>'
-      : '<span class="chip type-post">📄 Post</span>';
-    const canTag = taggable(res) && !res.applied;
-    const actionCell = res.applied
-      ? '<span class="chip positive">✓ Applied</span>'
-      : (canTag ? `<button class="mini-btn" data-tag-idx="${idx}">🏷 Tag this post</button>` : "—");
-    return `<tr><td>${idx + 1}</td><td>${typeChip}</td>
-      <td><span class="chip ${cls}">${escapeHtml(s || res.action)}</span></td>
-      <td>${escapeHtml(res.tag || "—")}</td><td class="reason">${escapeHtml(res.reason || "")}</td>
-      <td><a href="${encodeURI(res.permalink)}" target="_blank">${escapeHtml((res.permalink||"").slice(0,55))}…</a></td>
-      <td>${actionCell}</td></tr>`;
-  }).join("");
-  const applyCount = (data.run.results || []).filter(r => r.action === "apply").length;
-  const doneCount = (data.run.results || []).filter(r => r.applied).length;
+  currentRun = data.run;
+  currentLabels = data.labels || null;
+
   panel.innerHTML = `
     <div class="results-head" style="margin-top:0">
       <div>
         <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
-        <div class="stats" style="margin-top:8px">
-          <span class="chip ${data.run.status === 'applied' ? 'positive' : 'neutral'}">${data.run.status === 'applied' ? '✓ applied' : escapeHtml(data.run.status)}</span>
-          <span class="stat">${applyCount} taggable</span>
-          ${doneCount ? `<span class="chip positive">🏷 ${doneCount}/${applyCount} in Meltwater</span>` : ""}
-          ${applyCount && doneCount && doneCount < applyCount ? `<span class="chip flag">${applyCount - doneCount} remaining</span>` : ""}
-        </div>
+        <div class="stats" style="margin-top:8px" id="histStats"></div>
       </div>
       <div class="results-actions">
+        <button class="btn ghost hidden" id="histRetryBtn"
+                title="Re-classify only the rows that failed — the ones that already worked are not re-sent">
+          <span class="btn-label">↻ Retry failed</span>
+        </button>
         <button class="btn ghost" id="histExportBtn">
           <span class="btn-label">⬇ Export Excel</span>
         </button>
@@ -180,15 +164,204 @@ async function showDetail(id) {
     </div>
     <div class="table-wrap" style="margin-top:14px">
       <table><thead><tr><th>#</th><th>Type</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Status</th></tr></thead>
-      <tbody>${rows}</tbody></table>
+      <tbody id="histBody"></tbody></table>
     </div>`;
 
-  $("histExportBtn").addEventListener("click", () => exportRun(data.run));
-  $("histApplyBtn").addEventListener("click", () => applyRun(data.run));
-  panel.querySelectorAll("[data-tag-idx]").forEach(btn => {
-    btn.addEventListener("click", () => applySinglePost(data.run, +btn.dataset.tagIdx, btn));
-  });
+  renderDetailRows();
+
+  $("histExportBtn").addEventListener("click", () => exportRun(currentRun));
+  $("histApplyBtn").addEventListener("click", () => applyRun(currentRun));
+  $("histRetryBtn").addEventListener("click", retryFailedRows);
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderDetailRows() {
+  const res = currentRun.results || [];
+  const taggable = (r) => r.action === "apply" && r.tag;
+  const body = $("histBody");
+  body.innerHTML = "";
+
+  res.forEach((r, idx) => {
+    // Prefer the stored type; for older runs (saved before content_type existed)
+    // derive it from the URL — a comment URL is unmistakable, so this is exact.
+    const ctype = (r.content_type || deriveContentType(r.permalink)).toLowerCase();
+    const typeChip = ctype === "comment"
+      ? '<span class="chip type-comment">💬 Comment</span>'
+      : '<span class="chip type-post">📄 Post</span>';
+    const canTag = taggable(r) && !r.applied;
+    const actionCell = r.applied
+      ? '<span class="chip positive">✓ Applied</span>'
+      : (canTag ? `<button class="mini-btn" data-tag-idx="${idx}">🏷 Tag this post</button>` : "—");
+    const tr = document.createElement("tr");
+    tr.dataset.idx = idx;
+    if (r.overridden) tr.classList.add("row-edited");
+    tr.innerHTML = `<td>${idx + 1}</td><td>${typeChip}</td>
+      <td class="cell-sentiment"></td>
+      <td class="cell-tag">${escapeHtml(r.tag || "—")}</td>
+      <td class="reason">${escapeHtml(r.reason || "")}</td>
+      <td><a href="${encodeURI(r.permalink)}" target="_blank">${escapeHtml((r.permalink||"").slice(0,55))}…</a></td>
+      <td>${actionCell}</td>`;
+    body.appendChild(tr);
+    paintHistSentiment(tr, r, idx);
+  });
+
+  body.querySelectorAll("[data-tag-idx]").forEach(btn => {
+    btn.addEventListener("click", () => applySinglePost(currentRun, +btn.dataset.tagIdx, btn));
+  });
+  refreshHistSummary();
+}
+
+function paintHistSentiment(tr, r, idx) {
+  const cell = tr.querySelector(".cell-sentiment");
+  const s = (r.sentiment || "").toLowerCase();
+  const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
+
+  // Already applied in Meltwater, or a taxonomy brand -> read-only. Changing a
+  // tag that is already live would leave the UI disagreeing with Meltwater.
+  if (!currentLabels || r.applied) {
+    cell.innerHTML = `<span class="chip ${cls}">${escapeHtml(s || r.action || "—")}</span>`;
+    return;
+  }
+  const autoLabel = r.auto_sentiment || s || r.action || "—";
+  const opts = ["positive", "negative", "neutral"]
+    .map(v => `<option value="${v}"${v === s ? " selected" : ""}>${v}</option>`).join("");
+  const unset = ["positive", "negative", "neutral"].includes(s)
+    ? "" : `<option value="" selected>${escapeHtml(String(autoLabel))}</option>`;
+  cell.innerHTML =
+    `<select class="sent-select ${cls}" data-hidx="${idx}" title="Change the sentiment for this row">` +
+      unset + opts + `</select>` +
+    (r.overridden ? ` <button class="sent-revert" data-hidx="${idx}" title="Revert to the model's original decision">↺</button>` : "");
+}
+
+function refreshHistSummary() {
+  const res = currentRun.results || [];
+  const applyCount = res.filter(r => r.action === "apply").length;
+  const doneCount = res.filter(r => r.applied).length;
+  const edited = res.filter(r => r.overridden).length;
+  const failed = res.filter(r => r.action === "review" && !r.overridden).length;
+  const st = currentRun.status;
+
+  $("histStats").innerHTML =
+    `<span class="chip ${st === 'applied' ? 'positive' : 'neutral'}">${st === 'applied' ? '✓ applied' : escapeHtml(st || "")}</span>` +
+    `<span class="stat">${applyCount} taggable</span>` +
+    (edited ? `<span class="chip type-comment">✎ ${edited} edited</span>` : "") +
+    (doneCount ? `<span class="chip positive">🏷 ${doneCount}/${applyCount} in Meltwater</span>` : "") +
+    (applyCount && doneCount && doneCount < applyCount ? `<span class="chip flag">${applyCount - doneCount} remaining</span>` : "");
+
+  const btn = $("histRetryBtn");
+  if (btn) {
+    btn.classList.toggle("hidden", failed === 0);
+    btn.querySelector(".btn-label").textContent = `↻ Retry ${failed} failed`;
+  }
+}
+
+// Delegated so they survive the panel being re-rendered.
+document.addEventListener("change", e => {
+  const sel = e.target.closest && e.target.closest(".sent-select[data-hidx]");
+  if (sel) histOverride(Number(sel.dataset.hidx), sel.value);
+});
+document.addEventListener("click", e => {
+  const btn = e.target.closest && e.target.closest(".sent-revert[data-hidx]");
+  if (btn) histRevert(Number(btn.dataset.hidx));
+});
+
+async function histOverride(idx, sentiment) {
+  const r = (currentRun.results || [])[idx];
+  if (!r || !sentiment || !currentLabels) return;
+  if (!r.overridden) {
+    r.auto_sentiment = r.sentiment || r.action || "";
+    r.auto_tag = r.tag || null;
+    r.auto_action = r.action;
+    r.auto_reason = r.reason || "";
+  }
+  r.sentiment = sentiment;
+  r.tag = currentLabels[sentiment];
+  r.action = "apply";
+  r.overridden = true;
+  r.reason = `manually set to ${sentiment} (model said: ${r.auto_sentiment || "—"})`;
+  redrawHistRow(idx);
+  await persistOverrides();
+}
+
+async function histRevert(idx) {
+  const r = (currentRun.results || [])[idx];
+  if (!r || !r.overridden) return;
+  r.sentiment = ["positive", "negative", "neutral"].includes(r.auto_sentiment) ? r.auto_sentiment : "";
+  r.tag = r.auto_tag || null;
+  r.action = r.auto_action;
+  r.reason = r.auto_reason || "";
+  r.overridden = false;
+  redrawHistRow(idx);
+  await persistOverrides();
+}
+
+function redrawHistRow(idx) {
+  const r = currentRun.results[idx];
+  const tr = $("histBody").querySelector(`tr[data-idx="${idx}"]`);
+  if (tr) {
+    tr.querySelector(".cell-tag").textContent = r.tag || "—";
+    tr.querySelector(".reason").textContent = r.reason || "";
+    tr.classList.toggle("row-edited", !!r.overridden);
+    paintHistSentiment(tr, r, idx);
+  }
+  refreshHistSummary();
+}
+
+// History is the stored record, so every edit is written back immediately.
+async function persistOverrides() {
+  try {
+    const r = await Auth.authedFetch(`/api/history/${currentRun.id}/results`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ results: currentRun.results }),
+    });
+    if (!r.ok) {
+      const d = await r.json();
+      Toast.error(d.error || "Could not save the change.", "Not saved");
+    }
+  } catch (e) {
+    Toast.error(`Could not save the change: ${e.message || e}`, "Not saved");
+  }
+}
+
+async function retryFailedRows() {
+  const res = currentRun.results || [];
+  const failed = res.filter(r => r.action === "review" && !r.overridden).length;
+  if (!failed) return;
+
+  const btn = $("histRetryBtn");
+  const label = btn.querySelector(".btn-label");
+  const original = label.textContent;
+  btn.disabled = true;
+  label.textContent = `↻ Retrying ${failed}…`;
+  const t = Toast.loading(`Re-classifying ${failed} failed row${failed > 1 ? "s" : ""}…`);
+  try {
+    const r = await Auth.authedFetch("/api/reclassify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        results: currentRun.results, run_brand: currentRun.brand_name, run_id: currentRun.id,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) return t.error(data.error || "Retry failed.");
+
+    currentRun.results = data.results;
+    if (data.labels) currentLabels = data.labels;
+    renderDetailRows();
+    loadRuns();   // the list's counts change too
+
+    if (data.recovered > 0) {
+      t.success(`Recovered ${data.recovered} of ${data.retried} row${data.retried > 1 ? "s" : ""}.`,
+                "Retry complete");
+    } else {
+      t.error(`Retried ${data.retried}, but none could be classified. ` +
+              `Check the post is still live, or set the sentiment manually.`);
+    }
+  } catch (e) {
+    t.error(`Retry failed: ${e.message || e}`);
+  } finally {
+    btn.disabled = false;
+    label.textContent = original;
+  }
 }
 
 async function applySinglePost(run, idx, btn) {

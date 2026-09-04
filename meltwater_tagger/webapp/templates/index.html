@@ -45,7 +45,10 @@
           <label class="field">
             <span class="field-label">Fetch mode</span>
             <select id="fetchMode">
-              {% if allow_cdp %}<option value="cdp">Real Chrome (CDP) — recommended</option>{% endif %}
+              <option value="apify">Apify Reddit Scraper — fastest</option>
+              <option value="reddit_scraper">Reddit Scrapper</option>
+              <option value="reddit_api">Reddit official API (needs API keys)</option>
+              {% if allow_cdp %}<option value="cdp">Real Chrome (CDP)</option>{% endif %}
               <option value="reddit_cookie">Reddit session cookie</option>
               <option value="anon">Anonymous (throttled)</option>
               <option value="news_reader">News article reader</option>
@@ -95,6 +98,10 @@
         </div>
         <div class="results-actions">
           <button id="backBtn" class="btn ghost">← New run</button>
+          <button id="retryBtn" class="btn ghost hidden"
+                  title="Re-classify only the rows that failed — the ones that already worked are not re-sent">
+            <span class="btn-label">↻ Retry failed</span>
+          </button>
           <button id="exportBtn" class="btn ghost">
             <span class="btn-label">⬇ Export Excel</span>
           </button>
