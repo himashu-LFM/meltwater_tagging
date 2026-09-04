@@ -899,16 +899,21 @@ def reclassify():
                     "run_id": run_id,
                     "retried": len(retry_urls), "recovered": recovered})
 
-
 def _classify_bentley_urls(urls):
-    """Bentley (taxonomy) classify path for the dashboard.
+    """Bentley (taxonomy) classify path for the dashboard."""
+    from brands.bentley.classify_batch import run as bentley_run
+    raw = bentley_run(urls, workers=10)
+    return [_bentley_result(r) for r in raw]
+
+
 def _bentley_result(r: dict) -> dict:
-    """Map one Bentley classifier result to the dashboard/history row shape.
+    """Map one Bentley classifier result.
 
     action: 'apply' for anything we CAN tag (in-scope → real tags; out → the
     single 'Not in scope' tag); 'review' only for items we couldn't read
     (blocked/paywalled) — those a human must open. An in-scope item flagged
-    'uncertain' is still 'apply' (tagged) + confirm=True (optional check)."""
+    'uncertain' is still 'apply' (tagged) + confirm=True (optional check).
+    """
     tags = r.get("tags") or []
     scope = r.get("scope")
     action = "apply" if scope in ("in", "out") else "review"
