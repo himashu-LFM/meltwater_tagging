@@ -39,9 +39,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 import config
 from classify import (
-    fetch_full_text, fetch_and_enrich, fetch_via_cdp, fetch_reddit_scraper_bulk, fetch_via_apify,
-    classify_post, _find_col,
-    PERMALINK_HINTS, infer_brand, TOPIC_HINTS,
+    fetch_and_enrich, fetch_via_cdp, fetch_reddit_scraper_bulk, fetch_via_apify,
+    _find_col, PERMALINK_HINTS, infer_brand, TOPIC_HINTS,
 )
 import httpx
 
@@ -898,13 +897,6 @@ def reclassify():
                     "labels": _override_labels(brand, is_taxonomy),
                     "run_id": run_id,
                     "retried": len(retry_urls), "recovered": recovered})
-
-def _classify_bentley_urls(urls):
-    """Bentley (taxonomy) classify path for the dashboard."""
-    from brands.bentley.classify_batch import run as bentley_run
-    raw = bentley_run(urls, workers=10)
-    return [_bentley_result(r) for r in raw]
-
 
 def _bentley_result(r: dict) -> dict:
     """Map one Bentley classifier result.

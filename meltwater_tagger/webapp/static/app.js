@@ -14,6 +14,14 @@ async function loadBrands() {
   const sel = $("brand");
   if (data.brands && data.brands.length) {
     sel.innerHTML = data.brands.map(b => `<option value="${escAttr(b.name)}">${escapeHtml(b.name)}</option>`).join("");
+    // Brands come back alphabetically, so without this the first one is
+    // auto-selected — and running the wrong brand silently uses the wrong
+    // pipeline (a sentiment brand classified as taxonomy, or vice versa).
+    // Restore whatever was used last so the selection is never accidental.
+    try {
+      const last = localStorage.getItem("tagger.brand");
+      if (last && [...sel.options].some(o => o.value === last)) sel.value = last;
+    } catch (e) { /* storage blocked — fall back to the first option */ }
   } else {
     sel.innerHTML = `<option value="">No brands configured — add one on Profile</option>`;
   }
@@ -35,7 +43,10 @@ function applyFetchModeRestriction() {
   if (isNewsOnly) fm.value = "news_reader";
   fm.dispatchEvent(new Event("change"));
 }
-$("brand").addEventListener("change", applyFetchModeRestriction);
+$("brand").addEventListener("change", () => {
+  try { localStorage.setItem("tagger.brand", $("brand").value || ""); } catch (e) {}
+  applyFetchModeRestriction();
+});
 
 // ---- URL counting ----
 function countUrls() {
