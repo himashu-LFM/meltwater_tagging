@@ -39,7 +39,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 import config
 from classify import (
-    fetch_full_text, fetch_and_enrich, fetch_via_cdp, classify_post, _find_col,
+    fetch_full_text, fetch_and_enrich, fetch_via_cdp, fetch_reddit_scraper_bulk, fetch_via_apify,
+    classify_post, _find_col,
     PERMALINK_HINTS, infer_brand, TOPIC_HINTS,
 )
 import httpx
@@ -731,9 +732,14 @@ def classify():
     data = request.get_json(force=True)
     urls = [u.strip() for u in data.get("urls", []) if u and u.strip()]
     brand = (data.get("brand") or "").strip()
-    fetch_mode = data.get("fetch_mode", "cdp" if ALLOW_CDP else "reddit_cookie")
+    # Default to the Reddit scraper (public RSS): the cookie path is 403'd by
+    # Reddit and CDP hits a "prove your humanity" CAPTCHA, so neither is
+    # reliable, and the RSS route needs no credentials at all.
+    # Prefer Apify when it's configured (one record per URL, no Reddit rate
+    # limit); otherwise fall back to the credential-free RSS scraper.
+    fetch_mode = data.get("fetch_mode") or ("apify" if config.APIFY_TOKEN else "reddit_scraper")
     if not ALLOW_CDP and fetch_mode == "cdp":
-        fetch_mode = "reddit_cookie"
+        fetch_mode = "reddit_scraper"
     if not urls:
         log.warning("POST /api/classify rejected: no URLs (user=%s)", g.user.id)
         return jsonify({"error": "No URLs provided"}), 400
@@ -788,10 +794,114 @@ def classify():
         except Exception:
             log.exception("failed to save run to history (non-fatal, user=%s)", g.user.id)
 
-    return jsonify({"run_brand": brand, "results": results,
+    # Tag label per sentiment, so the results table can offer a manual override
+    # that produces exactly the tag string Meltwater expects. Sentiment brands
+    # only — taxonomy brands (Bentley) use multi-tag labels, so we send none and
+    # the UI leaves those rows read-only.
+    labels = _override_labels(brand, is_taxonomy)
+
+    return jsonify({"run_brand": brand, "results": results, "labels": labels,
                      "run_id": run_record["id"] if run_record else None})
 
 
+def _override_labels(brand: str, is_taxonomy: bool = False) -> dict:
+    """Tag label per sentiment for the manual-override dropdown."""
+    if is_taxonomy:
+        return {}
+    try:
+        cfg = db.brand_config(brand) if db.is_configured() else {"labels": {}}
+        return {s: classify_web._label_for(brand, s, cfg.get("labels", {}))
+                for s in ("positive", "negative", "neutral")}
+    except Exception:
+        log.exception("could not resolve override labels for %r (non-fatal)", brand)
+        return {s: f"{s.capitalize()} - {brand}" for s in ("positive", "negative", "neutral")}
+
+
+def _is_retryable(r: dict) -> bool:
+    """A row worth re-classifying: the model never reached a verdict.
+
+    Deliberately excludes rows that are already decided — `apply` (including
+    deleted-on-Reddit Neutrals), `skip_flag` (a genuinely different brand), and
+    anything a human set by hand, which must never be overwritten by a retry."""
+    return r.get("action") == "review" and not r.get("overridden")
+
+
+@app.route("/api/reclassify", methods=["POST"])
+@require_auth
+def reclassify():
+    """Re-run classification for the failed rows ONLY, merging them back into the
+    existing run. Rows that already succeeded are never re-sent, so a retry costs
+    a fraction of a full re-run (both Claude tokens and Apify records)."""
+    data = request.get_json(force=True)
+    results = data.get("results", [])
+    brand = (data.get("run_brand") or "").strip()
+    run_id = data.get("run_id")
+    fetch_mode = data.get("fetch_mode") or ("apify" if config.APIFY_TOKEN else "reddit_scraper")
+    if not ALLOW_CDP and fetch_mode == "cdp":
+        fetch_mode = "reddit_scraper"
+
+    if not results or not brand:
+        return jsonify({"error": "Nothing to retry (missing results or brand)."}), 400
+
+    retry_idx = [i for i, r in enumerate(results) if _is_retryable(r)]
+    retry_urls = [results[i].get("permalink") for i in retry_idx if results[i].get("permalink")]
+    if not retry_urls:
+        return jsonify({"error": "No failed rows to retry."}), 400
+
+    from brands import get_profile
+    try:
+        is_taxonomy = get_profile(brand).style == "taxonomy"
+    except Exception:
+        is_taxonomy = False
+
+    log.info("reclassify start: brand=%r retrying=%d/%d fetch_mode=%r (user=%s)",
+             brand, len(retry_urls), len(results), fetch_mode, g.user.id)
+    try:
+        if is_taxonomy:
+            fresh = _classify_bentley_urls(retry_urls)
+        else:
+            fresh = run_async(_classify_urls(retry_urls, brand, fetch_mode, g.user.id))
+    except AuthenticationError:
+        return jsonify({"error": "Invalid or missing ANTHROPIC_API_KEY (server config)."}), 400
+    except APIStatusError as e:
+        msg = getattr(e, "message", str(e))
+        if "credit balance" in str(msg).lower():
+            return jsonify({"error": "Anthropic API has no credit balance — add credits and retry."}), 400
+        return jsonify({"error": f"Anthropic API error: {msg}"}), 400
+    except Exception as e:
+        log.exception("reclassify failed (brand=%r, user=%s)", brand, g.user.id)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    # Merge by permalink, and only where the retry actually did better — a row
+    # that fails again keeps its original reason rather than churning.
+    by_link = {r.get("permalink"): r for r in fresh}
+    recovered = 0
+    merged = list(results)
+    for i in retry_idx:
+        new = by_link.get(merged[i].get("permalink"))
+        if not new:
+            continue
+        if new.get("action") != "review":
+            recovered += 1
+        merged[i] = new
+
+    log.info("reclassify done: brand=%r retried=%d recovered=%d (user=%s)",
+             brand, len(retry_urls), recovered, g.user.id)
+
+    if run_id and db.is_configured():
+        try:
+            db.update_run_after_apply(run_id, merged, "classified")
+        except Exception:
+            log.exception("failed to update run %s after retry (non-fatal)", run_id)
+
+    return jsonify({"run_brand": brand, "results": merged,
+                    "labels": _override_labels(brand, is_taxonomy),
+                    "run_id": run_id,
+                    "retried": len(retry_urls), "recovered": recovered})
+
+
+def _classify_bentley_urls(urls):
+    """Bentley (taxonomy) classify path for the dashboard.
 def _bentley_result(r: dict) -> dict:
     """Map one Bentley classifier result to the dashboard/history row shape.
 
@@ -837,7 +947,37 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
     posts = [{"permalink": u, "excerpt": ""} for u in urls]
 
     log.info("fetch start: mode=%r posts=%d", fetch_mode, len(posts))
-    if fetch_mode == "cdp":
+    if fetch_mode == "apify":
+        # Paid Apify actor: one record per URL (post OR the specific comment),
+        # no Reddit rate limit. Measured 36 mentions in 10s vs ~23 min on RSS.
+        if not config.APIFY_TOKEN:
+            log.warning("fetch_mode=apify but APIFY_TOKEN is not set — falling back "
+                        "to the credential-free RSS scraper")
+            posts = await fetch_reddit_scraper_bulk(posts)
+        else:
+            posts = await fetch_via_apify(posts)
+        leftovers = [p for p in posts if not p.get("text") and not p.get("deleted")
+                     and "reddit.com" not in (p.get("permalink") or "")]
+        if leftovers:
+            async with httpx.AsyncClient() as http:
+                await asyncio.gather(*[fetch_and_enrich(http, p) for p in leftovers])
+    elif fetch_mode == "reddit_scraper":
+        # Credential-free public RSS, grouped by THREAD — one call per thread
+        # instead of one per mention (real data: 53 mentions across 21 threads
+        # = 60% fewer calls), which is what makes the ~1-request-per-minute
+        # anonymous budget workable at all.
+        threads = len({(p.get("permalink") or "").split("/comments/")[-1].split("/")[0]
+                       for p in posts if "/comments/" in (p.get("permalink") or "")})
+        log.info("fetch[reddit_scraper/rss]: %d mention(s) across %d thread(s) — %d fewer request(s)",
+                 len(posts), threads, max(0, len(posts) - threads))
+        posts = await fetch_reddit_scraper_bulk(posts)
+        # anything non-Reddit still needs the generic path
+        leftovers = [p for p in posts if not p.get("text")
+                     and "reddit.com" not in (p.get("permalink") or "")]
+        if leftovers:
+            async with httpx.AsyncClient() as http:
+                await asyncio.gather(*[fetch_and_enrich(http, p) for p in leftovers])
+    elif fetch_mode == "cdp":
         posts = await fetch_via_cdp(posts)
     elif fetch_mode == "reddit_cookie":
         cookie = db.get_reddit_cookie(user_id) if db.is_configured() else None
@@ -856,11 +996,20 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
                 return p
             posts = await asyncio.gather(*[_f(p) for p in posts])
     else:
+        # "reddit_scraper" (recommended) reads Reddit's PUBLIC Atom feed — no API
+        # key, no login, no cookie, no CAPTCHA. "reddit_api" prefers the official
+        # OAuth Data API (needs REDDIT_CLIENT_ID/SECRET). Either way the other
+        # route is tried as a fallback, so one blocked path doesn't lose posts.
+        # "anon" keeps the legacy behaviour (RSS first, then plain .json).
+        prefer = "api" if fetch_mode == "reddit_api" else "rss"
+        if fetch_mode == "reddit_api" and not (config.REDDIT_CLIENT_ID and config.REDDIT_CLIENT_SECRET):
+            log.warning("fetch_mode=reddit_api but REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET are not "
+                        "configured — falling back to the public RSS scraper path")
         sem = asyncio.Semaphore(config.FETCH_CONCURRENCY)
         async with httpx.AsyncClient() as http:
             async def _f(p):
                 async with sem:
-                    await fetch_and_enrich(http, p)
+                    await fetch_and_enrich(http, p, prefer=prefer)
                 return p
             posts = await asyncio.gather(*[_f(p) for p in posts])
 
@@ -885,6 +1034,7 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
             content_type=p.get("content_type", "post"),
             post_text=p.get("post_text", ""),
             comment_text=p.get("comment_text", ""),
+            deleted=bool(p.get("deleted")),
         ) for p in posts]
     )
 
@@ -954,21 +1104,18 @@ def export():
     data = request.get_json(force=True)
     results = data.get("results", [])
     brand = data.get("run_brand", "run")
-
-    # Taxonomy brands (Bentley) carry `scope` -> multi-tag layout: scope, status,
-    # one column per tag family, doc id, all-tags, reason.
-    if any(r.get("scope") for r in results):
-        rows = [_bentley_export_row(r) for r in results]
-    else:
-        rows = [{
-            "permalink": r.get("permalink"),
-            "type": (r.get("content_type") or "post").capitalize(),
-            "tag": r.get("tag", ""),
-            "sentiment": r.get("sentiment", ""),
-            "action": r.get("action", ""),
-            "reason": r.get("reason", ""),
-            "applied": "Yes" if r.get("applied") else "",
-        } for r in results]
+    rows = [{
+        "permalink": r.get("permalink"),
+        "type": (r.get("content_type") or "post").capitalize(),
+        "tag": r.get("tag", ""),
+        "sentiment": r.get("sentiment", ""),
+        "action": r.get("action", ""),
+        "reason": r.get("reason", ""),
+        # Audit trail for rows a human changed in the results table.
+        "edited_by_user": "Yes" if r.get("overridden") else "",
+        "model_sentiment": r.get("auto_sentiment", "") if r.get("overridden") else "",
+        "applied": "Yes" if r.get("applied") else "",
+    } for r in results]
     df = pd.DataFrame(rows)
     buf = io.BytesIO()
     df.to_excel(buf, index=False)
@@ -1266,7 +1413,42 @@ def history_detail(run_id):
     run = db.get_run(g.user.id, run_id)
     if not run:
         return jsonify({"error": "Run not found"}), 404
-    return jsonify({"run": run})
+    # Same override labels the tagger screen gets, so a stored run can be
+    # corrected by hand from History too.
+    brand = run.get("brand_name") or ""
+    try:
+        from brands import get_profile
+        is_taxonomy = get_profile(brand).style == "taxonomy"
+    except Exception:
+        is_taxonomy = False
+    return jsonify({"run": run, "labels": _override_labels(brand, is_taxonomy)})
+
+
+@app.route("/api/history/<run_id>/results", methods=["PUT"])
+@require_auth
+def history_update_results(run_id):
+    """Persist edited rows for a stored run (manual sentiment overrides).
+
+    History is the durable record, so an override made there has to be written
+    back — unlike the tagger screen, where results live only in the page."""
+    if not db.is_configured():
+        return jsonify({"error": "History storage is not configured."}), 400
+    run = db.get_run(g.user.id, run_id)          # also enforces ownership
+    if not run:
+        return jsonify({"error": "Run not found"}), 404
+
+    data = request.get_json(force=True)
+    results = data.get("results")
+    if not isinstance(results, list) or not results:
+        return jsonify({"error": "No results provided."}), 400
+    if len(results) != len(run.get("results") or []):
+        return jsonify({"error": "Result count does not match the stored run."}), 400
+
+    edited = sum(1 for r in results if r.get("overridden"))
+    db.update_run_after_apply(run_id, results, run.get("status") or "classified")
+    log.info("history run %s updated: %d row(s) manually overridden (user=%s)",
+             run_id, edited, g.user.id)
+    return jsonify({"ok": True, "edited": edited})
 
 
 @app.route("/api/history/<run_id>", methods=["DELETE"])

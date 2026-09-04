@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 
-const state = { urls: [], results: [], brand: "", runId: null };
+const state = { urls: [], results: [], brand: "", runId: null, labels: null };
 
 (async () => {
   const session = await Auth.requireAuthOrRedirect();
@@ -46,7 +46,7 @@ function countUrls() {
 $("urls").addEventListener("input", () => { state.urls = []; countUrls(); });
 
 // ---- fetch-mode pill ----
-const FETCH_MODE_LABELS = { cdp: "CDP fetch", reddit_cookie: "Cookie fetch", anon: "Anon fetch", news_reader: "News reader fetch" };
+const FETCH_MODE_LABELS = { reddit_scraper: "Reddit Scrapper", reddit_api: "Reddit API fetch", cdp: "CDP fetch", reddit_cookie: "Cookie fetch", anon: "Anon fetch", news_reader: "News reader fetch" };
 $("fetchMode").addEventListener("change", (e) => {
   $("modePill").textContent = FETCH_MODE_LABELS[e.target.value] || e.target.value;
 });
@@ -135,54 +135,147 @@ function renderResults(data) {
   $("applyStatus").textContent = "";
   $("applyStatus").className = "apply-status";
   const res = data.results;
+  // Sent by /api/classify for sentiment brands. Absent for taxonomy brands
+  // (Bentley), which keeps those rows read-only.
+  if (data.labels) state.labels = data.labels;
 
-  // Taxonomy brands (Bentley) carry a `scope` field -> multi-tag table.
-  if (res.some(r => r.scope)) return renderBentleyResults(data, res);
+  refreshSummary(res);
 
-  // sentiment header (restore in case a Bentley run swapped it)
-  $("resHead").innerHTML =
-    `<th>#</th><th>Type</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Applied</th>`;
+  const body = $("resBody");
+  body.innerHTML = "";
+  res.forEach((r, idx) => {
+    const ctype = (r.content_type || deriveContentType(r.permalink)).toLowerCase();
+    const typeChip = ctype === "comment"
+      ? '<span class="chip type-comment">💬 Comment</span>'
+      : '<span class="chip type-post">📄 Post</span>';
+    const tr = document.createElement("tr");
+    tr.dataset.idx = idx;
+    tr.style.animationDelay = (idx * 30) + "ms";
+    tr.innerHTML = `
+      <td>${idx + 1}</td>
+      <td>${typeChip}</td>
+      <td class="cell-sentiment"></td>
+      <td class="cell-tag">${escapeHtml(r.tag || "—")}</td>
+      <td class="reason">${escapeHtml(r.reason || "")}</td>
+      <td><a href="${encodeURI(r.permalink)}" target="_blank" rel="noopener">${escapeHtml(shorten(r.permalink))}</a></td>
+      <td>${r.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td>`;
+    body.appendChild(tr);
+    paintSentimentCell(tr, r, idx);
+  });
+}
+
+// Stats + Apply-button state, recomputed after every manual override.
+function refreshSummary(res) {
   const counts = { positive: 0, negative: 0, neutral: 0, other: 0 };
   res.forEach(r => {
     const s = (r.sentiment || "").toLowerCase();
     if (counts[s] !== undefined) counts[s]++; else counts.other++;
   });
   const appliedCount = res.filter(r => r.applied).length;
+  const edited = res.filter(r => r.overridden).length;
   $("stats").innerHTML =
     `<span class="stat">${res.length} posts</span>` +
     `<span class="stat">🟢 ${counts.positive} positive</span>` +
     `<span class="stat">🔴 ${counts.negative} negative</span>` +
     `<span class="stat">⚪ ${counts.neutral} neutral</span>` +
     `<span class="stat">⚑ ${counts.other} flagged/other</span>` +
+    (edited ? `<span class="chip type-comment">✎ ${edited} edited</span>` : "") +
     (appliedCount ? `<span class="chip positive">🏷 ${appliedCount} in Meltwater</span>` : "");
 
-  // No taggable posts -> nothing Apply could do; make that obvious up front.
   const taggable = res.some(r => r.action === "apply" && r.tag);
   $("applyBtn").disabled = !taggable;
   $("applyBtn").title = taggable ? "" : "No taggable posts in this run";
 
-  const body = $("resBody");
-  body.innerHTML = "";
-  res.forEach((r, idx) => {
-    const s = (r.sentiment || "").toLowerCase();
-    const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
+  // Retry is offered only for rows the model never decided — and never for
+  // rows a human set by hand (mirrors _is_retryable on the server).
+  const failed = res.filter(r => r.action === "review" && !r.overridden).length;
+  const retryBtn = $("retryBtn");
+  if (retryBtn) {
+    retryBtn.classList.toggle("hidden", failed === 0);
+    retryBtn.querySelector(".btn-label").textContent = `↻ Retry ${failed} failed`;
+  }
+}
+
+// The Sentiment cell: a dropdown when the brand has sentiment labels, else the
+// original read-only chip.
+function paintSentimentCell(tr, r, idx) {
+  const cell = tr.querySelector(".cell-sentiment");
+  const s = (r.sentiment || "").toLowerCase();
+  const cls = ["positive", "negative", "neutral"].includes(s) ? s : "flag";
+
+  if (!state.labels) {
     const chipText = r.tag ? s : (r.flag_brand ? `flag → ${r.flag_brand}` : r.action);
-    const ctype = (r.content_type || deriveContentType(r.permalink)).toLowerCase();
-    const typeChip = ctype === "comment"
-      ? '<span class="chip type-comment">💬 Comment</span>'
-      : '<span class="chip type-post">📄 Post</span>';
-    const tr = document.createElement("tr");
-    tr.style.animationDelay = (idx * 30) + "ms";
-    tr.innerHTML = `
-      <td>${idx + 1}</td>
-      <td>${typeChip}</td>
-      <td><span class="chip ${cls}">${escapeHtml(chipText || "—")}</span></td>
-      <td>${escapeHtml(r.tag || "—")}</td>
-      <td class="reason">${escapeHtml(r.reason || "")}</td>
-      <td><a href="${encodeURI(r.permalink)}" target="_blank" rel="noopener">${escapeHtml(shorten(r.permalink))}</a></td>
-      <td>${r.applied ? '<span class="chip positive">✓ Applied</span>' : '—'}</td>`;
-    body.appendChild(tr);
-  });
+    cell.innerHTML = `<span class="chip ${cls}">${escapeHtml(chipText || "—")}</span>`;
+    return;
+  }
+
+  // What the model originally decided, so the row can always be reverted.
+  const autoLabel = r.auto_sentiment || s || (r.flag_brand ? `flag → ${r.flag_brand}` : r.action) || "—";
+  const opts = ["positive", "negative", "neutral"]
+    .map(v => `<option value="${v}"${v === s ? " selected" : ""}>${v}</option>`).join("");
+  const unset = ["positive", "negative", "neutral"].includes(s)
+    ? "" : `<option value="" selected>${escapeHtml(String(autoLabel))}</option>`;
+
+  cell.innerHTML =
+    `<select class="sent-select ${cls}" data-idx="${idx}" title="Change the sentiment for this row">` +
+      unset + opts +
+    `</select>` +
+    (r.overridden ? ` <button class="sent-revert" data-idx="${idx}" title="Revert to the model's original decision">↺</button>` : "");
+}
+
+// One delegated listener, so it survives re-renders.
+document.addEventListener("change", e => {
+  const sel = e.target.closest && e.target.closest(".sent-select");
+  if (!sel) return;
+  applyOverride(Number(sel.dataset.idx), sel.value);
+});
+document.addEventListener("click", e => {
+  const btn = e.target.closest && e.target.closest(".sent-revert");
+  if (!btn) return;
+  revertOverride(Number(btn.dataset.idx));
+});
+
+function applyOverride(idx, sentiment) {
+  const r = state.results[idx];
+  if (!r || !sentiment || !state.labels) return;
+
+  // Remember the model's verdict once, so ↺ can always restore it.
+  if (!r.overridden) {
+    r.auto_sentiment = r.sentiment || r.action || "";
+    r.auto_tag = r.tag || null;
+    r.auto_action = r.action;
+    r.auto_reason = r.reason || "";
+  }
+  r.sentiment = sentiment;
+  r.tag = state.labels[sentiment];
+  r.action = "apply";
+  r.overridden = true;
+  r.reason = `manually set to ${sentiment} (model said: ${r.auto_sentiment || "—"})`;
+  redrawRow(idx);
+}
+
+function revertOverride(idx) {
+  const r = state.results[idx];
+  if (!r || !r.overridden) return;
+  r.sentiment = r.auto_sentiment && ["positive", "negative", "neutral"].includes(r.auto_sentiment)
+    ? r.auto_sentiment : "";
+  r.tag = r.auto_tag || null;
+  r.action = r.auto_action;
+  r.reason = r.auto_reason || "";
+  r.overridden = false;
+  redrawRow(idx);
+}
+
+function redrawRow(idx) {
+  const r = state.results[idx];
+  const tr = $("resBody").querySelector(`tr[data-idx="${idx}"]`);
+  if (tr) {
+    tr.querySelector(".cell-tag").textContent = r.tag || "—";
+    tr.querySelector(".reason").textContent = r.reason || "";
+    tr.classList.toggle("row-edited", !!r.overridden);
+    paintSentimentCell(tr, r, idx);
+  }
+  refreshSummary(state.results);
 }
 
 // Bentley (taxonomy) results: scope + multi-tag chips + status.
@@ -252,6 +345,46 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function escAttr(s) { return escapeHtml(s); }
+
+// ---- retry failed rows only ----
+$("retryBtn").addEventListener("click", async () => {
+  const btn = $("retryBtn");
+  const failed = state.results.filter(r => r.action === "review" && !r.overridden).length;
+  if (!failed) return;
+
+  btn.disabled = true;
+  const label = btn.querySelector(".btn-label");
+  const original = label.textContent;
+  label.textContent = `↻ Retrying ${failed}…`;
+  const t = Toast.loading(`Re-classifying ${failed} failed row${failed > 1 ? "s" : ""}…`);
+  try {
+    const r = await Auth.authedFetch("/api/reclassify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        results: state.results, run_brand: state.brand,
+        run_id: state.runId, fetch_mode: $("fetchMode").value,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) return t.error(data.error || "Retry failed.");
+
+    state.results = data.results;
+    renderResults({ run_brand: state.brand, results: state.results, labels: data.labels });
+
+    if (data.recovered > 0) {
+      t.success(`Recovered ${data.recovered} of ${data.retried} row${data.retried > 1 ? "s" : ""}.`,
+                "Retry complete");
+    } else {
+      t.error(`Retried ${data.retried}, but none could be classified. ` +
+              `Check the post is still live, or set the sentiment manually.`);
+    }
+  } catch (e) {
+    t.error(`Retry failed: ${e.message || e}`);
+  } finally {
+    btn.disabled = false;
+    label.textContent = original;
+  }
+});
 
 // ---- export ----
 $("exportBtn").addEventListener("click", async () => {

@@ -113,14 +113,40 @@ def _build_user_message(run_brand, permalink, text, content_type, post_text, com
 
 
 async def classify_post(anthropic, model, run_brand, permalink, text, sem, cfg,
-                        content_type="post", post_text="", comment_text=""):
+                        content_type="post", post_text="", comment_text="", deleted=False):
+    usable = (comment_text or text) if content_type == "comment" else (post_text or text)
+
+    # Two different "no text" cases, deliberately handled differently:
+    #  * DELETED on Reddit — we know for certain there is nothing to judge, so
+    #    tag Neutral (the mention still exists in Meltwater and needs a tag).
+    #  * FETCH FAILED — we don't know what it said, so never invent a sentiment;
+    #    flag it for review instead of silently tagging everything Neutral.
+    if deleted and not (usable or "").strip():
+        log.info("deleted/removed on Reddit: %s — tagging Neutral", permalink)
+        return {"permalink": permalink, "action": "apply",
+                "tag": _label_for(run_brand, "neutral", cfg.get("labels", {})),
+                "content_type": content_type,
+                "reason": "no post or comment found — deleted or removed on Reddit"}
+
+    if not (usable or "").strip():
+        log.warning("no text fetched for %s — flagging for review instead of defaulting to Neutral",
+                    permalink)
+        return {"permalink": permalink, "action": "review", "tag": None,
+                "content_type": content_type,
+                "reason": ("could not fetch the post text (Reddit blocked or unavailable) — "
+                           "not classified; re-run or check the fetch mode")}
+
     system = build_system_prompt(run_brand, cfg.get("rules", {}))
     user_msg = _build_user_message(run_brand, permalink, text, content_type, post_text, comment_text)
     async with sem:
         try:
             resp = await anthropic.messages.create(
                 model=model,
-                max_tokens=2000,
+                # Adaptive thinking bills against max_tokens, so a low ceiling
+                # truncates the JSON answer mid-string on posts the model thinks
+                # hard about (seen as JSONDecodeError -> review). Only tokens
+                # actually generated are charged, so a high ceiling is free.
+                max_tokens=16000,
                 thinking={"type": "adaptive"},
                 system=system,
                 messages=[{"role": "user", "content": user_msg}],
