@@ -204,3 +204,8 @@ td a:hover{text-decoration:underline}
 .sent-revert:hover { opacity: 1; border-color: #fdb913; color: #fdb913; }
 tr.row-edited { background: rgba(253,185,19,.055); }
 tr.row-edited td:first-child { box-shadow: inset 3px 0 0 #fdb913; }
+/* Bentley taxonomy: tag chips + a "confirm" status chip */
+.chip.tag{background:rgba(253,185,19,.12);color:#fdb913;border:1px solid rgba(253,185,19,.32);
+  font-weight:600;padding:4px 10px;font-size:11px}
+.chip.warn{background:rgba(255,190,80,.14);color:#ffbe50;border:1px solid rgba(255,190,80,.3)}
+.tags-cell{display:flex;flex-wrap:wrap;gap:5px;max-width:420px}

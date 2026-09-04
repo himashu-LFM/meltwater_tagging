@@ -148,6 +148,7 @@ async function showDetail(id) {
       <div>
         <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
         <div class="stats" style="margin-top:8px" id="histStats"></div>
+        <div class="stats" style="margin-top:8px">${statsHtml}</div>
       </div>
       <div class="results-actions">
         <button class="btn ghost hidden" id="histRetryBtn"
@@ -163,8 +164,8 @@ async function showDetail(id) {
       </div>
     </div>
     <div class="table-wrap" style="margin-top:14px">
-      <table><thead><tr><th>#</th><th>Type</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Status</th></tr></thead>
-      <tbody id="histBody"></tbody></table>
+      <table><thead><tr>${thead}</tr></thead>
+      <tbody>${rows}</tbody></table>
     </div>`;
 
   renderDetailRows();
@@ -444,7 +445,19 @@ async function applyRun(run) {
       body: JSON.stringify({ results: run.results, run_brand: run.brand_name, run_id: run.id }),
     });
     const data = await r.json();
-    if (r.ok) {
+    if (r.ok && (run.results || []).some(x => x.scope)) {
+      // Bentley: report is {applied, failed, total, message, unmapped}
+      const rep = data.report || {};
+      const applied = rep.applied || 0, failed = rep.failed || 0, total = rep.total || 0;
+      if (applied) {
+        t.success(`Applied tags to ${applied}/${total} document(s)${failed ? `, ${failed} failed` : ""}.`, "Applied to Meltwater");
+        if (window.FX && window.FX.celebrate) window.FX.celebrate();
+      } else {
+        t.error(rep.message && rep.message !== "ok" ? rep.message : "No tags were applied.");
+      }
+      loadRuns();
+      showDetail(run.id);
+    } else if (r.ok) {
       const appliedNow = (data.applied || []).length;
       if (appliedNow) {
         t.success(`${data.message} · ${(data.skipped_already||[]).length} already tagged, ${(data.failed||[]).length} failed.`, "Applied to Meltwater");
