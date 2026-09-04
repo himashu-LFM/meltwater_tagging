@@ -398,7 +398,7 @@ def products_in_text(text: str) -> list[str]:
     low = (text or "").lower()
     out = []
     for p in PRODUCT:
-        if any(a.lower() in low for a in p["aliases"]):
+        if any(a.lower() in low for a in p.get("aliases", [])):
             out.append(p["label"])
     return out
 
@@ -443,3 +443,104 @@ def spokespeople_in_text(text: str, require_bentley_context: bool = False,
 
 def valid_spokesperson_labels() -> set[str]:
     return {spokesperson_label(sp["name"]) for sp in SPOKESPEOPLE}
+
+
+# ---------------------------------------------------------------------------
+# DYNAMIC OVERRIDES — let the client's protocol change WITHOUT a code edit.
+#
+# If brands/bentley/taxonomy_overrides.json exists (or $BENTLEY_TAXONOMY_OVERRIDES
+# points at one), its add / remove / rename entries are applied to the lists
+# above at import time. If the file is ABSENT or invalid, the hardcoded protocol
+# is used UNCHANGED — so default behavior is exactly as before this was added.
+#
+# Format (every key optional):
+# {
+#   "add":    { "REGION":  [ {"label": "Region - LATAM", "keywords": ["latin america"]} ],
+#               "PRODUCT": [ {"label": "New Product", "aliases": ["new product"]} ] },
+#   "remove": { "PRODUCT": ["Old Product"] },
+#   "rename": { "Region - EMEA": "Region - EMEA & Africa" },
+#   "spokespeople_add":    [ {"name": "New Person", "aliases": ["N. Person"]} ],
+#   "spokespeople_remove": [ "Former Person" ]
+# }
+# Family keys for add/remove: TYPE_OF_PUBLICATION, TYPE_OF_COVERAGE, REGION,
+# CORPORATE, PILLAR, INDUSTRY, PRODUCT. rename matches any family label.
+# ---------------------------------------------------------------------------
+_FAMILY_LISTS = {
+    "TYPE_OF_PUBLICATION": TYPE_OF_PUBLICATION,
+    "TYPE_OF_COVERAGE": TYPE_OF_COVERAGE,
+    "REGION": REGION,
+    "CORPORATE": CORPORATE,
+    "PILLAR": PILLAR,
+    "INDUSTRY": INDUSTRY,
+    "PRODUCT": PRODUCT,
+}
+
+
+def _apply_overrides() -> dict:
+    """Apply optional external taxonomy overrides. Mutates the family lists +
+    SPOKESPEOPLE IN PLACE (so ALL_TAG_GROUPS and every helper see the change).
+    Returns a {added, removed, renamed} summary, or {} if nothing was applied.
+    Never raises — a missing/invalid file leaves the hardcoded protocol intact."""
+    import os
+    import json
+    path = os.environ.get("BENTLEY_TAXONOMY_OVERRIDES") or \
+        os.path.join(os.path.dirname(__file__), "taxonomy_overrides.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        ov = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(ov, dict):
+        return {}
+    summary = {"added": 0, "removed": 0, "renamed": 0}
+
+    # ADD tag-family items
+    for fam, items in (ov.get("add") or {}).items():
+        lst = _FAMILY_LISTS.get(str(fam).upper())
+        if lst is None or not isinstance(items, list):
+            continue
+        have = {t.get("label") for t in lst}
+        for it in items:
+            if isinstance(it, dict) and it.get("label") and it["label"] not in have:
+                lst.append(it)
+                have.add(it["label"])
+                summary["added"] += 1
+
+    # REMOVE tag-family items by label
+    for fam, labels in (ov.get("remove") or {}).items():
+        lst = _FAMILY_LISTS.get(str(fam).upper())
+        if lst is None or not isinstance(labels, list):
+            continue
+        drop = set(labels)
+        kept = [t for t in lst if t.get("label") not in drop]
+        summary["removed"] += len(lst) - len(kept)
+        lst[:] = kept                       # in-place so ALL_TAG_GROUPS stays valid
+
+    # RENAME labels across all families
+    ren = ov.get("rename") or {}
+    if isinstance(ren, dict):
+        for lst in _FAMILY_LISTS.values():
+            for t in lst:
+                if t.get("label") in ren:
+                    t["label"] = ren[t["label"]]
+                    summary["renamed"] += 1
+
+    # SPOKESPEOPLE add / remove
+    have_sp = {sp.get("name") for sp in SPOKESPEOPLE}
+    for sp in (ov.get("spokespeople_add") or []):
+        if isinstance(sp, dict) and sp.get("name") and sp["name"] not in have_sp:
+            SPOKESPEOPLE.append(sp)
+            have_sp.add(sp["name"])
+            summary["added"] += 1
+    sp_rm = set(ov.get("spokespeople_remove") or [])
+    if sp_rm:
+        kept = [sp for sp in SPOKESPEOPLE if sp.get("name") not in sp_rm]
+        summary["removed"] += len(SPOKESPEOPLE) - len(kept)
+        SPOKESPEOPLE[:] = kept
+
+    return summary if any(summary.values()) else {}
+
+
+# Applied once, at import — safe no-op when no overrides file is present.
+OVERRIDES_APPLIED = _apply_overrides()

@@ -34,6 +34,26 @@ from brands.bentley import apply_bentley
 ENDPOINT = ("https://bff.fhaicoreapps.com/prd-flux-content-stream-bff/"
             "tags/enqueue-document-tagging")
 
+# Meltwater's live tag list (GET). The response is a JSON array of
+# {id, name, type, ...}. We can pull this at apply time to auto-refresh the
+# name->id map, so tags the client ADDS/renames in Meltwater resolve without a
+# code change (self-healing — see tag_map_from_tags_json).
+TAGS_URL = "https://bff.fhaicoreapps.com/prd-flux-content-stream-bff/tags"
+
+
+def tag_map_from_tags_json(data) -> dict:
+    """Build {name: id} from Meltwater's GET .../tags response (a list of
+    {id, name, type, ...}). Returns {} on any unexpected shape, so a bad/partial
+    response never breaks apply — the caller falls back to the bundled map."""
+    out = {}
+    if isinstance(data, list):
+        for it in data:
+            if isinstance(it, dict):
+                name, tid = it.get("name"), it.get("id")
+                if isinstance(name, str) and isinstance(tid, int) and it.get("type", "tag") == "tag":
+                    out[name] = tid
+    return out
+
 # Tag ids learned from captures (seed). The rest come from the tag-list capture
 # or a --tag-map file. Keep any confirmed ids here as a fallback.
 KNOWN_TAG_IDS = {

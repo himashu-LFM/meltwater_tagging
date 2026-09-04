@@ -16,7 +16,7 @@ from playwright.async_api import async_playwright
 
 import config
 from logging_setup import get_logger
-from meltwater_apply import login_to_meltwater, _new_browser_context, CHROMIUM_LAUNCH_ARGS
+from meltwater_apply import login_to_meltwater, _new_browser_context, _is_logged_in, CHROMIUM_LAUNCH_ARGS
 from brands.bentley import api_apply as aa
 
 log = get_logger("bentley_apply_web")
@@ -71,9 +71,20 @@ async def _discover_search_id(page, base):
     return None
 
 
-async def apply_results(email, password, results, request_otp=None, throttle_s=0.4):
+async def apply_results(email, password, results, request_otp=None, throttle_s=0.4,
+                        saved_state=None, on_state_captured=None):
     """Apply Bentley tags to Meltwater by Document ID. Returns a report dict:
-    {applied, failed, total, unmapped, message, failures}."""
+    {applied, failed, total, unmapped, message, failures}.
+
+    Session reuse (SSO): if `saved_state` (a Playwright storage_state JSON
+    string) is given, it's loaded into the browser first so a still-valid
+    session skips the whole SSO + SMS-OTP login — that flow alone takes
+    ~60-90s, and is the single biggest cause of a slow apply. If the saved
+    session is expired, we do NOT auto-prompt OTP (same product rule as the
+    sentiment brands' apply) — we return `_session_expired` so the caller can
+    ask the analyst to clear it. On a fresh login (no saved_state), the
+    resulting session is captured via `on_state_captured(state_json)` so later
+    runs need no OTP until it's cleared."""
     tag_map = aa.resolve_tag_map()
     manifest, unmapped = aa.manifest_from_results(results, tag_map)
     if not manifest:
@@ -84,7 +95,13 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
     ok, failed = [], []
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=config.HEADLESS, args=CHROMIUM_LAUNCH_ARGS)
-        ctx = await _new_browser_context(browser)
+        ctx_kwargs = {}
+        if saved_state:
+            try:
+                ctx_kwargs["storage_state"] = json.loads(saved_state)
+            except Exception as e:
+                log.warning("bentley apply: saved session couldn't be parsed (%s) — ignoring it", e)
+        ctx = await _new_browser_context(browser, **ctx_kwargs)
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
         # Grab the token ONLY from the tagging BFF (bff.fhaicoreapps.com). The app
@@ -107,17 +124,42 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
                 pass
         ctx.on("request", _grab)
 
-        log.info("bentley apply: logging in %s (docs=%d)", email, len(manifest))
-        try:
-            login_ok, msg = await login_to_meltwater(page, email, password, request_otp)
-        except Exception as e:
-            await browser.close()
-            return {"applied": 0, "failed": len(manifest), "total": len(manifest),
-                    "message": f"Meltwater login errored: {type(e).__name__}: {e}"}
-        if not login_ok:
-            await browser.close()
-            return {"applied": 0, "failed": len(manifest), "total": len(manifest),
-                    "message": f"Meltwater login failed: {msg}"}
+        if saved_state:
+            log.info("bentley apply: SESSION REUSE — trying the saved Meltwater session (no OTP)…")
+            if await _is_logged_in(page):
+                log.info("bentley apply: SESSION REUSE — saved session is VALID; skipping login/OTP ✓")
+            else:
+                # Expired/invalid. Per the product rule, do NOT auto-prompt OTP
+                # while a saved session exists — ask the user to clear it.
+                log.warning("bentley apply: SESSION REUSE — saved session is EXPIRED/invalid; "
+                            "NOT prompting OTP. User must clear it on Profile to log in fresh.")
+                await browser.close()
+                return {"applied": 0, "failed": len(manifest), "total": len(manifest),
+                        "_session_expired": True,
+                        "message": ("Your saved Meltwater session has expired. Go to Profile → "
+                                     "'Log out of Meltwater / clear saved session', then run Apply "
+                                     "again to log in once (you'll enter an SMS code that one time).")}
+        else:
+            log.info("bentley apply: logging in %s (docs=%d)", email, len(manifest))
+            try:
+                login_ok, msg = await login_to_meltwater(page, email, password, request_otp)
+            except Exception as e:
+                await browser.close()
+                return {"applied": 0, "failed": len(manifest), "total": len(manifest),
+                        "message": f"Meltwater login errored: {type(e).__name__}: {e}"}
+            if not login_ok:
+                await browser.close()
+                return {"applied": 0, "failed": len(manifest), "total": len(manifest),
+                        "message": f"Meltwater login failed: {msg}"}
+            # Capture the fresh logged-in session so future runs skip OTP.
+            if on_state_captured is not None:
+                try:
+                    state = await ctx.storage_state()
+                    on_state_captured(json.dumps(state))
+                    log.info("bentley apply: SESSION SAVE — captured the logged-in session for "
+                             "reuse (future runs won't need OTP until it's cleared) ✓")
+                except Exception as e:
+                    log.warning("bentley apply: SESSION SAVE — could not capture the session: %s", e)
 
         # The tagging BFF (bff.fhaicoreapps.com) is only called from a search's
         # RESULTS feed — NOT the home page or the saved-search LIST the app lands
@@ -147,6 +189,25 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
         log.info("bentley apply: captured auth (len %d) from %s", len(token), captured.get("src"))
         headers = {"authorization": token, "content-type": "application/json",
                    "origin": "https://app.meltwater.com", "referer": "https://app.meltwater.com/"}
+
+        # Self-healing tag IDs: pull Meltwater's CURRENT tag list and let it
+        # override the bundled tag_ids.json, so tags the client added/renamed in
+        # Meltwater still resolve WITHOUT a code change. If this fetch fails, we
+        # keep the manifest already built from the bundled map (original behavior).
+        try:
+            r = await ctx.request.get(aa.TAGS_URL, headers={"authorization": token})
+            live_map = aa.tag_map_from_tags_json(await r.json()) if r.ok else {}
+        except Exception:
+            live_map = {}
+        if live_map:
+            merged = dict(tag_map)
+            merged.update(live_map)          # live Meltwater ids win
+            m2, u2 = aa.manifest_from_results(results, merged)
+            if m2:
+                manifest, unmapped = m2, u2
+                log.info("bentley apply: merged %d live Meltwater tags; manifest=%d unmapped=%d",
+                         len(live_map), len(manifest), len(u2))
+
         sample_error = None
         first_response = None
         for i, m in enumerate(manifest):
