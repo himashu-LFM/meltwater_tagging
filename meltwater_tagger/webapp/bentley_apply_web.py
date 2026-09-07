@@ -163,28 +163,58 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
 
         # The tagging BFF (bff.fhaicoreapps.com) is only called from a search's
         # RESULTS feed — NOT the home page or the saved-search LIST the app lands
-        # on after login. So we open an actual results feed to make that call fire,
-        # then capture its token (which is account-scoped, so ANY search works).
-        # We discover a searchId from the saved-search list, then open its feed.
-        # (Do NOT reload in a tight loop — that interrupts the app before it can
-        # make the call, which is what failed before.)
+        # on after login. So we must open an actual results feed to make that call
+        # fire, then capture its token (account-scoped, so ANY search works).
+        # We try, in order, and log every step so a failure is never silent:
+        #   1) /a/explore — the app usually redirects to the last/default search's
+        #      results feed, which fires the tagging call without needing a searchId
+        #   2) fallback: discover a searchId from /a/explore/list and open its feed
         base = config.MELTWATER_URL.rstrip("/").split("/a/")[0]
-        search_id = await _discover_search_id(page, base)
-        feed_url = f"{base}/a/explore/results?searchId={search_id}" if search_id else None
-        for i in range(30):
-            if captured["auth"]:
-                break
-            if feed_url and i in (2, 12):
+
+        async def _wait_token(seconds):
+            for _ in range(seconds):
+                if captured["auth"]:
+                    return True
+                await asyncio.sleep(1.0)
+            return bool(captured["auth"])
+
+        log.info("bentley apply: capturing tagging token — opening /a/explore …")
+        try:
+            await page.goto(f"{base}/a/explore", wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            log.warning("bentley apply: /a/explore navigation issue: %s: %s", type(e).__name__, e)
+
+        search_id = None
+        if await _wait_token(12):
+            log.info("bentley apply: token captured from the default Explore feed ✓")
+        else:
+            # No token yet — the default view didn't open a feed. Find a saved
+            # search explicitly and open its results feed.
+            search_id = await _discover_search_id(page, base)
+            log.info("bentley apply: no token from default view; discovered searchId=%s", search_id)
+            if search_id:
+                feed_url = f"{base}/a/explore/results?searchId={search_id}"
+                log.info("bentley apply: opening results feed %s", feed_url)
                 try:
-                    await page.goto(feed_url, wait_until="domcontentloaded")
-                except Exception:
-                    pass
-            await asyncio.sleep(1.0)
+                    await page.goto(feed_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as e:
+                    log.warning("bentley apply: results-feed navigation issue: %s: %s",
+                                type(e).__name__, e)
+                await _wait_token(20)
+
         token = captured["auth"]
         if not token:
             await browser.close()
+            log.warning("bentley apply: NO TOKEN CAPTURED — never observed a bff.fhaicoreapps.com "
+                        "call (no search results feed opened for this Meltwater workspace). "
+                        "searchId=%s. The account's landing workspace may have no saved search to "
+                        "open.", search_id)
             return {"applied": 0, "failed": len(manifest), "total": len(manifest),
-                    "message": "Logged in, but could not capture the Meltwater tagging token."}
+                    "message": ("Logged into Meltwater, but couldn't capture the tagging token — "
+                                "no search results feed opened in this account's workspace. Open any "
+                                "saved search once in Meltwater (so it becomes the default view), then "
+                                "run Apply again.")}
+        log.info("bentley apply: TOKEN OK — proceeding to tag %d document(s)", len(manifest))
 
         log.info("bentley apply: captured auth (len %d) from %s", len(token), captured.get("src"))
         headers = {"authorization": token, "content-type": "application/json",
