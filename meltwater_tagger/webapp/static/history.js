@@ -148,7 +148,6 @@ async function showDetail(id) {
       <div>
         <h3 style="margin:0">${escapeHtml(data.run.brand_name)} — ${new Date(data.run.created_at).toLocaleString()}</h3>
         <div class="stats" style="margin-top:8px" id="histStats"></div>
-        <div class="stats" style="margin-top:8px">${statsHtml}</div>
       </div>
       <div class="results-actions">
         <button class="btn ghost hidden" id="histRetryBtn"
@@ -164,8 +163,8 @@ async function showDetail(id) {
       </div>
     </div>
     <div class="table-wrap" style="margin-top:14px">
-      <table><thead><tr>${thead}</tr></thead>
-      <tbody>${rows}</tbody></table>
+      <table><thead><tr><th>#</th><th>Type</th><th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Status</th></tr></thead>
+      <tbody id="histBody"></tbody></table>
     </div>`;
 
   renderDetailRows();
@@ -180,6 +179,12 @@ function renderDetailRows() {
   const res = currentRun.results || [];
   const taggable = (r) => r.action === "apply" && r.tag;
   const body = $("histBody");
+  // A merge that rewrites showDetail's markup has twice dropped this tbody id,
+  // which silently killed the whole detail panel. Fail loudly instead.
+  if (!body) {
+    console.error("history: #histBody missing from the detail panel markup");
+    return;
+  }
   body.innerHTML = "";
 
   res.forEach((r, idx) => {
