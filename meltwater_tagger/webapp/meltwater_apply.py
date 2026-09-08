@@ -393,6 +393,35 @@ async def _finish_ms_sso(page) -> tuple[bool, str]:
     except Exception:
         log.debug("login[ms-sso]: STEP 8 — no passkey prompt shown (or already past it)")
 
+    # Recovery: sometimes the post-OTP redirect drifts to an unexpected/broken
+    # page — e.g. a Mira chat URL (/a/mira/chat?prompt=…) that fails to load and
+    # leaves a chrome-error page — so the URL never matches app.meltwater.com.
+    # If we're not on the app yet, force a navigation to the app root and re-check.
+    # This only runs when the normal landing already failed, so the happy path
+    # (already `landed`) is unaffected.
+    if not landed:
+        log.warning("login[ms-sso]: STEP 8 — not on the app after OTP (url=%s); forcing a "
+                    "navigation to the app root to recover", page.url)
+        for _ in range(2):
+            try:
+                await page.goto(config.MELTWATER_URL, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(2500)
+            except Exception as e:
+                log.warning("login[ms-sso]: STEP 8 — recovery navigation issue: %s: %s",
+                            type(e).__name__, e)
+            for _ in range(8):
+                url = (page.url or "").lower()
+                on_app = "app.meltwater.com" in url
+                still_auth = any(h in url for h in ("login.microsoftonline.com",
+                                                    "authorize.meltwater.com")) or "/login" in url
+                if on_app and not still_auth:
+                    landed = True
+                    break
+                await page.wait_for_timeout(1500)
+            if landed:
+                log.info("login[ms-sso]: STEP 8 — recovered onto the Meltwater app ✓")
+                break
+
     if not landed:
         log.error("login[ms-sso]: STEP 8 FAILED — never reached the Meltwater app after OTP %s",
                    await _diag(page))
