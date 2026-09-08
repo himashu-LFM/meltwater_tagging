@@ -1217,10 +1217,16 @@ def apply_to_meltwater():
             except Exception:
                 log.exception("bentley apply: could not save captured Meltwater session (user=%s)", _uid)
 
+        # SSO logins land on a personal workspace; the Bentley documents/tags live
+        # in the brand's own Meltwater account, so pass its Environment to switch
+        # into it before capturing the tagging token (same as the sentiment path).
+        bentley_brand = db.get_brand(brand_name) if brand_name else None
+        bentley_env = (bentley_brand or {}).get("environment") or None
         try:
             report = run_async(bentley_apply_web.apply_results(
                 creds["meltwater_email"], creds["meltwater_password"], results, request_otp,
-                saved_state=saved_state, on_state_captured=_on_state_captured))
+                saved_state=saved_state, on_state_captured=_on_state_captured,
+                environment=bentley_env))
         except Exception as e:
             log.exception("bentley apply failed (user=%s)", g.user.id)
             return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
