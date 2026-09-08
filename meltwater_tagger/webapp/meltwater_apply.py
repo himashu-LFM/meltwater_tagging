@@ -1658,44 +1658,79 @@ def _hits_from_msearch(text: str) -> dict:
     return out
 
 
+def _attach_api_capture(context) -> dict:
+    """Watch a browser context's requests and harvest what the internal tagging
+    API needs: the bearer token, the account id, and every distinct msearch
+    URL+body the app fires.
+
+    Split out of _capture_session so the SSO browser flow can reuse it. That
+    flow already navigates correctly (account switch -> Explore -> the brand's
+    Reddit search), so once these are captured we can tag over HTTP instead of
+    scraping mention cards out of the rendered page.
+
+    Returns the dict being filled in-place, plus an asyncio.Event under "got"
+    that fires on the first msearch."""
+    cap = {"token": None, "account": None, "msearches": [],
+           "token_from_msearch": False, "got": asyncio.Event()}
+    seen_bodies = set()
+
+    def _bearer(req):
+        a = req.headers.get("authorization")
+        if not a:
+            return None
+        return a[7:] if a.lower().startswith("bearer ") else a
+
+    def on_request(req):
+        try:
+            u = req.url
+            # LAST-WINS, not first-wins. An account switch mints a brand-new
+            # token scoped to the new workspace, so latching the first token we
+            # saw (from the pre-switch personal account) made every replayed
+            # call 401. Keep overwriting so we end up holding the current one.
+            if "meltwater" in u:
+                tok = _bearer(req)
+                if tok:
+                    cap["token"] = tok
+            if MSEARCH_HOST in u and req.method == "POST":
+                # Authoritative: msearch only fires on the results page, i.e.
+                # after any account switch, so its token is correctly scoped.
+                tok = _bearer(req)
+                if tok:
+                    cap["token"] = tok
+                    cap["token_from_msearch"] = True
+                body = req.post_data or ""
+                if body and body not in seen_bodies:
+                    seen_bodies.add(body)
+                    m = re.search(r"/accounts/([^/]+)/msearch", u)
+                    if m:
+                        # Also last-wins: the account can change mid-session.
+                        cap["account"] = m.group(1)
+                    # Capture EVERY distinct msearch batch. The app fires
+                    # several (feed, analytics, AI card); the member documents
+                    # (similar sub-posts) come back in one of them, so we
+                    # replay them all verbatim and merge — no need to know
+                    # which, no query rewriting, no group expansion.
+                    cap["msearches"].append({"url": u, "account": (m.group(1) if m else None),
+                                             "body": body})
+                    cap["got"].set()
+        except Exception:
+            pass
+
+    context.on("request", on_request)
+    return cap
+
+
 async def _capture_session(email: str, password: str, topic_url: str, request_otp=None) -> dict:
     """Light browser step: log in, then briefly open the topic so the app fires
     its msearch — capturing the bearer token, the account id, and the exact
     msearch URL+body. Bails as soon as those are captured so the heavy feed
     render never completes (that render is what OOMs a small instance)."""
-    cap = {"token": None, "account": None, "msearches": []}
-    seen_bodies = set()
-    got = asyncio.Event()
-
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
         context = await _new_browser_context(browser)
 
-        def on_request(req):
-            try:
-                u = req.url
-                if "meltwater" in u and not cap["token"]:
-                    a = req.headers.get("authorization")
-                    if a:
-                        cap["token"] = a[7:] if a.lower().startswith("bearer ") else a
-                if MSEARCH_HOST in u and req.method == "POST":
-                    body = req.post_data or ""
-                    if body and body not in seen_bodies:
-                        seen_bodies.add(body)
-                        m = re.search(r"/accounts/([^/]+)/msearch", u)
-                        if m and not cap["account"]:
-                            cap["account"] = m.group(1)
-                        # Capture EVERY distinct msearch batch. The app fires
-                        # several (feed, analytics, AI card); the member documents
-                        # (similar sub-posts) come back in one of them, so we
-                        # replay them all verbatim and merge — no need to know
-                        # which, no query rewriting, no group expansion.
-                        cap["msearches"].append({"url": u, "body": body})
-                        got.set()
-            except Exception:
-                pass
-
-        context.on("request", on_request)
+        cap = _attach_api_capture(context)
+        got = cap["got"]
         page = await context.new_page()
         ok, msg = await login_to_meltwater(page, email, password, request_otp)
         if not ok:
@@ -1746,7 +1781,17 @@ async def apply_via_api(email: str, password: str, topic_url: str, results: list
         return {"ok": False, "message": cap.get("message", "session capture failed"),
                 "applied": [], "failed": [], "_fallback": True}
 
-    token = cap["token"]
+    return await _tag_via_api_http(cap["token"], cap["msearches"], to_apply)
+
+
+async def _tag_via_api_http(token: str, msearches: list[dict], to_apply: dict) -> dict:
+    """Tag every target over Meltwater's internal HTTP API, given a captured
+    bearer token and the msearch batches the app itself fired.
+
+    Pure HTTP — no page rendering. Split out of apply_via_api so the SSO browser
+    flow can call it after its account switch + Advanced-search navigation,
+    instead of scraping mention cards (Meltwater renders the saved search as an
+    analytics dashboard for some accounts, where no cards exist at all)."""
     applied, failed, unreached = [], [], []
     async with httpx.AsyncClient(timeout=60) as c:
         # 1) tags -> name -> id
@@ -1754,13 +1799,20 @@ async def apply_via_api(email: str, password: str, topic_url: str, results: list
         tr.raise_for_status()
         name_to_id = {t["name"]: t["id"] for t in tr.json() if t.get("name")}
         log.info("apply-api: %d tags available", len(name_to_id))
+        # An empty tag list means the token isn't valid for this workspace (a
+        # stale pre-account-switch token returns 200 with []), so every tag
+        # lookup below would fail. Bail out to the fallback instead.
+        if not name_to_id:
+            return {"ok": False, "message": ("tag list came back empty — the captured token is "
+                                              "not valid for this account"),
+                    "applied": [], "failed": [], "unreached": [], "_fallback": True}
 
         # 2) replay each captured msearch batch VERBATIM and merge the hits.
         # The app's own batch already returns the individual member documents
         # (similar sub-posts) — rewriting the query broke that, so we send it
         # unchanged. url -> {documentId, matchSentence, keywords}.
         docmap = {}
-        for i, ms in enumerate(cap["msearches"]):
+        for i, ms in enumerate(msearches):
             try:
                 mr = await c.post(
                     ms["url"],
@@ -1775,7 +1827,7 @@ async def apply_via_api(email: str, password: str, topic_url: str, results: list
                     for k, v in found.items():
                         docmap.setdefault(k, v)
                     log.info("apply-api: msearch batch %d/%d -> %d docs (running total %d)",
-                              i + 1, len(cap["msearches"]), len(found), len(docmap))
+                              i + 1, len(msearches), len(found), len(docmap))
                 else:
                     log.warning("apply-api: msearch batch %d returned status %s", i + 1, mr.status_code)
             except Exception as e:
@@ -2353,6 +2405,12 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
             except Exception as e:
                 log.warning("apply: saved session couldn't be parsed (%s) — ignoring it", e)
         context = await _new_browser_context(browser, **ctx_kwargs)
+        # Harvest the bearer token + msearch batches while we navigate. Once the
+        # brand's Reddit search is open we can tag over HTTP instead of scraping
+        # mention cards — which is essential because some accounts render the
+        # saved search as an ANALYTICS dashboard (vizion-* widgets, no cards at
+        # all), where card scanning can never succeed.
+        api_cap = _attach_api_capture(context)
         page = await context.new_page()
 
         if saved_state:
@@ -2433,7 +2491,43 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
             else:
                 log.info("apply: POST-LOGIN STEP — topic feed loaded, now on %s", page.url)
 
-        report = await _walk_feed_and_tag(page, to_apply)
+        # Prefer tagging over the internal HTTP API now that we're on the right
+        # account and the brand's Reddit search is open. The page's own msearch
+        # gives us the exact documents (including grouped sub-posts), so this
+        # needs no cards, no scrolling and no virtualised-list handling — and it
+        # is the only path that works when the search renders as an analytics
+        # dashboard. Card scanning stays as the fallback.
+        report = None
+        try:
+            await asyncio.wait_for(api_cap["got"].wait(), timeout=45)
+            await asyncio.sleep(4)   # let the sibling batches land too
+        except Exception:
+            log.warning("apply: API TAGGING — no msearch observed; using the card scanner")
+        # Only replay batches belonging to the account we ended up in — a batch
+        # captured before an account switch would 401 (and could resolve against
+        # the wrong workspace).
+        batches = [m for m in api_cap["msearches"]
+                   if not api_cap["account"] or m.get("account") == api_cap["account"]]
+        if api_cap["token"] and batches:
+            log.info("apply: API TAGGING — %d/%d msearch batch(es) for account=%s "
+                     "(token from msearch=%s) — tagging over HTTP (no card scan)",
+                     len(batches), len(api_cap["msearches"]), api_cap["account"],
+                     api_cap["token_from_msearch"])
+            try:
+                report = await _tag_via_api_http(api_cap["token"], batches, to_apply)
+                if not report.get("ok"):
+                    log.warning("apply: API TAGGING did not succeed (%s) — falling back to the "
+                                "card scanner", report.get("message"))
+                    report = None
+            except Exception:
+                log.exception("apply: API TAGGING errored — falling back to the card scanner")
+                report = None
+        else:
+            log.warning("apply: API TAGGING unavailable (token=%s msearches=%d) — using the "
+                        "card scanner", bool(api_cap["token"]), len(api_cap["msearches"]))
+
+        if report is None:
+            report = await _walk_feed_and_tag(page, to_apply)
         await browser.close()
     return report
 
