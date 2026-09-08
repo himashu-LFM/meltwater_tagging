@@ -11,12 +11,14 @@ scrolling — the document-ID API doesn't care what's on screen.
 import asyncio
 import base64
 import json
+import re
 
 from playwright.async_api import async_playwright
 
 import config
 from logging_setup import get_logger
-from meltwater_apply import login_to_meltwater, _new_browser_context, _is_logged_in, CHROMIUM_LAUNCH_ARGS
+from meltwater_apply import (login_to_meltwater, _new_browser_context, _is_logged_in,
+                             switch_meltwater_account, CHROMIUM_LAUNCH_ARGS)
 from brands.bentley import api_apply as aa
 
 log = get_logger("bentley_apply_web")
@@ -72,7 +74,7 @@ async def _discover_search_id(page, base):
 
 
 async def apply_results(email, password, results, request_otp=None, throttle_s=0.4,
-                        saved_state=None, on_state_captured=None):
+                        saved_state=None, on_state_captured=None, environment=None):
     """Apply Bentley tags to Meltwater by Document ID. Returns a report dict:
     {applied, failed, total, unmapped, message, failures}.
 
@@ -124,6 +126,33 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
                 pass
         ctx.on("request", _grab)
 
+        # Response listener: harvest a real searchId from Meltwater's discovery
+        # graphql. The account's saved searches (e.g. "Bentley Global Coverage")
+        # come back in this response even when /a/explore doesn't auto-open a
+        # feed — the ids live in the JSON, NOT the rendered HTML (which is why
+        # scraping the page for a searchId found nothing). We then open that
+        # search's results feed, which is what fires the tagging BFF.
+        found = {"search_id": None}
+        _bentley_re = re.compile(r'"id":"(\d{6,})"[^{}]{0,200}?"name":"([^"]*[Bb]entley[^"]*)"')
+        _anysearch_re = re.compile(r'"__typename":"Search"[^{}]{0,300}?"id":"(\d{6,})"')
+
+        async def _grab_search(resp):
+            if found["search_id"]:
+                return
+            try:
+                u = resp.url
+                if "meltwater.io" not in u or "graphql" not in u:
+                    return
+                body = await resp.text()
+                m = _bentley_re.search(body) or _anysearch_re.search(body)
+                if m:
+                    found["search_id"] = m.group(1)
+                    log.info("bentley apply: discovered a saved searchId=%s from discovery graphql",
+                             found["search_id"])
+            except Exception:
+                pass
+        ctx.on("response", _grab_search)
+
         if saved_state:
             log.info("bentley apply: SESSION REUSE — trying the saved Meltwater session (no OTP)…")
             if await _is_logged_in(page):
@@ -161,6 +190,27 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
                 except Exception as e:
                     log.warning("bentley apply: SESSION SAVE — could not capture the session: %s", e)
 
+        # SSO logins (@meltwater.com) land on a PERSONAL workspace that doesn't
+        # own the brand's documents/tags and has no search feed to open — so the
+        # tagging token can never be captured there. Switch into the brand's
+        # Meltwater account/workspace first (same step the sentiment apply uses),
+        # so the feed we open below is the one that owns the documents we're
+        # tagging. `environment` is the account name to switch into (set per brand
+        # in Brand Studio). If it's not set, we skip the switch and try the
+        # current workspace (works for single-workspace accounts).
+        if environment:
+            switched = await switch_meltwater_account(page, environment)
+            if switched:
+                log.info("bentley apply: switched into the '%s' workspace ✓", environment)
+            else:
+                log.warning("bentley apply: could NOT switch into the '%s' workspace — the tagging "
+                            "token capture will likely fail. Check the brand's Environment matches a "
+                            "Meltwater account name exactly.", environment)
+        else:
+            log.warning("bentley apply: no Environment configured for this brand — staying in the "
+                        "login's default workspace. If token capture fails, set the brand's "
+                        "Environment to the Meltwater account that owns the Bentley coverage.")
+
         # The tagging BFF (bff.fhaicoreapps.com) is only called from a search's
         # RESULTS feed — NOT the home page or the saved-search LIST the app lands
         # on after login. So we must open an actual results feed to make that call
@@ -184,14 +234,23 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
         except Exception as e:
             log.warning("bentley apply: /a/explore navigation issue: %s: %s", type(e).__name__, e)
 
+        # Opening /a/explore also makes the app fetch the account's saved searches
+        # over graphql — our response listener harvests a searchId from that. Wait
+        # a short while for either the token (if a feed auto-opened) OR a searchId.
         search_id = None
-        if await _wait_token(12):
+        for _ in range(15):
+            if captured["auth"] or found["search_id"]:
+                break
+            await asyncio.sleep(1.0)
+
+        if captured["auth"]:
             log.info("bentley apply: token captured from the default Explore feed ✓")
         else:
-            # No token yet — the default view didn't open a feed. Find a saved
-            # search explicitly and open its results feed.
-            search_id = await _discover_search_id(page, base)
-            log.info("bentley apply: no token from default view; discovered searchId=%s", search_id)
+            # Open a REAL saved search's results feed — the only reliable way to
+            # make the app call the tagging BFF. Prefer the searchId harvested
+            # from graphql; fall back to scraping the list page.
+            search_id = found["search_id"] or await _discover_search_id(page, base)
+            log.info("bentley apply: opening a saved search feed; searchId=%s", search_id)
             if search_id:
                 feed_url = f"{base}/a/explore/results?searchId={search_id}"
                 log.info("bentley apply: opening results feed %s", feed_url)
@@ -200,15 +259,21 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
                 except Exception as e:
                     log.warning("bentley apply: results-feed navigation issue: %s: %s",
                                 type(e).__name__, e)
-                await _wait_token(20)
+                got = await _wait_token(25)
+                if not got:
+                    # Re-nudge the feed once — the heavy content stream can be slow.
+                    log.info("bentley apply: no token after opening the feed; re-opening once…")
+                    try:
+                        await page.goto(feed_url, wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                    await _wait_token(25)
 
         token = captured["auth"]
         if not token:
             await browser.close()
             log.warning("bentley apply: NO TOKEN CAPTURED — never observed a bff.fhaicoreapps.com "
-                        "call (no search results feed opened for this Meltwater workspace). "
-                        "searchId=%s. The account's landing workspace may have no saved search to "
-                        "open.", search_id)
+                        "call. searchId=%s. The results feed may not have rendered in time.", search_id)
             return {"applied": 0, "failed": len(manifest), "total": len(manifest),
                     "message": ("Logged into Meltwater, but couldn't capture the tagging token — "
                                 "no search results feed opened in this account's workspace. Open any "
@@ -220,23 +285,37 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
         headers = {"authorization": token, "content-type": "application/json",
                    "origin": "https://app.meltwater.com", "referer": "https://app.meltwater.com/"}
 
-        # Self-healing tag IDs: pull Meltwater's CURRENT tag list and let it
-        # override the bundled tag_ids.json, so tags the client added/renamed in
-        # Meltwater still resolve WITHOUT a code change. If this fetch fails, we
-        # keep the manifest already built from the bundled map (original behavior).
+        # Resolve tag names to IDs against THIS account's LIVE tag list only.
+        # The bundled tag_ids.json was captured from a DIFFERENT Meltwater account,
+        # so its ids do not exist here — Meltwater 202-accepts them but silently
+        # drops them (the tag never appears). So when we can read the live tags for
+        # the account we've switched into, we resolve against those ONLY, and any
+        # name not found here is reported as `unmapped` rather than sent with a
+        # wrong-account id. Only if the live fetch fails do we fall back to the
+        # bundled manifest (best-effort).
         try:
             r = await ctx.request.get(aa.TAGS_URL, headers={"authorization": token})
             live_map = aa.tag_map_from_tags_json(await r.json()) if r.ok else {}
         except Exception:
             live_map = {}
         if live_map:
-            merged = dict(tag_map)
-            merged.update(live_map)          # live Meltwater ids win
-            m2, u2 = aa.manifest_from_results(results, merged)
-            if m2:
-                manifest, unmapped = m2, u2
-                log.info("bentley apply: merged %d live Meltwater tags; manifest=%d unmapped=%d",
-                         len(live_map), len(manifest), len(u2))
+            m2, u2 = aa.manifest_from_results(results, live_map)   # live account tags ONLY
+            manifest, unmapped = m2, u2
+            log.info("bentley apply: resolved against %d live account tags; docs=%d unmapped=%s",
+                     len(live_map), len(manifest), sorted(unmapped))
+            if unmapped:
+                log.warning("bentley apply: %d tag name(s) not found in this Meltwater account "
+                            "(NOT applied — would be a wrong-account id): %s",
+                            len(unmapped), sorted(unmapped))
+            if not manifest:
+                await browser.close()
+                return {"applied": 0, "failed": 0, "total": 0, "unmapped": sorted(unmapped),
+                        "message": ("None of the classified tags exist in this Meltwater account "
+                                    "(Bentley Systems). The tag names may differ here — see the "
+                                    "unmapped list in the logs.")}
+        else:
+            log.warning("bentley apply: could not read the account's live tag list — falling back to "
+                        "the bundled map (ids may be from a different account)")
 
         sample_error = None
         first_response = None
@@ -254,6 +333,8 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
                              resp.status, rtext, json.dumps(body)[:400])
                 if resp.ok:
                     ok.append(m["document_id"])
+                    log.info("bentley apply: [%d/%d] OK status=%s doc=%s tagIds=%s",
+                             i + 1, len(manifest), resp.status, m["document_id"], m["tag_ids"])
                 else:
                     failed.append((m.get("url", m["document_id"]), resp.status))
                     if sample_error is None:
