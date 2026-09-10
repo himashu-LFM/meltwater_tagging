@@ -82,6 +82,58 @@ _DEAD_ERR_MARKERS = (
 )
 
 
+# Bot-wall / access-denied bodies: some sites return HTTP 200 with a short
+# "Access Denied" / captcha page instead of the article. Without this, that page
+# looks "readable" and the model tags it Not in scope — silently dropping a page
+# that might be genuine coverage. Treat a SHORT body dominated by one of these
+# markers as blocked -> manual review (per the client rule for unreadable pages).
+_SOFT_BLOCK_MARKERS = (
+    "access denied", "you have been blocked", "are you a robot", "are you human",
+    "verify you are human", "unusual traffic", "captcha", "enable javascript",
+    "request unsuccessful", "attention required", "bot detection", "please verify",
+    "forbidden", "denied access", "security check", "checking your browser",
+)
+
+
+def _looks_soft_blocked(text: str) -> bool:
+    """True if the fetched body looks like a bot-wall/access-denied interstitial
+    rather than a real article: short AND dominated by a block phrase. The length
+    gate keeps a normal article that merely mentions e.g. 'captcha' from tripping."""
+    t = (text or "").strip().lower()
+    if not t or len(t) > 800:
+        return False
+    return any(m in t for m in _SOFT_BLOCK_MARKERS)
+
+
+def _is_chinese_text(text: str) -> bool:
+    """True if the text is predominantly Chinese (CJK). Client rule: Chinese
+    content is not tagged. Uses a ratio so an English article that quotes a few
+    Chinese characters doesn't trip it."""
+    t = text or ""
+    if len(t) < 30:
+        return False
+    cjk = sum(1 for c in t if "一" <= c <= "鿿")
+    latin = sum(1 for c in t if ("a" <= c <= "z") or ("A" <= c <= "Z"))
+    # substantial CJK AND CJK clearly dominates the Latin alphabet
+    return cjk >= 20 and cjk >= latin
+
+
+import re as _re
+
+
+def _canonical_label_map():
+    """normalized-label -> canonical taxonomy label, for every valid tag. Lets us
+    snap a model-emitted label with wrong casing/spacing (e.g. 'Product - ITwin')
+    back to the canonical string ('Product - iTwin') and drop anything that isn't
+    a real taxonomy tag."""
+    def norm(s):
+        return _re.sub(r"[\s|/\-]+", " ", (s or "").lower()).strip()
+    m = {}
+    for lbl in taxonomy.all_labels():
+        m.setdefault(norm(lbl), lbl)
+    return m, norm
+
+
 def _reachability(fetched: dict) -> str:
     """Classify a fetch result as 'readable', 'dead', or 'blocked'.
 
@@ -89,11 +141,14 @@ def _reachability(fetched: dict) -> str:
       dead     — 404/410, or the host could not be reached (DNS fail / refused).
                  Client rule: tag these "Not in scope".
       blocked  — reachable but unreadable: paywall/bot-wall (401/403/429), a
-                 server error (5xx), a timeout, a JS-only/empty page, or only a
-                 meta summary. Client rule: send these to manual review, NOT
-                 "Not in scope" (they are often genuine, just unreadable).
+                 server error (5xx), a timeout, a JS-only/empty page, a bot-wall
+                 body returned with HTTP 200, or only a meta summary. Client rule:
+                 send these to manual review, NOT "Not in scope".
     """
     if fetched.get("ok") and not fetched.get("summary_only"):
+        # HTTP 200 but the body is an access-denied / bot-wall page -> blocked.
+        if _looks_soft_blocked(fetched.get("text")):
+            return "blocked"
         return "readable"
     status = fetched.get("status")
     err = (fetched.get("error") or "").lower()
@@ -194,6 +249,16 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
                 result["snippet_for_review"] = snippet_body
             return result
 
+    # Client rule: do NOT tag Chinese-language content. If the text to classify is
+    # predominantly Chinese (CJK) characters, skip it as out of scope rather than
+    # spending a Claude call and emitting tags the client will discard.
+    if _is_chinese_text(text):
+        result.update(scope="out", tags=["Not in scope"],
+                      tags_by_family={"type_of_coverage": ["Not in scope"]},
+                      reason="Chinese-language content — per client rule, Chinese content is not tagged.",
+                      text_source=result.get("text_source") or "chinese")
+        return result
+
     # 3) ask Claude — base protocol prompt + any DB-stored client-feedback rules
     learned, n_learned = rules_block(taxonomy.RUN_BRAND)
     system_prompt = prompts.SYSTEM_PROMPT + ("\n\n" + learned if learned else "")
@@ -254,9 +319,22 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     # 4) in scope -> assemble + enforce deterministic rules
     fam = _to_families(d)
 
-    # de-duplicate every family (model sometimes repeats a tag)
+    # Canonicalize every model-emitted label to the exact taxonomy string and drop
+    # anything that isn't a real tag. This snaps wrong casing/spacing back (e.g.
+    # 'Product - ITwin' -> 'Product - iTwin', collapsing the duplicate) and removes
+    # invented labels. Spokespeople are validated separately below, so skip them
+    # here (their name-scan already runs against the taxonomy).
+    canon, _norm = _canonical_label_map()
     for k in list(fam):
-        fam[k] = list(dict.fromkeys(fam[k]))
+        if k == "spokesperson":
+            fam[k] = list(dict.fromkeys(fam[k]))
+            continue
+        out = []
+        for lbl in fam[k]:
+            c = canon.get(_norm(lbl))
+            if c and c not in out:
+                out.append(c)
+        fam[k] = out
 
     # Product & Spokesperson are literal-name categories — scan the full text so
     # recall doesn't depend on the model. Add any taxonomy product named in the

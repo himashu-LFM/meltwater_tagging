@@ -34,6 +34,8 @@ review / ask the client to create the tag instead.
 ────────────────────────────────────────────────────────────────────────────
 """
 
+import re
+
 RUN_BRAND = "Bentley"
 
 # ---------------------------------------------------------------------------
@@ -420,20 +422,21 @@ def spokespeople_in_text(text: str, require_bentley_context: bool = False,
         hit = False
         for n in names:
             nlow = n.lower()
-            if not require_bentley_context:
-                if nlow in low:
+            # Word-boundary match so a short name does NOT match inside a longer,
+            # unrelated one (e.g. "Allen Li" must not fire on "Allen Livingston",
+            # "James Lee" on "James Leeson", "Paul King" on "Paul Kingsley"). A
+            # plain substring test caused those false positives.
+            pat = re.compile(r"(?<!\w)" + re.escape(nlow) + r"(?!\w)")
+            for mo in pat.finditer(low):
+                if not require_bentley_context:
                     hit = True
                     break
-                continue
-            # require "Bentley" near at least one occurrence of the name
-            idx = low.find(nlow)
-            while idx != -1:
-                lo = max(0, idx - window)
-                hi = idx + len(nlow) + window
+                # require "Bentley" near this occurrence of the name
+                lo = max(0, mo.start() - window)
+                hi = mo.end() + window
                 if "bentley" in low[lo:hi]:
                     hit = True
                     break
-                idx = low.find(nlow, idx + 1)
             if hit:
                 break
         if hit:

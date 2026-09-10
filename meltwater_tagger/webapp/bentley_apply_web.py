@@ -299,6 +299,17 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
         except Exception:
             live_map = {}
         if live_map:
+            # One-time dump of the account's live tag list, for the taxonomy-vs-
+            # account audit (which of our protocol labels exist in this account).
+            # Tag NAMES only (no secrets); gitignored (*.json). Overwrites each run.
+            try:
+                import os as _os
+                _p = _os.path.join(_os.path.dirname(__file__), "..", "bentley_live_tags.json")
+                json.dump({"count": len(live_map), "tags": sorted(live_map.keys())},
+                          open(_p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+                log.info("bentley apply: wrote %d live account tag names to %s", len(live_map), _p)
+            except Exception:
+                pass
             m2, u2 = aa.manifest_from_results(results, live_map)   # live account tags ONLY
             manifest, unmapped = m2, u2
             log.info("bentley apply: resolved against %d live account tags; docs=%d unmapped=%s",
