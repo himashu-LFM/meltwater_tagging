@@ -60,12 +60,29 @@ Fewer, correct tags beat many loosely-related ones. Tag only the article's ACTUA
 topic it touches. Concretely:
 - Beyond the mandatory Type of Publication + Region, add a tag ONLY if that theme/product/person is a
   real subject of the piece — not merely mentioned.
-- Industry: for in-scope infrastructure coverage assign exactly ONE — do NOT leave it empty. Pick the
-  primary sector; when the piece is broad or cross-sector infrastructure (e.g. a general event covering
-  transport + water + energy), use AEC as the general infrastructure catch-all (per the protocol's AEC
-  definition). Add a second industry only if it genuinely spans two distinct sectors equally.
+- Industry: assign exactly ONE — do NOT leave it empty. Industries are MUTUALLY EXCLUSIVE (protocol).
+  Pick the SPECIFIC sector that fits — Cities, Energy (Electric Utilities / Power Generation), Mining,
+  Transportation (Rail & Transit / Airports & Ports / Roads & Highways / Bridges & Tunnels), or Water.
+  Use AEC ONLY when the content is general infrastructure / construction / engineering that does NOT fit
+  any specific sector above — AEC is the LAST-RESORT fallback, never a default. If the outlet or topic is
+  sector-specific (e.g. a mining trade publication or a mining-awards story -> Mining; a water-utility
+  piece -> Water), tag that sector, NEVER AEC. Add a second industry only if the piece genuinely spans
+  two distinct sectors equally.
 - Pillar: assign one only when that lens (AI / Connected Data / Resilience) is a real theme; often zero.
 - Product: only products named explicitly in the text.
+- Corporate: apply each Corporate tag ONLY when its protocol definition is actually met — they are
+  exclusive to their meaning, so do not add ones that don't fit:
+    • Events/Milestones/Awards — awards, wins, recognitions, anniversaries, office/hub openings, milestones.
+    • HR / Colleague Success — ONLY new exec hires, board (BoD) changes, workplace, culture, philanthropy.
+    • Education — ONLY STEM/STEAM, engineering resources, education awards.
+    • M&A — acquisitions/mergers.  • Financial / IR — earnings, financials, market reports.
+    • Product & Technology — a specifically named Bentley product appears.
+  Do NOT tag HR or Education for an awards, event, or product story. Multiple Corporate tags are allowed
+  when each genuinely applies; adding wrong ones is the error the client flags.
+- Type of Publication (pick ONE, by the OUTLET's nature, not the story): Mainstream/Business = general
+  news, business, or financial outlets (incl. wire/newswire and finance press); Technology = technology-
+  focused publications; Trade/Industry = sector trade press (construction, engineering, mining, water,
+  transport trade magazines). An M&A or financial story on a business/finance wire is Mainstream/Business.
 - Corporate - General: last resort; skip if any other corporate/industry tag already fits.
 - When in doubt about a tag, LEAVE IT OFF. A short, precise tag set is the goal.
 
@@ -94,8 +111,11 @@ Two independent ways to be **Unique** — EITHER is enough:
   pickup of a Bentley announcement with no editorial contribution. Signals: "Bentley Systems today
   announced…", a wire release Bentley distributed, listed on bentley.com/newsroom. A short third-party
   brief is NOT a press release.
-- **3rd party press release** — a release issued by ANOTHER organisation where Bentley is merely mentioned
-  (not the subject). Never for Bentley-issued content.
+- **3rd party press release** — a press release ISSUED BY an organisation OTHER than Bentley (a partner,
+  acquirer, customer, reseller, or agency), EVEN when Bentley is a subject of it. The test is WHO ISSUED
+  the release, NOT whether Bentley is discussed: e.g. "Naviam announces it will acquire Cohesive from
+  Bentley Systems" is a Naviam-issued release -> 3rd party press release, NOT Press release. Never use
+  Press release for a release issued by a non-Bentley party.
 - Do NOT use "no byline" as a reason to pick Press release. Absence of a byline does not make it a release —
   most third-party coverage of Bentley is **Unique**. Choose Press release only on clear Bentley-issued signals.
 

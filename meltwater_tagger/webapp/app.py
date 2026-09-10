@@ -288,6 +288,17 @@ def save_brand_tags_route(brand_id):
 
 # --- brand feedback docs (taxonomy brands like Bentley) ----------------------
 
+def _invalidate_feedback_rules_cache() -> None:
+    """Clear the in-process live-feedback-rules cache after a rule mutation, so
+    the next classify on THIS worker reflects the change at once. Best-effort —
+    a missing module must never break the mutating request."""
+    try:
+        from brands.bentley import live_rules
+        live_rules.clear_cache()
+    except Exception:
+        log.debug("could not clear live_rules cache (non-fatal)")
+
+
 def _extract_doc_text(filename: str, data: bytes) -> tuple[str | None, str | None]:
     """Return (text, error). Supports .txt/.md/.csv and .docx (stdlib, no dep)."""
     name = (filename or "").lower()
@@ -345,6 +356,10 @@ def upload_feedback_doc_route(brand_id):
         extract_error = str(e)
         log.exception("rule extraction failed for doc %s", doc_id)
 
+    # New rules exist — drop this worker's cached rule set so the next classify
+    # picks them up immediately (other workers refresh within the cache TTL).
+    _invalidate_feedback_rules_cache()
+
     return jsonify({"ok": True,
                     "doc": {"id": doc_id, "filename": f.filename, "chars": len(text)},
                     "rules_added": rules_added,
@@ -364,13 +379,15 @@ def list_feedback_rules_route(brand_id):
 @require_auth
 def delete_feedback_rule_route(brand_id, rule_id):
     db.delete_feedback_rule(rule_id)
+    _invalidate_feedback_rules_cache()
     return jsonify({"ok": True})
 
 
 @app.route("/api/brands/<int:brand_id>/feedback-docs/<doc_id>", methods=["DELETE"])
 @require_auth
 def delete_feedback_doc_route(brand_id, doc_id):
-    db.delete_feedback_doc(doc_id)
+    db.delete_feedback_doc(doc_id)   # cascades to that doc's feedback_rules
+    _invalidate_feedback_rules_cache()
     return jsonify({"ok": True})
 
 
