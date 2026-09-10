@@ -40,7 +40,13 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-MAX_CHARS = 24000  # long earnings-call transcripts name products/people late; don't truncate them out
+
+# Long technical/PEA-style press releases (mining, engineering) commonly put the
+# vendor/tool credit or "About" boilerplate near the END, past 24000 chars — a
+# real case truncated mid-sentence at that cap, silently dropping the Bentley/
+# Seequent mention the classifier needed. Raised to comfortably cover long
+# releases while staying well inside the model's context budget.
+MAX_CHARS = 60000
 _BOILER = ("privacy policy", "cookie policy", "we value your privacy",
            "enable javascript", "consent to", "accept all cookies",
            "this website utilizes", "opens in a new window")

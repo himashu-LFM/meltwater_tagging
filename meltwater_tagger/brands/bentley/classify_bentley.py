@@ -92,7 +92,35 @@ _SOFT_BLOCK_MARKERS = (
     "verify you are human", "unusual traffic", "captcha", "enable javascript",
     "request unsuccessful", "attention required", "bot detection", "please verify",
     "forbidden", "denied access", "security check", "checking your browser",
+    # Confirmed real-world miss: zacks.com's bot-wall used this exact wording and
+    # slipped through every marker above (627 chars, no match), so a "Not in
+    # scope" verdict was made on the block page instead of the real article.
+    "think you were a bot", "made us think you were", "power user moving through",
+    "super-human speed", "pardon the interruption", "automated access",
 )
+
+
+# CMS auto-attribution placeholders — NOT a real journalist's name. Many wire-
+# copy/press-release aggregator sites stamp one of these on every republished
+# release regardless of who (if anyone) wrote it. Confirmed real-world miss:
+# readmagazine.com's byline was "News Desk" on a pure Naviam-issued press
+# release, which the byline_present check below treated as a real byline and
+# force-overrode the coverage tag to Unique instead of 3rd party press release.
+_GENERIC_BYLINES = {
+    "news desk", "newsdesk", "staff", "staff writer", "staff reporter",
+    "staff report", "editorial team", "editorial staff", "newsroom",
+    "press release", "press desk", "wire report", "wire staff", "admin",
+    "administrator", "editor", "the editor", "contributor", "guest author",
+    "web desk", "digital desk", "online desk", "web team", "bureau report",
+    "correspondent", "desk report", "site staff",
+}
+
+
+def _is_real_byline(byline: str) -> bool:
+    """True only if `byline` looks like an actual person's name, not a generic
+    CMS placeholder (see _GENERIC_BYLINES)."""
+    b = (byline or "").strip()
+    return bool(b) and b.lower() not in _GENERIC_BYLINES
 
 
 def _looks_soft_blocked(text: str) -> bool:
@@ -225,7 +253,13 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         if reach == "readable":
             text = fetched["text"]
             result["text_source"] = "fetch"
-            if fetched.get("author") and not byline:
+            # Only accept the fetched author as a byline if it's a real name —
+            # wire-copy aggregator sites often auto-stamp a generic placeholder
+            # ("News Desk", "Staff Writer") on every republished release, which
+            # both the LLM and the deterministic override below would otherwise
+            # treat as "a journalist wrote this", flipping 3rd-party-press-
+            # release content to Unique. See _GENERIC_BYLINES / _is_real_byline.
+            if not byline and _is_real_byline(fetched.get("author")):
                 byline = fetched["author"]
         elif reach == "dead":
             # Dead / unreachable link (404/410 or host unreachable) -> Not in scope.
@@ -365,7 +399,7 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     #     byline. This is the strongest signal and wins over the byline rule.
     #  2. Otherwise a byline => Unique (a journalist wrote it), even if the piece
     #     reads like a wire/earnings release.
-    byline_present = bool((byline or "").strip())
+    byline_present = _is_real_byline(byline)
     cov = (fam.get("type_of_coverage") or [""])[0]
     if rules.is_bentley_press_release(text):
         fam["type_of_coverage"] = [rules.PRESS_RELEASE_LABEL]
