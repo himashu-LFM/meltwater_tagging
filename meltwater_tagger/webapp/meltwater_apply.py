@@ -1549,6 +1549,10 @@ def _check_apply_inputs(to_apply: dict, topic_url: str, require_topic: bool = Tr
 MSEARCH_HOST = "unified-search.meltwater.io"
 BFF_TAGS_URL = "https://bff.fhaicoreapps.com/prd-flux-content-stream-bff/tags"
 BFF_ENQUEUE_URL = "https://bff.fhaicoreapps.com/prd-flux-content-stream-bff/tags/enqueue-document-tagging"
+# The feed pages 25 rows at a time, so a big run needs many pages to resolve
+# every target. Walking stops early as soon as a page adds nothing new or all
+# targets are found; this is only the runaway guard (40 x 25 = ~1000 mentions).
+MSEARCH_MAX_PAGES = int(os.environ.get("MELTWATER_MSEARCH_MAX_PAGES", "40"))
 _API_BASE_HEADERS = {
     "accept": "*/*",
     "accept-language": "en-US",
@@ -1807,76 +1811,134 @@ async def _tag_via_api_http(token: str, msearches: list[dict], to_apply: dict) -
                                               "not valid for this account"),
                     "applied": [], "failed": [], "unreached": [], "_fallback": True}
 
-        # 2) replay each captured msearch batch VERBATIM and merge the hits.
+        # 2) replay each captured msearch batch and merge the hits.
         # The app's own batch already returns the individual member documents
-        # (similar sub-posts) — rewriting the query broke that, so we send it
-        # unchanged. url -> {documentId, matchSentence, keywords}.
+        # (similar sub-posts) — rewriting the QUERY broke that, so the query is
+        # sent unchanged. The one thing we do change is PAGINATION: the feed
+        # requests page 25 rows at a time ("pagination": {"limit": 25,
+        # "start": 0}), so replaying the captured body verbatim only ever saw
+        # the first page — a 156-target run resolved 107 documents and left 51
+        # "unreached" even though those mentions were in the search. Walk
+        # `start` forward until a page adds nothing new or every target is
+        # resolved. url -> {documentId, matchSentence, keywords}.
         docmap = {}
+        targets_left = set(to_apply.keys())
+        _hdrs = {**_API_BASE_HEADERS, "authorization": f"Bearer {token}",
+                 "content-type": "application/json",
+                 "x-credit-pool-id": "mi-explore-brand-volume-ip",
+                 "x-product-type": "explore-dataservice"}
+
+        def _paginated_requests(body_obj):
+            """The sub-requests that actually return documents. The rest of the
+            batch is chart aggregations with no pagination block."""
+            out = []
+            for r in (body_obj.get("requests") or []):
+                req = r.get("request")
+                if isinstance(req, dict) and isinstance(req.get("pagination"), dict):
+                    out.append(req["pagination"])
+            return out
+
         for i, ms in enumerate(msearches):
+            body_obj = None
+            pages = []
             try:
-                mr = await c.post(
-                    ms["url"],
-                    headers={**_API_BASE_HEADERS, "authorization": f"Bearer {token}",
-                             "content-type": "application/json",
-                             "x-credit-pool-id": "mi-explore-brand-volume-ip",
-                             "x-product-type": "explore-dataservice"},
-                    content=ms["body"],
-                )
-                if mr.status_code == 200:
-                    found = _hits_from_msearch(mr.text)
-                    for k, v in found.items():
-                        docmap.setdefault(k, v)
-                    log.info("apply-api: msearch batch %d/%d -> %d docs (running total %d)",
-                              i + 1, len(msearches), len(found), len(docmap))
-                else:
-                    log.warning("apply-api: msearch batch %d returned status %s", i + 1, mr.status_code)
-            except Exception as e:
-                log.warning("apply-api: msearch batch %d errored: %s: %s", i + 1, type(e).__name__, e)
+                body_obj = json.loads(ms["body"])
+                pages = _paginated_requests(body_obj)
+            except Exception:
+                body_obj = None
+
+            if not body_obj or not pages:
+                # Aggregation-only (or unparseable) batch: send once, as before.
+                await _replay_once(c, ms["url"], _hdrs, ms["body"], i, len(msearches),
+                                   docmap, targets_left)
+                continue
+
+            page = 0
+            while page < MSEARCH_MAX_PAGES and targets_left:
+                for pg in pages:
+                    # Only the offset is touched — limit/sort/group are left
+                    # exactly as the app sent them so grouping still expands.
+                    pg["start"] = page * int(pg.get("limit") or 25)
+                added = await _replay_once(c, ms["url"], _hdrs, json.dumps(body_obj),
+                                           i, len(msearches), docmap, targets_left,
+                                           page=page)
+                if not added:
+                    break
+                page += 1
 
         log.info("apply-api: %d documents resolved; %d targets to tag", len(docmap), len(to_apply))
         if not docmap:
             return {"ok": False, "message": "msearch returned no documents",
                     "applied": [], "failed": [], "unreached": [], "_fallback": True}
 
-        # 3) enqueue a tag per target — EXACT match only.
-        # No post-id fallback: matching by post-id alone tagged the parent
-        # (oxb9six) for a target comment (oxfei07). The canonical key includes the
-        # comment id, so an exact match is the ONLY safe rule. If the exact
-        # document isn't present, we leave it unreached rather than risk tagging
-        # the wrong mention. (hiddenDocuments=included above ensures the exact
-        # sub-post is actually in the results, so exact match resolves it.)
-        for key, val in to_apply.items():
-            hit = docmap.get(key)
-            if not hit:
-                unreached.append(val["orig"])
-                continue
-            tag_name = normalize_tag(val["tag"])
-            tag_id = name_to_id.get(tag_name) or name_to_id.get(val["tag"])
-            if not tag_id:
-                log.warning("apply-api: tag %r not found in account tag list", tag_name)
-                failed.append({"permalink": val["orig"], "tag": val["tag"]})
-                continue
-            body = json.dumps({
-                "documents": [{"documentId": hit["documentId"],
-                               "matchSentence": hit["matchSentence"],
-                               "keywords": hit["keywords"]}],
-                "tagIds": [tag_id],
-            })
-            er = await c.post(BFF_ENQUEUE_URL,
-                              headers={**_API_BASE_HEADERS, "authorization": token,
-                                       "content-type": "application/json"},
-                              content=body)
-            if er.status_code in (200, 202):
-                log.info("apply-api: tagged %s -> %s", val["orig"], tag_name)
-                applied.append({"permalink": val["orig"], "tag": tag_name})
-            else:
-                log.warning("apply-api: enqueue failed for %s (status=%s)", val["orig"], er.status_code)
-                failed.append({"permalink": val["orig"], "tag": val["tag"]})
+        await _do_enqueue(c, token, to_apply, docmap, name_to_id, applied, failed, unreached)
 
     log.info("apply-api: done applied=%d failed=%d unreached=%d",
               len(applied), len(failed), len(unreached))
     return {"ok": True, "message": f"Applied {len(applied)} tag(s) via API.",
             "applied": applied, "skipped_already": [], "failed": failed, "unreached": unreached}
+
+
+async def _replay_once(c, url, headers, body, i, total, docmap, targets_left, page=None):
+    """POST one msearch body and merge its hits. Returns how many NEW documents
+    this call contributed (0 means the page is exhausted)."""
+    try:
+        mr = await c.post(url, headers=headers, content=body)
+        if mr.status_code != 200:
+            log.warning("apply-api: msearch batch %d%s returned status %s",
+                        i + 1, f" page {page}" if page is not None else "", mr.status_code)
+            return 0
+        found = _hits_from_msearch(mr.text)
+        new = 0
+        for k, v in found.items():
+            if k not in docmap:
+                docmap[k] = v
+                new += 1
+            targets_left.discard(k)
+        log.info("apply-api: msearch batch %d/%d%s -> %d docs (%d new, running total %d, "
+                 "%d target(s) still missing)",
+                 i + 1, total, f" page {page}" if page is not None else "",
+                 len(found), new, len(docmap), len(targets_left))
+        return new
+    except Exception as e:
+        log.warning("apply-api: msearch batch %d errored: %s: %s", i + 1, type(e).__name__, e)
+        return 0
+
+
+async def _do_enqueue(c, token, to_apply, docmap, name_to_id, applied, failed, unreached):
+    """Enqueue a tag per target — EXACT match only.
+
+    No post-id fallback: matching by post-id alone tagged the parent (oxb9six)
+    for a target comment (oxfei07). The canonical key includes the comment id,
+    so an exact match is the ONLY safe rule. If the exact document isn't
+    present, leave it unreached rather than risk tagging the wrong mention."""
+    for key, val in to_apply.items():
+        hit = docmap.get(key)
+        if not hit:
+            unreached.append(val["orig"])
+            continue
+        tag_name = normalize_tag(val["tag"])
+        tag_id = name_to_id.get(tag_name) or name_to_id.get(val["tag"])
+        if not tag_id:
+            log.warning("apply-api: tag %r not found in account tag list", tag_name)
+            failed.append({"permalink": val["orig"], "tag": val["tag"]})
+            continue
+        body = json.dumps({
+            "documents": [{"documentId": hit["documentId"],
+                           "matchSentence": hit["matchSentence"],
+                           "keywords": hit["keywords"]}],
+            "tagIds": [tag_id],
+        })
+        er = await c.post(BFF_ENQUEUE_URL,
+                          headers={**_API_BASE_HEADERS, "authorization": token,
+                                   "content-type": "application/json"},
+                          content=body)
+        if er.status_code in (200, 202):
+            log.info("apply-api: tagged %s -> %s", val["orig"], tag_name)
+            applied.append({"permalink": val["orig"], "tag": tag_name})
+        else:
+            log.warning("apply-api: enqueue failed for %s (status=%s)", val["orig"], er.status_code)
+            failed.append({"permalink": val["orig"], "tag": val["tag"]})
 
 
 async def switch_meltwater_account(page, account_hint: str) -> bool:
