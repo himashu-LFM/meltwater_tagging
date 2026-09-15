@@ -90,6 +90,79 @@ REGION = [
     {"key": "region_apac", "label": "Region - APAC", "hint": "Asia-Pacific (e.g. India, Australia, China, Cambodia)"},
 ]
 
+# Client decision (2026-09): Region is taken from the Meltwater export's
+# "Publication Country" column, not guessed from the domain. This maps a country
+# name OR ISO code to its Region bucket. Buckets follow the protocol's confirmed
+# lists, with a continent fallback (any Europe/Middle East/Africa country -> EMEA).
+# Names are matched case-insensitively; a few common variants are included.
+_REGION_BY_COUNTRY = {
+    # --- NALA: North & Latin America ---
+    "united states": "Region - NALA", "usa": "Region - NALA", "us": "Region - NALA",
+    "u.s.": "Region - NALA", "u.s.a.": "Region - NALA", "america": "Region - NALA",
+    "canada": "Region - NALA", "ca": "Region - NALA",
+    "mexico": "Region - NALA", "mx": "Region - NALA",
+    "brazil": "Region - NALA", "br": "Region - NALA",
+    "colombia": "Region - NALA", "co": "Region - NALA",
+    "saint lucia": "Region - NALA", "st lucia": "Region - NALA", "lc": "Region - NALA",
+    "argentina": "Region - NALA", "chile": "Region - NALA", "peru": "Region - NALA",
+    # --- APAC: Asia-Pacific ---
+    "australia": "Region - APAC", "au": "Region - APAC",
+    "india": "Region - APAC", "in": "Region - APAC",
+    "south korea": "Region - APAC", "korea": "Region - APAC", "kr": "Region - APAC",
+    "japan": "Region - APAC", "jp": "Region - APAC",
+    "taiwan": "Region - APAC", "tw": "Region - APAC",
+    "singapore": "Region - APAC", "sg": "Region - APAC",
+    "china": "Region - APAC", "cn": "Region - APAC",
+    "indonesia": "Region - APAC", "id": "Region - APAC",
+    "new zealand": "Region - APAC", "nz": "Region - APAC",
+    "cambodia": "Region - APAC", "kh": "Region - APAC",
+    "philippines": "Region - APAC", "ph": "Region - APAC",
+    "malaysia": "Region - APAC", "vietnam": "Region - APAC", "thailand": "Region - APAC",
+    "hong kong": "Region - APAC", "pakistan": "Region - APAC", "bangladesh": "Region - APAC",
+    # --- EMEA: Europe, Middle East, Africa (explicit confirmed list) ---
+    "netherlands": "Region - EMEA", "nl": "Region - EMEA",
+    "united kingdom": "Region - EMEA", "uk": "Region - EMEA", "gb": "Region - EMEA",
+    "great britain": "Region - EMEA", "england": "Region - EMEA",
+    "germany": "Region - EMEA", "de": "Region - EMEA",
+    "france": "Region - EMEA", "fr": "Region - EMEA",
+    "italy": "Region - EMEA", "it": "Region - EMEA",
+    "spain": "Region - EMEA", "es": "Region - EMEA",
+    "turkey": "Region - EMEA", "türkiye": "Region - EMEA", "turkiye": "Region - EMEA", "tr": "Region - EMEA",
+    "czech republic": "Region - EMEA", "czechia": "Region - EMEA", "cz": "Region - EMEA",
+    "ghana": "Region - EMEA", "gh": "Region - EMEA",
+    "nigeria": "Region - EMEA", "ng": "Region - EMEA",
+    "united arab emirates": "Region - EMEA", "uae": "Region - EMEA", "ae": "Region - EMEA",
+    "saudi arabia": "Region - EMEA", "sa": "Region - EMEA",
+    "israel": "Region - EMEA", "il": "Region - EMEA",
+    "liechtenstein": "Region - EMEA", "li": "Region - EMEA",
+    "san marino": "Region - EMEA", "sm": "Region - EMEA",
+    "vatican city": "Region - EMEA", "vatican": "Region - EMEA", "va": "Region - EMEA",
+    "poland": "Region - EMEA", "pl": "Region - EMEA",
+    "bahrain": "Region - EMEA", "bh": "Region - EMEA",
+    "south africa": "Region - EMEA", "za": "Region - EMEA",
+    "cape verde": "Region - EMEA", "cv": "Region - EMEA",
+    "central african republic": "Region - EMEA", "cf": "Region - EMEA",
+    "algeria": "Region - EMEA", "dz": "Region - EMEA",
+    "botswana": "Region - EMEA", "bw": "Region - EMEA",
+    "jordan": "Region - EMEA", "jo": "Region - EMEA",
+    "qatar": "Region - EMEA", "kuwait": "Region - EMEA", "oman": "Region - EMEA",
+    "egypt": "Region - EMEA", "kenya": "Region - EMEA", "ireland": "Region - EMEA",
+    "switzerland": "Region - EMEA", "austria": "Region - EMEA", "belgium": "Region - EMEA",
+    "sweden": "Region - EMEA", "norway": "Region - EMEA", "denmark": "Region - EMEA",
+    "finland": "Region - EMEA", "portugal": "Region - EMEA", "greece": "Region - EMEA",
+}
+
+
+def region_for_country(country: str) -> str:
+    """Map a publication-country name/ISO code to its Region label, or "" if
+    unknown. Client rule (2026-09): Region comes from the export's Publication
+    Country column, not from the domain. Unknown/blank -> "" so the caller leaves
+    Region empty and flags it for review rather than guessing."""
+    c = (country or "").strip().lower().rstrip(".")
+    if not c:
+        return ""
+    return _REGION_BY_COUNTRY.get(c, "")
+
 # ---------------------------------------------------------------------------
 # CORPORATE — about the COMPANY Bentley. "Exclusive to other types": use a
 # corporate tag only when there IS a corporate focus; General is the fallback,
@@ -218,6 +291,40 @@ PRODUCT = [
     {"key": "prod_synchro_plus", "label": "Product - SYNCHRO+", "aliases": ["SYNCHRO+"]},
     {"key": "prod_openutilities_sub", "label": "Product - OpenUtilities Substation+", "aliases": ["OpenUtilities Substation+", "OpenUtilities Substation"]},
     {"key": "prod_staad", "label": "Product - STAAD", "aliases": ["STAAD"]},
+
+    # --- Cesium & Seequent products (client-provided list, 2026-09) ------------
+    # Bentley acquired Cesium (2024) and Seequent (subsurface/mining). Aliases are
+    # kept SPECIFIC (full product names) so bare words like "Central", "Driver",
+    # "Evo", "Works" don't false-match unrelated text via substring detection.
+    # NOTE (client rule): a brief third-party technical-section mention of one of
+    # these ("data validated in Leapfrog Geo") is IN SCOPE but should NOT add
+    # Corporate - Product & Technology — handled in classify, not here.
+    # The exact Meltwater tag STRING is still to be confirmed by the client; apply
+    # resolves against the live account tag list and reports any that don't match.
+    {"key": "prod_cesium_ion", "label": "Product - Cesium ion", "aliases": ["Cesium ion"]},
+    {"key": "prod_cesium_omniverse", "label": "Product - Cesium for NVIDIA Omniverse", "aliases": ["Cesium for NVIDIA Omniverse", "Cesium for Omniverse"]},
+    {"key": "prod_cesium_o3de", "label": "Product - Cesium for O3DE", "aliases": ["Cesium for O3DE"]},
+    {"key": "prod_cesium_unity", "label": "Product - Cesium for Unity", "aliases": ["Cesium for Unity"]},
+    {"key": "prod_cesium_unreal", "label": "Product - Cesium for Unreal", "aliases": ["Cesium for Unreal"]},
+    {"key": "prod_cesiumjs", "label": "Product - CesiumJS", "aliases": ["CesiumJS"]},
+    {"key": "prod_cesium", "label": "Product - Cesium", "aliases": ["Cesium"],
+     "note": "Generic 'Cesium' fallback — the specific Cesium products above win when named."},
+    {"key": "prod_seq_blocksync", "label": "Product - Seequent BlockSync", "aliases": ["Seequent BlockSync", "BlockSync"]},
+    {"key": "prod_seq_driver", "label": "Product - Seequent Driver", "aliases": ["Seequent Driver"]},
+    {"key": "prod_seq_geostudio", "label": "Product - Seequent GeoStudio", "aliases": ["Seequent GeoStudio", "GeoStudio"]},
+    {"key": "prod_seq_imago", "label": "Product - Seequent Imago", "aliases": ["Seequent Imago", "Seequent's Imago", "Imago system"]},
+    {"key": "prod_seq_leapfrog_edge", "label": "Product - Seequent Leapfrog Edge", "aliases": ["Seequent Leapfrog Edge", "Leapfrog Edge"]},
+    {"key": "prod_seq_leapfrog_energy", "label": "Product - Seequent Leapfrog Energy", "aliases": ["Seequent Leapfrog Energy", "Leapfrog Energy"]},
+    {"key": "prod_seq_leapfrog_geo", "label": "Product - Seequent Leapfrog Geo", "aliases": ["Seequent Leapfrog Geo", "Leapfrog Geo"]},
+    {"key": "prod_seq_leapfrog_viewer", "label": "Product - Seequent Leapfrog Viewer", "aliases": ["Seequent Leapfrog Viewer", "Leapfrog Viewer"]},
+    {"key": "prod_seq_leapfrog_works", "label": "Product - Seequent Leapfrog Works", "aliases": ["Seequent Leapfrog Works", "Leapfrog Works"]},
+    {"key": "prod_seq_mxdeposit", "label": "Product - Seequent MX Deposit", "aliases": ["Seequent MX Deposit", "MX Deposit"]},
+    {"key": "prod_seq_oasis", "label": "Product - Seequent Oasis montaj", "aliases": ["Seequent Oasis montaj", "Oasis montaj"]},
+    {"key": "prod_seq_openground", "label": "Product - Seequent OpenGround", "aliases": ["Seequent OpenGround"]},
+    {"key": "prod_seq_plaxis2d", "label": "Product - Seequent PLAXIS 2D", "aliases": ["Seequent PLAXIS 2D", "PLAXIS 2D"]},
+    {"key": "prod_seq_plaxis3d", "label": "Product - Seequent PLAXIS 3D", "aliases": ["Seequent PLAXIS 3D", "PLAXIS 3D"]},
+    {"key": "prod_seq_central", "label": "Product - Seequent Central", "aliases": ["Seequent Central"]},
+    {"key": "prod_seq_evo", "label": "Product - Seequent Evo", "aliases": ["Seequent Evo"]},
 ]
 
 # ---------------------------------------------------------------------------
@@ -255,7 +362,8 @@ SPOKESPEOPLE = [
     {"name": "Christoph Lorenz"},
     {"name": "Niklas Zeybrandt"},
     {"name": "Nick Niknam"},
-    {"name": "Collin Ellam"},
+    # Client-confirmed spelling (2026-09): "Colin Ellam" (one 'l'); old spelling kept as alias.
+    {"name": "Colin Ellam", "context": "CEO, Cohesive", "aliases": ["Collin Ellam"]},
     {"name": "Ken MacArthur"},
     {"name": "Angela Curry", "context": "CSR"},
     {"name": "Bernardo Matos", "context": "Government / Policy"},
@@ -301,7 +409,10 @@ SPOKESPEOPLE = [
     {"name": "Jens Sauer"},
     {"name": "Gregg Herrin", "context": "Water", "aliases": ["Greg Herrin"]},
     {"name": "Slavco Velickov", "context": "Water"},
-    {"name": "Dr. Tom Walski", "context": "Water", "aliases": ["Dr. Thom Krom"]},
+    {"name": "Dr. Tom Walski", "context": "Water"},
+    # Client-confirmed (2026-09): "Dr. Thomas Krom" is a real, separate spokesperson —
+    # it was previously (incorrectly) attached as an alias of Dr. Tom Walski.
+    {"name": "Dr. Thomas Krom", "aliases": ["Thomas Krom", "Dr. Thom Krom", "Thom Krom"]},
     {"name": "Shar Govindan"},
     # Meltwater's tag is the misspelled "Cecila Correia" — that is the canonical
     # label to apply; the correct spelling stays as an alias for text detection.

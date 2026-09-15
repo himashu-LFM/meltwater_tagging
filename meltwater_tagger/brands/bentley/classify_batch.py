@@ -71,6 +71,7 @@ def _classify_job(job: dict, prefer_snippet: bool) -> dict:
         headline=job.get("headline", ""),
         body=job.get("body", ""),
         prefer_snippet=prefer_snippet,
+        document_tags=job.get("document_tags", ""),
     )
     # Carry apply-critical export metadata onto the result so decisions.json is
     # ready for Phase-2 apply: `document_id` is what Meltwater's tag API targets,

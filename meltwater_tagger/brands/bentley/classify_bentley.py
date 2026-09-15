@@ -92,7 +92,40 @@ _SOFT_BLOCK_MARKERS = (
     "verify you are human", "unusual traffic", "captcha", "enable javascript",
     "request unsuccessful", "attention required", "bot detection", "please verify",
     "forbidden", "denied access", "security check", "checking your browser",
+    # Confirmed real-world miss: zacks.com's bot-wall used this exact wording and
+    # slipped through every marker above (627 chars, no match), so a "Not in
+    # scope" verdict was made on the block page instead of the real article.
+    "think you were a bot", "made us think you were", "power user moving through",
+    "super-human speed", "pardon the interruption", "automated access",
 )
+
+
+# Client rule (2026-09, confirmed): ANY byline present makes coverage "Unique" —
+# a person's name, the outlet's own name/brand ("CW Team"), an editorial desk
+# ("Editor", "Newsroom", "News Desk"), even "Admin" — EXCEPT regional wire/
+# newswire services (ANI, PNN), which mean the item is a 3rd party press release,
+# not Unique. (This replaces an earlier assumption that desk/CMS credits were
+# "not real bylines"; the client clarified they DO count as Unique.)
+_WIRE_SERVICE_BYLINES = {
+    "ani", "a.n.i.", "asian news international",
+    "pnn", "p.n.n.",
+}
+
+
+def _is_wire_service_byline(byline: str) -> bool:
+    """True if the byline is a regional wire/newswire service (ANI, PNN, …),
+    which per the client → 3rd party press release, NOT Unique."""
+    b = (byline or "").strip().lower().strip(".")
+    if not b:
+        return False
+    return b in _WIRE_SERVICE_BYLINES or b in {w.strip(".") for w in _WIRE_SERVICE_BYLINES}
+
+
+def _looks_soft_blocked(text: str) -> bool:
+    """True if the fetched body looks like a bot-wall/access-denied interstitial
+    rather than a real article: short AND dominated by a block phrase. The length
+    gate keeps a normal article that merely mentions e.g. 'captcha' from tripping."""
+    t = (text or "").strip().lower()
 
 
 def _looks_soft_blocked(text: str) -> bool:
@@ -103,6 +136,36 @@ def _looks_soft_blocked(text: str) -> bool:
     if not t or len(t) > 800:
         return False
     return any(m in t for m in _SOFT_BLOCK_MARKERS)
+
+
+# Sponsored / advertorial labels — client rule (2026-09): sponsored content is
+# Not In Scope, identified by a label near the top (just after the title). We scan
+# only the HEAD of the text so an article that merely mentions "sponsored" (e.g.
+# "the event was sponsored by…") deep in the body doesn't trip it.
+_SPONSORED_MARKERS = (
+    "sponsored content", "sponsored editorial", "sponsored post", "sponsored article",
+    "sponsored by bentley", "presented by bentley", "advertisement", "advertorial",
+    "paid content", "paid post", "paid partnership", "paid for by an advertiser",
+    "promoted content", "anzeige", "publireportage", "contenu sponsorisé",
+)
+
+
+def _looks_sponsored(text: str) -> bool:
+    """True if the article is labelled sponsored/advertorial near the top. Scans
+    the first ~350 chars (the label zone right after the title). Bare 'sponsored'
+    counts only when NOT immediately followed by 'by' (avoids event-sponsorship
+    false positives like 'sponsored by the city')."""
+    head = (text or "")[:350].lower()
+    if not head:
+        return False
+    if any(m in head for m in _SPONSORED_MARKERS):
+        return True
+    # bare "sponsored" as a standalone label, but not "sponsored by <org>"
+    for m in _re.finditer(r"\bsponsored\b", head):
+        after = head[m.end():m.end() + 4]
+        if not after.lstrip().startswith("by"):
+            return True
+    return False
 
 
 def _is_chinese_text(text: str) -> bool:
@@ -164,7 +227,7 @@ def _reachability(fetched: dict) -> str:
 
 def classify_url(url: str, source: str = "", pub_country: str = "", byline: str = "",
                  snippet: str = "", headline: str = "", body: str = "",
-                 prefer_snippet: bool = False) -> dict:
+                 prefer_snippet: bool = False, document_tags: str = "") -> dict:
     """Classify one Bentley item.
 
     Text comes from the best source available, in this order of quality:
@@ -187,6 +250,15 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     if blocked:
         result.update(scope="out", reason=blocked,
                       tags=["Not in scope"], tags_by_family={"type_of_coverage": ["Not in scope"]})
+        return result
+
+    # 1b) client rule (2026-09): if a teammate already flagged the item in Meltwater
+    #     with a "Reporting Exclusion" Document Tag, it is Not In Scope — skip it
+    #     entirely (no fetch, no LLM).
+    if "reporting exclusion" in (document_tags or "").lower():
+        result.update(scope="out", reason="Already flagged 'Reporting Exclusion' in Meltwater by a teammate.",
+                      tags=["Not in scope"], tags_by_family={"type_of_coverage": ["Not in scope"]},
+                      text_source="reporting-exclusion")
         return result
 
     body = (body or "").strip()
@@ -221,12 +293,26 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         fetched = fetch_article(url)
         result["fetch"] = {"ok": fetched["ok"], "chars": fetched["chars"],
                            "status": fetched["status"], "error": fetched["error"]}
+        # Client rule (2026-09): a SYNDICATED stub — a page with a "read more /
+        # read full article / source" link that takes you to a DIFFERENT website to
+        # read the full article — is Not In Scope (the originating outlet is the
+        # item to track). The amount of text shown before the link can vary.
+        if fetched.get("syndicated_stub"):
+            result.update(scope="out", tags=["Not in scope"],
+                          tags_by_family={"type_of_coverage": ["Not in scope"]},
+                          reason="Syndicated content — a 'read more' link takes you to the full "
+                                 "article on another site. Not In Scope (track the source outlet).",
+                          text_source="syndicated-stub")
+            return result
         reach = _reachability(fetched)
         if reach == "readable":
             text = fetched["text"]
             result["text_source"] = "fetch"
-            if fetched.get("author") and not byline:
-                byline = fetched["author"]
+            # Client rule (2026-09): ANY byline present → Unique (see the coverage
+            # override below), so accept whatever author the page exposes. The only
+            # special case (wire services) is handled there, not here.
+            if not byline and (fetched.get("author") or "").strip():
+                byline = fetched["author"].strip()
         elif reach == "dead":
             # Dead / unreachable link (404/410 or host unreachable) -> Not in scope.
             detail = fetched.get("status") or (fetched.get("error") or "unreachable")
@@ -248,6 +334,17 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
             if snippet_body:
                 result["snippet_for_review"] = snippet_body
             return result
+
+    # Client rule (2026-09): sponsored / advertorial content is Not In Scope. A
+    # "Sponsored"/"Advertisement" label near the top of the article marks it —
+    # skip it without spending a Claude call.
+    if _looks_sponsored(text):
+        result.update(scope="out", tags=["Not in scope"],
+                      tags_by_family={"type_of_coverage": ["Not in scope"]},
+                      reason="Sponsored / advertorial content (labelled near the top) — per client "
+                             "rule, sponsored content is Not In Scope.",
+                      text_source=result.get("text_source") or "sponsored")
+        return result
 
     # Client rule: do NOT tag Chinese-language content. If the text to classify is
     # predominantly Chinese (CJK) characters, skip it as out of scope rather than
@@ -358,25 +455,50 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     # remove it when no product) AFTER the product scan
     fam = rules.enforce_structural_rules(fam)
 
-    # Deterministic Coverage overrides (protocol), in priority order:
-    #  1. Definitive Bentley-issued press-release boilerplate ("About Bentley
-    #     Systems" tagline, "Nasdaq: BSY", "Bentley Systems today announced")
-    #     => Press release, EVEN when a third-party site republished it with a
-    #     byline. This is the strongest signal and wins over the byline rule.
-    #  2. Otherwise a byline => Unique (a journalist wrote it), even if the piece
-    #     reads like a wire/earnings release.
-    byline_present = bool((byline or "").strip())
-    cov = (fam.get("type_of_coverage") or [""])[0]
-    if rules.is_bentley_press_release(text):
-        fam["type_of_coverage"] = [rules.PRESS_RELEASE_LABEL]
-    elif byline_present and ("Press release" in cov or "3rd party" in cov):
+    # Deterministic Coverage overrides — client rule (2026-09), in priority order:
+    #  1. A byline that is a WIRE SERVICE (ANI, PNN) => 3rd party press release
+    #     (a wire redistributes; it is not the outlet's own reporting).
+    #  2. ANY OTHER byline present => Unique — regardless of who issued the
+    #     release (person, outlet brand, "Editor"/"Newsroom"/"News Desk", "Admin").
+    #     The byline wins over the Bentley-issued-release default.
+    #  3. No byline + definitive Bentley-issued boilerplate ("About Bentley
+    #     Systems", "Nasdaq: BSY", "Bentley Systems today announced") => Press release.
+    #  4. No byline otherwise => leave the model's coverage call (3rd party / press).
+    byline = (byline or "").strip()
+    if byline and _is_wire_service_byline(byline):
+        fam["type_of_coverage"] = ["Type of Coverage - 3rd party press release"]
+    elif byline:
         fam["type_of_coverage"] = ["Type of Coverage - Unique"]
+    elif rules.is_bentley_press_release(text):
+        fam["type_of_coverage"] = [rules.PRESS_RELEASE_LABEL]
+
+    # Client rule (2026-09): Region is taken from the export's Publication Country
+    # column, not inferred from the domain/model. When we have a country that maps
+    # to a bucket, it OVERRIDES the model's Region guess (the column is authoritative).
+    region_from_country = taxonomy.region_for_country(pub_country)
+    if region_from_country:
+        fam["region"] = [region_from_country]
+
+    # Client rule (2026-09): for a Corporate–Financial/IR article, output ONLY
+    # Region + Corporate–Financial/IR — suppress every other family (Type of
+    # Publication, Type of Coverage, Pillar, Industry, Product, Spokesperson, and
+    # any other Corporate tag), even if they would otherwise apply.
+    financial_ir_only = "Corporate - Financial / IR" in (fam.get("corporate") or [])
+    if financial_ir_only:
+        fam = {"region": fam.get("region", []),
+               "corporate": ["Corporate - Financial / IR"]}
+
     result["scope"] = "in"
     result["tags_by_family"] = fam
     result["tags"] = _flatten(fam)
 
-    # 5) flag for human review
-    review = rules.missing_mandatory(fam)
+    # 5) flag for human review. Financial/IR items INTENTIONALLY omit Type of
+    # Publication (client rule), so only Region is "mandatory" for them — don't
+    # false-flag the deliberately-suppressed Publication tag.
+    if financial_ir_only:
+        review = [] if fam.get("region") else ["region"]
+    else:
+        review = rules.missing_mandatory(fam)
     if result.get("text_source") in ("snippet", "snippet-fallback"):
         # classified from the Meltwater export snippet, not the full article —
         # tags are coarse, so a human should confirm.
