@@ -132,6 +132,49 @@ def _find_source_link(html: str, base_url: str) -> str:
     return None
 
 
+# Explicit "go read the original elsewhere" credits — the signal of a syndicated
+# teaser/stub (client rule 2026-09: read ~2 paragraphs, then a link to a THIRD
+# site = syndicated = Not In Scope).
+_SYNDICATION_CREDIT_PHRASES = (
+    "read more", "read full", "read the full", "read entire article",
+    "read the original", "read original", "continue reading", "full story",
+    "full article at", "source:", "fonte:", "source :", "originally published",
+    "read this full story", "view original",
+)
+
+
+def _looks_syndicated_stub(html: str, base_url: str, body: str) -> bool:
+    """True if this page is a syndicated teaser whose 'read more'/'source' credit
+    links out to a DIFFERENT website to read the FULL article — i.e. a syndicated
+    stub that should be Not In Scope (track the source outlet instead).
+
+    The defining signal (per the client, 2026-09) is the cross-site "read more"
+    link, NOT how much text is shown first — the cutoff can come early or late. So
+    the trigger is: a syndication-credit phrase ("read more", "continue reading",
+    "read full article", "source:", …) sitting within ~400 chars of an outbound
+    link to ANOTHER domain. A generous upper length bound only rules out clearly
+    full-length articles (where the whole story is already present, so a 'read
+    more' there points at a RELATED story, not the continuation of this one)."""
+    # ~6000 chars is already a long, complete article; a real syndicated stub is
+    # shorter because its whole point is that you must click through to read on.
+    if not html or len(body or "") > 6000:
+        return False
+    base = _host(base_url)
+    low = html.lower()
+    for phrase in _SYNDICATION_CREDIT_PHRASES:
+        i = low.find(phrase)
+        while i != -1:
+            # look BOTH sides of the phrase: in "<a href=...>Read more</a>" the
+            # href precedes the anchor text; in "Source: <a href=...>" it follows.
+            window = html[max(0, i - 400):i + 400]
+            for m in re.finditer(r'href=["\'](https?://[^"\']+)["\']', window, re.I):
+                h = _host(m.group(1))
+                if h and h != base:
+                    return True
+            i = low.find(phrase, i + 1)
+    return False
+
+
 # --- retrieval ---------------------------------------------------------------
 
 def _retrieve_httpx(url: str, timeout: float = 20.0) -> tuple[str, int]:
@@ -241,7 +284,8 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
     `_depth` guards the follow-to-source recursion (max 1 hop).
     """
     out = {"url": url, "ok": False, "text": "", "chars": 0, "status": None,
-           "error": None, "via": None, "summary_only": False, "author": ""}
+           "error": None, "via": None, "summary_only": False, "author": "",
+           "syndicated_stub": False}
 
     def _finish(text, source, kind, html):
         out["text"] = text[:MAX_CHARS]
@@ -258,6 +302,12 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
         out["status"] = status
         if status < 400 and httpx_html:
             body = _extract_body(httpx_html, url)
+            # Syndicated stub (short teaser + read-more/source link to another
+            # site) => flag it and stop; the caller marks it Not In Scope. Checked
+            # only at _depth 0 so a followed-source fetch isn't itself flagged.
+            if _depth == 0 and _looks_syndicated_stub(httpx_html, url, body):
+                out["syndicated_stub"] = True
+                return out
             if _body_ok(body):
                 _finish(body, "httpx", "body", httpx_html)
                 return out

@@ -110,6 +110,15 @@ QA_CORRECTIONS = [
     "Substations serving customers/utility networks = Energy - Electric Utilities; assets that GENERATE energy = Energy - Power Generation.",
     "Corporate - General is a last resort: skip it if any other corporate/industry tag fits, or if the Bentley mention is brief.",
     "Assign only ONE primary Industry tag unless the article genuinely spans multiple sectors.",
+    # Client clarification (2026-09) on Seequent/Bentley product mentions in third-party stories:
+    "A named Bentley/Seequent product (e.g. Leapfrog Geo, Seequent Imago, MX Deposit, PLAXIS, "
+    "MicroStation) that is described as being USED or APPLIED — even briefly, even inside another "
+    "company's own press release or a technical/regulatory-compliance section (e.g. 'resource data "
+    "was validated in Leapfrog Geo', \"logged into Seequent's Imago\") — makes the article IN SCOPE. "
+    "Tag the relevant Industry (e.g. Industry | Mining) and the coverage type. BUT if the Bentley/"
+    "Seequent product is only NAMED IN A LIST among competing vendors/tools with no use or application "
+    "described, that alone is NOT a reason to be in scope — treat as Not in Scope unless Bentley is a "
+    "material focus for some other reason.",
 ]
 
 
