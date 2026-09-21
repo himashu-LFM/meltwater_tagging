@@ -107,6 +107,41 @@ def _extract_author(html: str) -> str:
     return ""
 
 
+# Words that follow a bare "By " but are NOT a person/desk name — cookie/consent
+# and legalese boilerplate ("By clicking…", "By using this site…"). Guards the
+# visible-byline fallback from grabbing those as an author.
+_BYLINE_STOPWORDS = {
+    "clicking", "using", "continuing", "submitting", "accessing", "signing",
+    "subscribing", "registering", "creating", "joining", "downloading",
+    "providing", "entering", "logging", "accepting", "the", "a", "an", "this", "that",
+    "email", "default", "law", "now", "then", "far", "yourself", "clicking",
+    # day/month names: "By Monday Bentley announced…" must not read as a byline
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december", "today", "tomorrow", "yesterday",
+}
+
+
+def _byline_from_text(text: str) -> str:
+    """Best-effort byline from the VISIBLE article text when meta/JSON-LD carry
+    none. Client rule (2026-09): ANY byline makes coverage Unique, so a "By Jane
+    Smith" line that never made it into a meta tag must still be caught.
+
+    Conservative to avoid false positives: only the first ~800 chars (the byline
+    zone under the headline), the name must be 2-4 Title-Case tokens, and the
+    first token must not be consent/legalese boilerplate ("By clicking…")."""
+    head = (text or "")[:800]
+    # Anchor to the START OF A LINE (or the text): a real byline is a standalone
+    # "By Jane Smith" line, not the "built by Jane Smith" / "used by X" inside a
+    # sentence, which would otherwise be misread as an author.
+    for m in re.finditer(r'(?:^|\n)[ \t]*[Bb]y[ \t]+([A-Z][a-zA-Z.\'’-]+(?:[ \t]+[A-Z][a-zA-Z.\'’-]+){1,3})', head):
+        name = m.group(1).strip()
+        if name.split()[0].lower() in _BYLINE_STOPWORDS:
+            continue
+        return name
+    return ""
+
+
 def _host(u: str) -> str:
     return urlparse(u).netloc.lower().replace("www.", "")
 
@@ -293,7 +328,10 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
         out["ok"] = True
         out["via"] = f"{source}-{kind}"
         out["summary_only"] = (kind == "meta")
-        out["author"] = _extract_author(html)
+        # Prefer structured author (meta/JSON-LD); fall back to a visible "By …"
+        # byline in the article text so coverage-type isn't wrongly downgraded to
+        # Press release just because the outlet omitted an author meta tag.
+        out["author"] = _extract_author(html) or _byline_from_text(out["text"])
 
     httpx_html = None
     # 1) httpx body

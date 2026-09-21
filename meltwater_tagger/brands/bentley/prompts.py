@@ -60,8 +60,11 @@ Fewer, correct tags beat many loosely-related ones. Tag only the article's ACTUA
 topic it touches. Concretely:
 - Beyond the mandatory Type of Publication + Region, add a tag ONLY if that theme/product/person is a
   real subject of the piece — not merely mentioned.
-- Industry: assign exactly ONE — do NOT leave it empty. Industries are MUTUALLY EXCLUSIVE (protocol).
-  Pick the SPECIFIC sector that fits — Cities, Energy (Electric Utilities / Power Generation), Mining,
+- Industry: assign AT MOST ONE, and ONLY when the article has a MATERIAL industry theme. Industry is
+  OPTIONAL, not mandatory (client-confirmed 2026-09): if Bentley's mention sits only in a corporate,
+  pillar, or financial context with no substantive industry focus, leave Industry EMPTY — a Pillar-only or
+  Corporate-only item is correct and common. Industries are MUTUALLY EXCLUSIVE (protocol). When one DOES
+  apply, pick the SPECIFIC sector that fits — Cities, Energy (Electric Utilities / Power Generation), Mining,
   Transportation (Rail & Transit / Airports & Ports / Roads & Highways / Bridges & Tunnels), or Water.
   Use AEC ONLY when the content is general infrastructure / construction / engineering that does NOT fit
   any specific sector above — AEC is the LAST-RESORT fallback, never a default. If the outlet or topic is
@@ -211,7 +214,7 @@ DECISION_SCHEMA = {
         "industry": {
             "type": "array",
             "items": {"type": "string", "enum": _labels(tax.INDUSTRY)},
-            "description": "Usually exactly one.",
+            "description": "At most one; leave EMPTY when there is no material industry theme (Industry is optional).",
         },
         "product": {
             "type": "array",
