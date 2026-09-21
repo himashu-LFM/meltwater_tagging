@@ -126,13 +126,6 @@ def _looks_soft_blocked(text: str) -> bool:
     rather than a real article: short AND dominated by a block phrase. The length
     gate keeps a normal article that merely mentions e.g. 'captcha' from tripping."""
     t = (text or "").strip().lower()
-
-
-def _looks_soft_blocked(text: str) -> bool:
-    """True if the fetched body looks like a bot-wall/access-denied interstitial
-    rather than a real article: short AND dominated by a block phrase. The length
-    gate keeps a normal article that merely mentions e.g. 'captcha' from tripping."""
-    t = (text or "").strip().lower()
     if not t or len(t) > 800:
         return False
     return any(m in t for m in _SOFT_BLOCK_MARKERS)
@@ -238,8 +231,10 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
 
     prefer_snippet=True classifies from the export text ONLY (body or snippet),
     never fetching — fast and reliable for a big export (skips paywall/JS/bot
-    walls). prefer_snippet=False fetches the full article but falls back to the
-    snippet instead of sending fetch failures to review.
+    walls). prefer_snippet=False fetches the full article; per the client rule a
+    dead link is tagged Not in scope while a reachable-but-unreadable page
+    (paywall / bot-wall / JS-only) is sent to manual review — never silently
+    dropped, and never quietly downgraded to the snippet.
     """
     result = {"url": url, "scope": None, "tags": [], "tags_by_family": {},
               "reason": "", "qa": "", "needs_review": [], "fetch": {},
@@ -259,6 +254,22 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         result.update(scope="out", reason="Already flagged 'Reporting Exclusion' in Meltwater by a teammate.",
                       tags=["Not in scope"], tags_by_family={"type_of_coverage": ["Not in scope"]},
                       text_source="reporting-exclusion")
+        return result
+
+    # 1c) client rule (2026-09): openpr.com is ALWAYS Corporate - Financial / IR,
+    #     even when Bentley is mentioned only in passing (every other source with a
+    #     passing mention is Not in Scope). Emit Region + Financial/IR only — the
+    #     same suppression the Financial/IR path uses — with no fetch and no LLM call.
+    fin_src = rules.is_financial_ir_source(url=url, source=source)
+    if fin_src:
+        region = taxonomy.region_for_country(pub_country)
+        fam = {"region": [region] if region else [],
+               "corporate": ["Corporate - Financial / IR"]}
+        result.update(scope="in", tags_by_family=fam, tags=_flatten(fam),
+                      reason=f"Source '{fin_src}' — client rule: always Corporate - Financial / IR "
+                             "(Region + Financial/IR only).",
+                      text_source="financial-ir-source",
+                      needs_review=[] if region else ["region"])
         return result
 
     body = (body or "").strip()
@@ -478,6 +489,12 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     region_from_country = taxonomy.region_for_country(pub_country)
     if region_from_country:
         fam["region"] = [region_from_country]
+    elif (pub_country or "").strip():
+        # A publication country IS given but isn't in our map. The client rule is
+        # that Region comes from the publication country, NOT the model's domain
+        # guess — so do NOT keep the model's guess here. Clear it; missing_mandatory
+        # then flags Region for review (and the country should be added to the map).
+        fam["region"] = []
 
     # Client rule (2026-09): for a Corporate–Financial/IR article, output ONLY
     # Region + Corporate–Financial/IR — suppress every other family (Type of
@@ -499,7 +516,7 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         review = [] if fam.get("region") else ["region"]
     else:
         review = rules.missing_mandatory(fam)
-    if result.get("text_source") in ("snippet", "snippet-fallback"):
+    if result.get("text_source") == "snippet":
         # classified from the Meltwater export snippet, not the full article —
         # tags are coarse, so a human should confirm.
         review.append("classified-from-snippet")

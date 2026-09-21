@@ -105,6 +105,10 @@ _REGION_BY_COUNTRY = {
     "colombia": "Region - NALA", "co": "Region - NALA",
     "saint lucia": "Region - NALA", "st lucia": "Region - NALA", "lc": "Region - NALA",
     "argentina": "Region - NALA", "chile": "Region - NALA", "peru": "Region - NALA",
+    "ecuador": "Region - NALA", "bolivia": "Region - NALA", "venezuela": "Region - NALA",
+    "uruguay": "Region - NALA", "paraguay": "Region - NALA", "panama": "Region - NALA",
+    "costa rica": "Region - NALA", "guatemala": "Region - NALA", "honduras": "Region - NALA",
+    "dominican republic": "Region - NALA", "puerto rico": "Region - NALA",
     # --- APAC: Asia-Pacific ---
     "australia": "Region - APAC", "au": "Region - APAC",
     "india": "Region - APAC", "in": "Region - APAC",
@@ -119,10 +123,14 @@ _REGION_BY_COUNTRY = {
     "philippines": "Region - APAC", "ph": "Region - APAC",
     "malaysia": "Region - APAC", "vietnam": "Region - APAC", "thailand": "Region - APAC",
     "hong kong": "Region - APAC", "pakistan": "Region - APAC", "bangladesh": "Region - APAC",
+    "sri lanka": "Region - APAC", "nepal": "Region - APAC", "mongolia": "Region - APAC",
+    "myanmar": "Region - APAC", "laos": "Region - APAC", "brunei": "Region - APAC",
+    "fiji": "Region - APAC", "papua new guinea": "Region - APAC",
     # --- EMEA: Europe, Middle East, Africa (explicit confirmed list) ---
     "netherlands": "Region - EMEA", "nl": "Region - EMEA",
     "united kingdom": "Region - EMEA", "uk": "Region - EMEA", "gb": "Region - EMEA",
     "great britain": "Region - EMEA", "england": "Region - EMEA",
+    "scotland": "Region - EMEA", "wales": "Region - EMEA", "northern ireland": "Region - EMEA",
     "germany": "Region - EMEA", "de": "Region - EMEA",
     "france": "Region - EMEA", "fr": "Region - EMEA",
     "italy": "Region - EMEA", "it": "Region - EMEA",
@@ -150,6 +158,18 @@ _REGION_BY_COUNTRY = {
     "switzerland": "Region - EMEA", "austria": "Region - EMEA", "belgium": "Region - EMEA",
     "sweden": "Region - EMEA", "norway": "Region - EMEA", "denmark": "Region - EMEA",
     "finland": "Region - EMEA", "portugal": "Region - EMEA", "greece": "Region - EMEA",
+    "luxembourg": "Region - EMEA", "estonia": "Region - EMEA", "latvia": "Region - EMEA",
+    "lithuania": "Region - EMEA", "croatia": "Region - EMEA", "slovakia": "Region - EMEA",
+    "slovenia": "Region - EMEA", "romania": "Region - EMEA", "bulgaria": "Region - EMEA",
+    "serbia": "Region - EMEA", "ukraine": "Region - EMEA", "hungary": "Region - EMEA",
+    "iceland": "Region - EMEA", "cyprus": "Region - EMEA", "malta": "Region - EMEA",
+    # Middle East / Africa -> EMEA
+    "lebanon": "Region - EMEA", "iraq": "Region - EMEA", "morocco": "Region - EMEA",
+    "tunisia": "Region - EMEA", "angola": "Region - EMEA", "mozambique": "Region - EMEA",
+    "zambia": "Region - EMEA", "zimbabwe": "Region - EMEA", "uganda": "Region - EMEA",
+    "tanzania": "Region - EMEA", "ethiopia": "Region - EMEA", "namibia": "Region - EMEA",
+    "rwanda": "Region - EMEA", "senegal": "Region - EMEA", "ivory coast": "Region - EMEA",
+    "cameroon": "Region - EMEA", "democratic republic of the congo": "Region - EMEA",
 }
 
 
@@ -292,39 +312,19 @@ PRODUCT = [
     {"key": "prod_openutilities_sub", "label": "Product - OpenUtilities Substation+", "aliases": ["OpenUtilities Substation+", "OpenUtilities Substation"]},
     {"key": "prod_staad", "label": "Product - STAAD", "aliases": ["STAAD"]},
 
-    # --- Cesium & Seequent products (client-provided list, 2026-09) ------------
-    # Bentley acquired Cesium (2024) and Seequent (subsurface/mining). Aliases are
-    # kept SPECIFIC (full product names) so bare words like "Central", "Driver",
-    # "Evo", "Works" don't false-match unrelated text via substring detection.
-    # NOTE (client rule): a brief third-party technical-section mention of one of
-    # these ("data validated in Leapfrog Geo") is IN SCOPE but should NOT add
-    # Corporate - Product & Technology — handled in classify, not here.
-    # The exact Meltwater tag STRING is still to be confirmed by the client; apply
-    # resolves against the live account tag list and reports any that don't match.
-    {"key": "prod_cesium_ion", "label": "Product - Cesium ion", "aliases": ["Cesium ion"]},
-    {"key": "prod_cesium_omniverse", "label": "Product - Cesium for NVIDIA Omniverse", "aliases": ["Cesium for NVIDIA Omniverse", "Cesium for Omniverse"]},
-    {"key": "prod_cesium_o3de", "label": "Product - Cesium for O3DE", "aliases": ["Cesium for O3DE"]},
-    {"key": "prod_cesium_unity", "label": "Product - Cesium for Unity", "aliases": ["Cesium for Unity"]},
-    {"key": "prod_cesium_unreal", "label": "Product - Cesium for Unreal", "aliases": ["Cesium for Unreal"]},
-    {"key": "prod_cesiumjs", "label": "Product - CesiumJS", "aliases": ["CesiumJS"]},
-    {"key": "prod_cesium", "label": "Product - Cesium", "aliases": ["Cesium"],
-     "note": "Generic 'Cesium' fallback — the specific Cesium products above win when named."},
-    {"key": "prod_seq_blocksync", "label": "Product - Seequent BlockSync", "aliases": ["Seequent BlockSync", "BlockSync"]},
-    {"key": "prod_seq_driver", "label": "Product - Seequent Driver", "aliases": ["Seequent Driver"]},
-    {"key": "prod_seq_geostudio", "label": "Product - Seequent GeoStudio", "aliases": ["Seequent GeoStudio", "GeoStudio"]},
-    {"key": "prod_seq_imago", "label": "Product - Seequent Imago", "aliases": ["Seequent Imago", "Seequent's Imago", "Imago system"]},
-    {"key": "prod_seq_leapfrog_edge", "label": "Product - Seequent Leapfrog Edge", "aliases": ["Seequent Leapfrog Edge", "Leapfrog Edge"]},
-    {"key": "prod_seq_leapfrog_energy", "label": "Product - Seequent Leapfrog Energy", "aliases": ["Seequent Leapfrog Energy", "Leapfrog Energy"]},
-    {"key": "prod_seq_leapfrog_geo", "label": "Product - Seequent Leapfrog Geo", "aliases": ["Seequent Leapfrog Geo", "Leapfrog Geo"]},
-    {"key": "prod_seq_leapfrog_viewer", "label": "Product - Seequent Leapfrog Viewer", "aliases": ["Seequent Leapfrog Viewer", "Leapfrog Viewer"]},
-    {"key": "prod_seq_leapfrog_works", "label": "Product - Seequent Leapfrog Works", "aliases": ["Seequent Leapfrog Works", "Leapfrog Works"]},
-    {"key": "prod_seq_mxdeposit", "label": "Product - Seequent MX Deposit", "aliases": ["Seequent MX Deposit", "MX Deposit"]},
-    {"key": "prod_seq_oasis", "label": "Product - Seequent Oasis montaj", "aliases": ["Seequent Oasis montaj", "Oasis montaj"]},
-    {"key": "prod_seq_openground", "label": "Product - Seequent OpenGround", "aliases": ["Seequent OpenGround"]},
-    {"key": "prod_seq_plaxis2d", "label": "Product - Seequent PLAXIS 2D", "aliases": ["Seequent PLAXIS 2D", "PLAXIS 2D"]},
-    {"key": "prod_seq_plaxis3d", "label": "Product - Seequent PLAXIS 3D", "aliases": ["Seequent PLAXIS 3D", "PLAXIS 3D"]},
-    {"key": "prod_seq_central", "label": "Product - Seequent Central", "aliases": ["Seequent Central"]},
-    {"key": "prod_seq_evo", "label": "Product - Seequent Evo", "aliases": ["Seequent Evo"]},
+    # --- Cesium & Seequent products: DELIBERATELY OMITTED (client-confirmed 2026-09) ---
+    # Meltwater has NO Product tags for Cesium or Seequent products, so we must never
+    # EMIT a Product tag for them (it would resolve to nothing on apply). They are
+    # therefore left out of this PRODUCT list entirely — products_in_text() won't add
+    # them and the model's Product enum won't include them.
+    # They still matter for SCOPE, not tagging: a Cesium/Seequent product described as
+    # being USED/APPLIED (e.g. "Seequent's Imago was used in…") makes the article IN
+    # SCOPE, while a bare mention in a competitor list does not. That judgment lives in
+    # rules.QA_CORRECTIONS (the LLM applies it) — it does not require a Product entry
+    # here. Client-provided name list (for reference): Cesium ion, Cesium for NVIDIA
+    # Omniverse, Cesium for O3DE, Cesium for Unity, Cesium for Unreal, CesiumJS,
+    # Seequent BlockSync, Driver, GeoStudio, Imago, Leapfrog Edge/Energy/Geo/Viewer/
+    # Works, MX Deposit, Oasis montaj, OpenGround, PLAXIS 2D, PLAXIS 3D, Central, Evo.
 ]
 
 # ---------------------------------------------------------------------------
@@ -407,7 +407,10 @@ SPOKESPEOPLE = [
     {"name": "Dorothea Manou"},
     {"name": "Marc Rietman"},
     {"name": "Jens Sauer"},
-    {"name": "Gregg Herrin", "context": "Water", "aliases": ["Greg Herrin"]},
+    # Client-confirmed (2026-09, Q9): Meltwater's tag is "Greg Herrin" (one g) —
+    # that is the canonical label to apply; "Gregg Herrin" (the protocol sheet's
+    # spelling) is kept as an alias for text detection.
+    {"name": "Greg Herrin", "context": "Water", "aliases": ["Gregg Herrin"]},
     {"name": "Slavco Velickov", "context": "Water"},
     {"name": "Dr. Tom Walski", "context": "Water"},
     # Client-confirmed (2026-09): "Dr. Thomas Krom" is a real, separate spokesperson —

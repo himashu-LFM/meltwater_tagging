@@ -52,9 +52,12 @@ NOT_IN_SCOPE_TOPICS = [
 # DETERMINISTIC — structural tagging rules enforced after the LLM answers.
 # ---------------------------------------------------------------------------
 
-# Every IN-SCOPE item must carry at least these families (the "minimum 2" rule:
-# Type of Publication + Region are always assigned; other tags added on top).
-MANDATORY_FAMILIES = ["type_of_publication", "region"]
+# Every IN-SCOPE item must carry at least these families: Type of Publication,
+# Type of Coverage, and Region are always assigned; other tags added on top. An
+# empty one is flagged for review. (Financial/IR items intentionally suppress
+# Publication + Coverage per the client rule — classify_bentley handles their
+# review check separately, so it never calls this for them.)
+MANDATORY_FAMILIES = ["type_of_publication", "type_of_coverage", "region"]
 
 # If ANY Product-family tag is assigned, also assign Corporate - Product & Technology.
 PRODUCT_IMPLIES_CORP_PRODTECH = True
@@ -106,10 +109,22 @@ QA_CORRECTIONS = [
     "A competitor story (Autodesk, Hexagon, Nemetschek, Trimble, …) that mentions Bentley only inside a 3rd-party press release → Type of Coverage - 3rd party press release + Region + Type of Publication ONLY; do NOT add Industry/Pillar/Corporate unless Bentley is a material theme.",
     "Being named in Bentley's ecosystem/partner catalog (another company chosen for the catalog) is NOT Corporate - Events/Milestones/Awards.",
     "Any Product tag generally also needs Corporate - Product & Technology.",
-    "Market reports / investor content about Bentley as a public company → Corporate - Financial / IR.",
+    "Corporate - Financial / IR applies ONLY when Bentley's mention sits in content whose PURPOSE is "
+    "financial / investment / market analysis: earnings or results (Bentley's own, or Bentley in a peer-"
+    "comparison earnings piece); stock / analyst commentary (price targets, ratings, buy/sell/hold); "
+    "investment-platform content (Simply Wall St, TipRanks, StockStory, Zacks, Investing.com naming Bentley "
+    "as a peer or comparison); Bentley's own dividend announcements; market-cap / valuation / undervalued-"
+    "stock lists; or investor-letter / fund-holding citations. It does NOT apply to: a general business/"
+    "trade article that mentions money once such as a contract award or product-launch pricing (that is "
+    "Corporate - Product & Technology or Corporate - Events); M&A such as Naviam/Cohesive (that is "
+    "Corporate - M&A, NEVER Financial/IR, even though it is financial in nature); or a company's revenue / "
+    "market-cap mentioned as background/credibility context in a non-financial story (that stays "
+    "Corporate - Events/Milestones/Awards).",
     "Substations serving customers/utility networks = Energy - Electric Utilities; assets that GENERATE energy = Energy - Power Generation.",
     "Corporate - General is a last resort: skip it if any other corporate/industry tag fits, or if the Bentley mention is brief.",
-    "Assign only ONE primary Industry tag unless the article genuinely spans multiple sectors.",
+    "Industry is OPTIONAL (client-confirmed 2026-09): assign an Industry tag only when the article has a "
+    "material industry theme; leave it EMPTY for corporate-only, pillar-only, or financial-only items. "
+    "Never assign more than one unless the piece genuinely spans two sectors equally.",
     # Client clarification (2026-09) on Seequent/Bentley product mentions in third-party stories:
     "A named Bentley/Seequent product (e.g. Leapfrog Geo, Seequent Imago, MX Deposit, PLAXIS, "
     "MicroStation) that is described as being USED or APPLIED — even briefly, even inside another "
@@ -123,6 +138,18 @@ QA_CORRECTIONS = [
 
 
 # ---------------------------------------------------------------------------
+# DETERMINISTIC — source-level Corporate - Financial / IR. Client rule (2026-09):
+# openpr.com coverage is ALWAYS tagged Corporate - Financial / IR, even when
+# Bentley is only mentioned in passing (unlike every other source, where a
+# passing mention is Not in Scope). Emitted as Region + Financial/IR only (the
+# Financial/IR suppression), with no LLM call.
+# ---------------------------------------------------------------------------
+FINANCIAL_IR_SOURCES = [
+    "openpr.com",
+]
+
+
+# ---------------------------------------------------------------------------
 # Helpers the engine calls.
 # ---------------------------------------------------------------------------
 def blocked_source(url: str = "", source: str = "") -> str | None:
@@ -132,6 +159,17 @@ def blocked_source(url: str = "", source: str = "") -> str | None:
     for dom in NOT_IN_SCOPE_DOMAINS:
         if dom in hay:
             return f"Source '{dom}' is a client-flagged not-in-scope source."
+    return None
+
+
+def is_financial_ir_source(url: str = "", source: str = "") -> str | None:
+    """Return the matched source string if the item is a source-level
+    Corporate - Financial / IR (e.g. openpr.com), else None. Deterministic —
+    runs before the LLM, like blocked_source."""
+    hay = f"{url} {source}".lower()
+    for dom in FINANCIAL_IR_SOURCES:
+        if dom in hay:
+            return dom
     return None
 
 
