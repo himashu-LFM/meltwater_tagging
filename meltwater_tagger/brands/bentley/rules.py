@@ -145,7 +145,18 @@ QA_CORRECTIONS = [
 # Financial/IR suppression), with no LLM call.
 # ---------------------------------------------------------------------------
 FINANCIAL_IR_SOURCES = [
-    "openpr.com",
+    "openpr.com",                 # client-confirmed (2026-09)
+    # Pure investment / stock-analysis platforms the client's Financial/IR rule
+    # names explicitly as Financial/IR content. They are heavily bot-walled, so a
+    # fetch just yields a paywall -> review and the item is LOST — tag by source
+    # instead (they are always financial coverage by nature). "investing.com" as a
+    # substring also covers every country subdomain (il./sa./fr./br./pl./uk. …).
+    # NOTE: inferred from the client's purpose-test list; confirm alongside openpr.
+    "investing.com",
+    "simplywall.st",
+    "tipranks.com",
+    "stockstory.org",
+    "zacks.com",
 ]
 
 

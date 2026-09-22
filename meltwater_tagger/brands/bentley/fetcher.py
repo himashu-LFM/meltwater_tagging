@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from html import unescape
 from urllib.parse import urlparse
 
@@ -190,9 +191,14 @@ def _looks_syndicated_stub(html: str, base_url: str, body: str) -> bool:
     link to ANOTHER domain. A generous upper length bound only rules out clearly
     full-length articles (where the whole story is already present, so a 'read
     more' there points at a RELATED story, not the continuation of this one)."""
-    # ~6000 chars is already a long, complete article; a real syndicated stub is
-    # shorter because its whole point is that you must click through to read on.
-    if not html or len(body or "") > 6000:
+    # A real syndicated stub shows an actual teaser (a paragraph or two) and then
+    # links out. So require a MINIMUM of real extracted body: without a lower bound,
+    # a bot-walled/empty page (body ~0) that merely has a "read more"/"source:"
+    # phrase near an external link would be mislabeled syndicated -> OUT, when it
+    # should go to review (a human opens it). Upper bound: ~6000 chars is already a
+    # complete article, where such a phrase points at a RELATED story, not a
+    # continuation.
+    if not html or len(body or "") < 150 or len(body) > 6000:
         return False
     base = _host(base_url)
     low = html.lower()
@@ -212,10 +218,43 @@ def _looks_syndicated_stub(html: str, base_url: str, body: str) -> bool:
 
 # --- retrieval ---------------------------------------------------------------
 
-def _retrieve_httpx(url: str, timeout: float = 20.0) -> tuple[str, int]:
-    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=timeout) as client:
-        resp = client.get(url)
-        return resp.text, resp.status_code
+# Per-URL httpx budget. `read` bounds the wait for EACH chunk, but a bot-wall
+# (e.g. investing.com) can TRICKLE bytes to keep the socket alive, resetting the
+# read timeout indefinitely — a real deployed run hung ~25 min on one such URL
+# until gunicorn SIGKILL'd the worker (WORKER TIMEOUT). `_HTTPX_TOTAL_CAP` is a
+# HARD wall-clock ceiling on the whole GET: we STREAM the body and stop reading
+# once the cap passes, so no single URL can ever hold the request hostage.
+_HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=10.0, pool=5.0)
+_HTTPX_TOTAL_CAP = 30.0
+_HTTPX_MAX_BYTES = 3_000_000   # stop reading once we have plenty of HTML (we parse <=600k)
+
+
+def _retrieve_httpx(url: str, timeout: float = _HTTPX_TOTAL_CAP) -> tuple[str, int]:
+    """GET the URL under a HARD overall time cap. Streams the response and stops
+    reading past `timeout` seconds (or `_HTTPX_MAX_BYTES`), returning whatever HTML
+    arrived — so a slow-trickling bot-wall times out in seconds instead of hanging
+    the whole batch/worker. A stall before any byte still raises (read timeout),
+    which the caller treats as blocked -> review."""
+    deadline = time.monotonic() + timeout
+    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=_HTTPX_TIMEOUT) as client:
+        with client.stream("GET", url) as resp:
+            status = resp.status_code
+            chunks, size = [], 0
+            for chunk in resp.iter_bytes():
+                chunks.append(chunk)
+                size += len(chunk)
+                if size >= _HTTPX_MAX_BYTES or time.monotonic() > deadline:
+                    break
+            raw = b"".join(chunks)
+            return raw.decode(resp.encoding or "utf-8", errors="replace"), status
+
+
+# Bound concurrent headless-Chromium renders across all classify worker threads
+# so a batch of bot-walled URLs can't spawn 10 browsers at once and OOM the host.
+# Each render is time-capped, so waiting for a slot stays bounded. Tunable via env.
+_PW_SEMAPHORE = threading.Semaphore(
+    max(1, int(os.environ.get("MELTWATER_PLAYWRIGHT_CONCURRENCY", "3")))
+)
 
 
 def _retrieve_playwright(url: str, timeout_ms: int = 15000) -> str:
@@ -376,7 +415,12 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
         if threading.current_thread() is threading.main_thread():
             pw_html = _retrieve_playwright(url)
         elif os.environ.get("MELTWATER_PLAYWRIGHT_SUBPROCESS", "true").lower() == "true":
-            pw_html = _retrieve_playwright_subprocess(url)
+            # Cap concurrent Chromium renders: with 10 classify workers, a batch of
+            # bot-walled URLs would otherwise launch up to 10 headless Chromium at
+            # once and OOM a small box. The semaphore serialises them a few at a
+            # time; each render is already time-capped, so the wait stays bounded.
+            with _PW_SEMAPHORE:
+                pw_html = _retrieve_playwright_subprocess(url)
         if pw_html:
             body = _extract_body(pw_html, url)
             if _body_ok(body):
