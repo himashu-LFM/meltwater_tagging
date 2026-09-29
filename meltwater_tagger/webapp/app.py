@@ -773,15 +773,26 @@ def classify():
 
     log.info("classify start: brand=%r style=%s urls=%d fetch_mode=%r model=%s (user=%s)",
               brand, "taxonomy" if is_taxonomy else "sentiment", len(urls), fetch_mode, config.MODEL, g.user.id)
+    # The client CHUNKS a large batch across several smaller requests so no single
+    # request outlives a proxy/gateway timeout (which would return an HTML error
+    # page the browser can't parse as JSON). Chunk requests set defer_run=true and
+    # mark the last one final=true.
+    is_chunk = bool(data.get("defer_run"))
     try:
         if is_taxonomy:
-            # Prefer the full uploaded export (metadata + document ids) captured
-            # by /api/extract; fall back to bare URLs (pasted / no export cached).
-            cached_rows = _BENTLEY_UPLOADS.pop(g.user.id, None)
+            # Prefer the full uploaded export (metadata + document ids) captured by
+            # /api/extract. Classify only the rows whose URL is in THIS request and
+            # PEEK (don't pop) so per-URL metadata — country/byline/document id —
+            # survives every chunk; clear the cache only on the final chunk.
+            cached_rows = _BENTLEY_UPLOADS.get(g.user.id)
             if cached_rows:
-                results = _classify_bentley_rows(cached_rows)
+                wanted = set(urls)
+                subset = [r for r in cached_rows if r.get("url") in wanted] or cached_rows
+                results = _classify_bentley_rows(subset)
             else:
                 results = _classify_bentley_urls(urls)
+            if data.get("final") or not is_chunk:
+                _BENTLEY_UPLOADS.pop(g.user.id, None)
         else:
             results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id))
     except AuthenticationError:
@@ -802,8 +813,12 @@ def classify():
     log.info("classify done: brand=%r total=%d tagged=%d (user=%s)",
               brand, len(results), applied, g.user.id)
 
+    # Don't save a run per chunk (it would fragment history into many partial
+    # runs). Chunked runs are simply not written to history for now; a single
+    # (non-chunked) request still saves normally. TODO: aggregate chunks into one
+    # run if/when history is needed for large chunked batches.
     run_record = None
-    if db.is_configured():
+    if not is_chunk and db.is_configured():
         try:
             run_record = db.save_run(g.user.id, brand, results, status="classified")
             log.info("run saved to history: id=%s (user=%s)", run_record.get("id"), g.user.id)
