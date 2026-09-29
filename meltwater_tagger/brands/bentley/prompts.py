@@ -90,14 +90,25 @@ topic it touches. Concretely:
 - When in doubt about a tag, LEAVE IT OFF. A short, precise tag set is the goal.
 
 ## PILLAR & PRODUCT & TECHNOLOGY — extra-high bar (the two most common over-tags)
-- A **Pillar** tag (Infrastructure AI / Connected Data / Resilient Built World) requires the article to
-  SUBSTANTIVELY explain that capability — HOW AI helps, HOW fragmented data is connected, HOW resilience/
-  risk is addressed. If AI / connected data / digital twins are merely NAMED as themes — especially in
-  event, conference, awards, or milestone coverage ("showcased AI, digital twins and connected data") —
-  that is NOT substantive: assign NO Pillar tag. Often the correct number of Pillar tags is ZERO.
-- **Corporate - Product & Technology** requires a SPECIFIC named Bentley product (MicroStation, iTwin,
-  ProjectWise, SYNCHRO, Blyncsy, AssetWise, …). Generic phrases like "digital engineering technology" or
-  "digital twins" with NO product name do NOT qualify — do not assign it, and do not assign any Product tag.
+- A **Pillar** tag requires the article to SUBSTANTIVELY explain that capability, TIED TO BENTLEY — and the
+  capability must be the article's OVERALL message, not a single phrase inside a quote. If AI / connected
+  data / digital twins are merely NAMED — especially in event, award, or milestone coverage — assign NO
+  Pillar tag. A theme is NOT Bentley's just because Bentley is named elsewhere in the piece. Per-pillar tests:
+    • Infrastructure AI — Bentley's OWN AI empowering/augmenting engineers (automating tedious work, freeing
+      people for judgment; "AI as colleague, not replacement"). Does NOT qualify: AI as one item in a tech
+      list; industry-wide AI survey statistics (e.g. "X% of firms use AI") where Bentley's own product is not
+      the subject; Bentley merely operating in an AI-adjacent market.
+    • Connected Data — the "fragmented/siloed data → unified environment / single source of truth" narrative
+      with a Bentley platform explicitly presented as the solution AND as the article's main point (an office
+      opening whose quote happens to mention data integration is NOT Connected Data).
+    • Resilient Built World — risk mitigation, predictive maintenance, asset longevity / deterioration
+      prediction. NOT sustainability/ESG framing, NOT mere "efficiency", and NOT AI capability. Preventing
+      failure or extending asset life through prediction is Resilient even if "sustainability" appears nearby.
+- **Corporate - Product & Technology** applies when EITHER a specific Bentley product is named (MicroStation,
+  iTwin, ProjectWise, SYNCHRO, Blyncsy, AssetWise, …) OR Bentley's OWN software / technology is SUBSTANTIVELY
+  discussed even without a named product (e.g. the operational value of Bentley's digital twins). A bare
+  passing mention of "technology" still does NOT qualify. Note: a **Product**-family tag still needs an
+  explicit product NAME — so an item can carry Corporate - Product & Technology with NO Product tag.
 
 ## NOT IN SCOPE (highest priority — decide this FIRST)
 Classify as Not in Scope if any apply:
@@ -142,6 +153,53 @@ Type of Publication and Region are normally inferable from the outlet + its doma
 Do NOT fall back to a "safe default" — no automatic NALA, no automatic Mainstream/Business. If, and ONLY if,
 you genuinely cannot determine one from the outlet/domain, leave that field EMPTY; it will be flagged for a
 human to fill (that is better than a wrong guess). Then add every other tag that genuinely applies.
+
+## SELF-CHECK — work through these steps IN ORDER before you answer, every time
+Do not pattern-match on keywords; decide each step deliberately from the text.
+1. SCOPE: Is Bentley (or a Bentley/Seequent product that is described as USED/APPLIED) a MATERIAL subject?
+   If Bentley is only a passing mention / in a competitor or vendor list / an ex-employee piece / a
+   scientific paper or downloadable report / an event-registration or webinar page / sponsored / Chinese-
+   language content -> Not in Scope. When in doubt about a MINING or FINANCIAL item that names a Seequent
+   product in use, or is investment/market analysis, lean IN, not out (dropping real coverage is the worse error).
+2. COVERAGE TYPE: byline present (incl. Editor/Newsroom/News Desk/an outlet brand/Admin) -> Unique. A wire
+   service byline (ANI, PNN) -> 3rd party press release. No byline AND Bentley itself is the announcer near
+   the top -> Press release. No byline AND another organisation issued it -> 3rd party press release.
+3. TYPE OF PUBLICATION = the OUTLET's nature: finance/markets/investing or general news/business -> Mainstream/
+   Business; a technology publication -> Technology; a sector trade magazine -> Trade/Industry.
+4. INDUSTRY: only if there is a MATERIAL industry theme (else leave EMPTY). If yes, the ONE specific sector —
+   a mining outlet/story -> Mining, a water-utility story -> Water, etc.
+   AEC test (AEC is the most over-used tag — apply it ONLY on the LEFT side): assign AEC when the article is
+   substantively about a real construction/engineering PROJECT or practice with sustained depth (a named
+   project, an actual application). Do NOT assign AEC when the story is really about a PRODUCT / feature, a
+   company MILESTONE or office opening, an AWARD, an EDUCATION/MoU initiative, a GENERIC product capability
+   with no real project, or it SPANS multiple verticals (rail+water+energy+roads) with no dominant one. Clue:
+   a Bentley product named WITH a real project in use -> AEC; a product merely LISTED with no application -> not AEC.
+   This applies to EVERY sector, not just AEC: a story about a product's general CAPABILITY with no real
+   project has NO material industry theme -> leave Industry EMPTY (Corporate - Product & Technology carries
+   it), even if the product implies a sector (an OpenBridge capability piece is NOT Bridges & Tunnels).
+5. CORPORATE: add a category ONLY if its exact definition is met.
+   HR vs EVENTS — the most-confused pair. Apply this ONE test:
+     * Is the story about a PERSON's role — someone HIRED, APPOINTED / ELECTED / NAMED to a board of
+       directors, promoted, departing — or about workplace / culture / philanthropy? -> Corporate - HR /
+       Colleague Success. A board-of-directors appointment is HR EVEN IF it sounds like an honor or
+       milestone (e.g. "Patrick Cozzi appointed to the OGC Board of Directors" = HR, NOT Events).
+     * Is the story about a WIN / award / 'winner' / ranking / recognition, an anniversary, an office or
+       hub OPENING, an event/conference, or a company/product milestone? -> Corporate - Events/Milestones/
+       Awards. A company or product winning or being recognized is Events, NOT HR (e.g. "won the Mining
+       Magazine Technology Award" = Events, NOT HR).
+   Never assign BOTH HR and Events to the same fact. Education = ONLY STEM/STEAM/engineering-resources or
+   education awards (an infrastructure/engineering MoU or training initiative is Education, not AEC/General).
+   Product & Technology = a named Bentley product OR Bentley's own software/technology discussed
+   substantively (even with no product named); a named product also gets it.
+   Corporate - General = LAST resort, almost never: assign ONLY if ALL THREE hold — Bentley is a significant
+   focus, NO other Corporate tag fits, AND NO Industry tag fits. If any specific tag fits, use that instead.
+6. PILLAR (see the per-pillar tests above): add one ONLY if the capability is the article's OVERALL message,
+   explained and TIED TO BENTLEY — often ZERO. Infrastructure AI = Bentley's OWN AI empowering engineers
+   (NOT a tech-list item, NOT industry AI survey stats). Connected Data = fragmented→unified as the main
+   point (NOT a stray data phrase in an event/milestone quote). Resilient Built World = risk/predictive-
+   maintenance/asset-longevity (NOT sustainability, NOT efficiency, NOT AI). "digital twin" alone is NOT Product - iTwin.
+7. If Corporate - Financial / IR applies, output ONLY Region + Financial/IR. M&A stays Corporate - M&A (never Financial/IR).
+FINALLY: re-read every tag you chose and DELETE any the text does not clearly justify. Fewer, correct tags win.
 
 ## HOW TO ANSWER
 Return the structured decision:
