@@ -82,6 +82,12 @@ def _detect_columns(df: pd.DataFrame) -> dict:
         matches = _matching_cols(df, FIELD_HINTS[field], taken)
         cols[field] = matches
         taken.update(matches)
+    # The 'author' hint substring-matches "Twitter Authority" (a social-reach
+    # metric, NOT a byline). A numeric authority score read as a byline would
+    # wrongly force Type of Coverage = Unique, so drop any authority/twitter
+    # column from the byline field.
+    cols["byline"] = [c for c in cols["byline"]
+                      if not any(x in c.lower() for x in ("authorit", "twitter"))]
     return cols
 
 
