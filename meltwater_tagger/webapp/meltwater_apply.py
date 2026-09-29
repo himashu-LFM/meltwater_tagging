@@ -1553,6 +1553,17 @@ BFF_ENQUEUE_URL = "https://bff.fhaicoreapps.com/prd-flux-content-stream-bff/tags
 # every target. Walking stops early as soon as a page adds nothing new or all
 # targets are found; this is only the runaway guard (40 x 25 = ~1000 mentions).
 MSEARCH_MAX_PAGES = int(os.environ.get("MELTWATER_MSEARCH_MAX_PAGES", "40"))
+# Never re-tag a mention that already carries ANY tag. Brands share one
+# Meltwater account, so the same Reddit post appears in several brand searches;
+# leaving tagged mentions alone protects another brand's tags and makes a
+# repeat run of the same export nearly free. Set false to restore re-tagging.
+SKIP_IF_TAGGED = os.environ.get("MELTWATER_SKIP_IF_TAGGED", "true").lower() == "true"
+# Saved searches default to a ROLLING "Last 7 days" window, so a mention that
+# was in the export a few days ago has since fallen out of the search and comes
+# back "unreached" even though nothing is wrong. Widen the window right after
+# the search opens. Must match a preset label in Meltwater's date dropdown
+# exactly; the original range is NOT restored afterwards.
+DATE_RANGE_LABEL = os.environ.get("MELTWATER_DATE_RANGE", "Last 14 days")
 _API_BASE_HEADERS = {
     "accept": "*/*",
     "accept-language": "en-US",
@@ -1628,11 +1639,17 @@ def _expand_msearch_body(body_str: str, limit: int = 500) -> str:
 
 
 def _hits_from_msearch(text: str) -> dict:
-    """canonical-permalink-key -> {documentId, matchSentence, keywords}.
+    """canonical-permalink-key -> {documentId, matchSentence, keywords, tags}.
 
     Robust to response shape: recursively walks the whole response and collects
     EVERY object that has both a documentId and its own source url (flat feed
     hits, gyda-wrapped hits, grouped members, and AI-card citations all qualify).
+
+    `tags` is the document's CURRENT tag list in this Meltwater account (e.g.
+    ["Neutral - ConnectWise"]). Brands share one account, so the same Reddit
+    post shows up in several brand searches — this is what lets the apply step
+    leave an already-tagged mention alone instead of writing over another
+    brand's work.
     """
     out = {}
 
@@ -1643,10 +1660,12 @@ def _hits_from_msearch(text: str) -> dict:
             if did and isinstance(url, str) and url.startswith("http"):
                 key = norm_permalink(url)
                 if key and key not in out:
+                    tags = node.get("tags")
                     out[key] = {
                         "documentId": did,
                         "matchSentence": node.get("matchSentence") or "",
                         "keywords": node.get("keywords") or [],
+                        "tags": [t for t in (tags or []) if isinstance(t, str)],
                     }
             for v in node.values():
                 walk(v)
@@ -1796,7 +1815,7 @@ async def _tag_via_api_http(token: str, msearches: list[dict], to_apply: dict) -
     flow can call it after its account switch + Advanced-search navigation,
     instead of scraping mention cards (Meltwater renders the saved search as an
     analytics dashboard for some accounts, where no cards exist at all)."""
-    applied, failed, unreached = [], [], []
+    applied, failed, unreached, skipped_already = [], [], [], []
     async with httpx.AsyncClient(timeout=60) as c:
         # 1) tags -> name -> id
         tr = await c.get(BFF_TAGS_URL, headers={**_API_BASE_HEADERS, "authorization": token})
@@ -1871,12 +1890,16 @@ async def _tag_via_api_http(token: str, msearches: list[dict], to_apply: dict) -
             return {"ok": False, "message": "msearch returned no documents",
                     "applied": [], "failed": [], "unreached": [], "_fallback": True}
 
-        await _do_enqueue(c, token, to_apply, docmap, name_to_id, applied, failed, unreached)
+        await _do_enqueue(c, token, to_apply, docmap, name_to_id,
+                          applied, failed, unreached, skipped_already)
 
-    log.info("apply-api: done applied=%d failed=%d unreached=%d",
-              len(applied), len(failed), len(unreached))
-    return {"ok": True, "message": f"Applied {len(applied)} tag(s) via API.",
-            "applied": applied, "skipped_already": [], "failed": failed, "unreached": unreached}
+    log.info("apply-api: done applied=%d already_tagged=%d failed=%d unreached=%d",
+              len(applied), len(skipped_already), len(failed), len(unreached))
+    return {"ok": True,
+            "message": (f"Applied {len(applied)} tag(s) via API"
+                        + (f"; left {len(skipped_already)} already-tagged mention(s) untouched." if skipped_already else ".")),
+            "applied": applied, "skipped_already": skipped_already,
+            "failed": failed, "unreached": unreached}
 
 
 async def _replay_once(c, url, headers, body, i, total, docmap, targets_left, page=None):
@@ -1905,7 +1928,8 @@ async def _replay_once(c, url, headers, body, i, total, docmap, targets_left, pa
         return 0
 
 
-async def _do_enqueue(c, token, to_apply, docmap, name_to_id, applied, failed, unreached):
+async def _do_enqueue(c, token, to_apply, docmap, name_to_id,
+                      applied, failed, unreached, skipped_already):
     """Enqueue a tag per target — EXACT match only.
 
     No post-id fallback: matching by post-id alone tagged the parent (oxb9six)
@@ -1915,12 +1939,44 @@ async def _do_enqueue(c, token, to_apply, docmap, name_to_id, applied, failed, u
     for key, val in to_apply.items():
         hit = docmap.get(key)
         if not hit:
+            # Name it. "unreached=1" alone leaves you diffing an export against
+            # the UI to work out which mention the search never returned.
+            log.warning("apply-api: NOT IN SEARCH — %s", val["orig"])
             unreached.append(val["orig"])
             continue
+        # Leave a mention that ALREADY carries a tag completely alone.
+        # All brands tag inside the same Meltwater account, so one Reddit post
+        # appears in several brand searches. enqueue-document-tagging is sent
+        # with "tagIds": [id] — whether that ADDS to or REPLACES the existing
+        # tags is not something we can tell from the API, so re-tagging risks
+        # silently wiping another brand's work. Skipping is the safe rule, and
+        # it also makes a re-run of the same export nearly instant.
+        existing = hit.get("tags") or []
+        if SKIP_IF_TAGGED and existing:
+            log.info("apply-api: already tagged %s -> %s (leaving it alone)",
+                     val["orig"], ", ".join(existing))
+            skipped_already.append({"permalink": val["orig"], "tag": ", ".join(existing)})
+            continue
         tag_name = normalize_tag(val["tag"])
+        # Exact first, then case-insensitive. A brand configured as "HUNTRESS"
+        # must still match Meltwater's "Positive - Huntress" — 71 mentions
+        # failed on nothing but that capitalisation. Resolve to the account's
+        # own spelling so the tag applied is the one that already exists rather
+        # than a near-duplicate.
         tag_id = name_to_id.get(tag_name) or name_to_id.get(val["tag"])
         if not tag_id:
-            log.warning("apply-api: tag %r not found in account tag list", tag_name)
+            for want in (tag_name, val["tag"]):
+                lower = (want or "").strip().lower()
+                for real, rid in name_to_id.items():
+                    if real.strip().lower() == lower:
+                        log.info("apply-api: tag %r matched %r (case-insensitive)", want, real)
+                        tag_id, tag_name = rid, real
+                        break
+                if tag_id:
+                    break
+        if not tag_id:
+            log.warning("apply-api: tag %r not found in account tag list. Available: %s",
+                        tag_name, sorted(name_to_id)[:30])
             failed.append({"permalink": val["orig"], "tag": val["tag"]})
             continue
         body = json.dumps({
@@ -1939,6 +1995,121 @@ async def _do_enqueue(c, token, to_apply, docmap, name_to_id, applied, failed, u
         else:
             log.warning("apply-api: enqueue failed for %s (status=%s)", val["orig"], er.status_code)
             failed.append({"permalink": val["orig"], "tag": val["tag"]})
+
+
+async def set_date_range(page, label: str) -> bool:
+    """Open the results page's date-range dropdown and pick `label`.
+
+    The saved search's window is rolling ("Last 7 days"), so mentions from an
+    export taken a few days earlier have already aged out and resolve as
+    "unreached". Widening the window here is what lets an older export still
+    tag. Returns True only when the control visibly reads the new label.
+
+    Never fatal: a failure here just leaves the search on its own range, and
+    the run continues (some targets may then be out of window)."""
+    log.info("apply: DATE RANGE — setting the search window to %r", label)
+    try:
+        # There is no control literally named "date range" — the button simply
+        # shows the CURRENT window ("Last 7 days") beside a calendar icon. So
+        # match on the preset labels themselves; that survives the icon being a
+        # font ligature today ("date_range" leaks into innerText) or an <svg>
+        # tomorrow. An XPath contains() match is useless here — it also matches
+        # <html>/<body> and every wrapper div, and clicking those does nothing,
+        # which is exactly why the menu never opened.
+        handle = await page.evaluate_handle("""() => {
+            const PRESETS = ['Today','Yesterday','This week','Last 7 days','Last 14 days',
+                             'This month','Last 30 days','This quarter','Last 90 days',
+                             'This year','Last year'];
+            // strip icon ligatures so the label is all that's left
+            const clean = t => (t || '')
+                .replace(/date_range|arrow_drop_down|calendar_today|expand_more/g, '')
+                .replace(/\\s+/g, ' ').trim();
+            const hits = [...document.querySelectorAll('*')].filter(e => {
+                if (!PRESETS.includes(clean(e.innerText))) return false;
+                const r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 && r.top < 300;  // toolbar row
+            });
+            hits.sort((a, b) => (a.innerText||'').length - (b.innerText||'').length);
+            const el = hits[0];
+            return el ? (el.closest('button,[role="button"]') || el) : null;
+        }""")
+        btn = handle.as_element() if handle else None
+        if not btn:
+            log.warning("apply: DATE RANGE — could not find the date control; leaving the "
+                        "search on its own window")
+            return False
+        log.info("apply: DATE RANGE — found the date control (reads %r)",
+                 (await btn.inner_text() or "").replace("\n", " ").strip())
+
+        current = (await btn.inner_text() or "").replace("\n", " ").strip()
+        if label.lower() in current.lower():
+            log.info("apply: DATE RANGE — already set to %r ✓", label)
+            return True
+
+        await btn.click()
+        await page.wait_for_timeout(1200)
+
+        # Confirm the menu actually opened before hunting for the preset —
+        # otherwise a failed click looks identical to a missing label.
+        opened = False
+        for probe in ("Custom...", "Today", "This week"):
+            try:
+                if await page.get_by_text(probe, exact=True).last.is_visible():
+                    opened = True
+                    break
+            except Exception:
+                continue
+        if not opened:
+            log.warning("apply: DATE RANGE — the date menu did not open; leaving the search "
+                        "on its own window")
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+
+        # Pick the preset by its exact visible text.
+        opt = None
+        try:
+            opt = page.get_by_text(label, exact=True).last
+            await opt.wait_for(state="visible", timeout=8000)
+        except Exception:
+            opt = None
+        if not opt:
+            # Menu IS open, so this really is a label mismatch — dump only the
+            # menu's own entries, not the whole page chrome.
+            try:
+                choices = await page.evaluate("""() => {
+                    const seen = new Set();
+                    return [...document.querySelectorAll('li,[role="option"],[role="menuitem"],div')]
+                      .map(e => (e.innerText||'').trim().split('\\n')[0])
+                      .filter(t => /^(Today|Yesterday|This |Last |Custom)/.test(t) && t.length < 40)
+                      .filter(t => !seen.has(t) && seen.add(t));
+                }""")
+                log.warning("apply: DATE RANGE — %r not in the menu. Presets on offer: %s",
+                            label, choices)
+            except Exception:
+                log.warning("apply: DATE RANGE — %r not found in the menu", label)
+            await page.keyboard.press("Escape")
+            return False
+
+        await opt.click()
+        await page.wait_for_timeout(2500)   # results re-query on change
+
+        after = ""
+        try:
+            after = (await btn.inner_text() or "").replace("\n", " ").strip()
+        except Exception:
+            pass
+        if label.lower() in (after or "").lower():
+            log.info("apply: DATE RANGE — VERIFIED set to %r ✓", label)
+            return True
+        log.warning("apply: DATE RANGE — clicked %r but the control still reads %r", label, after)
+        return False
+    except Exception as e:
+        log.warning("apply: DATE RANGE — could not set the window (%s: %s); continuing",
+                    type(e).__name__, e)
+        return False
 
 
 async def switch_meltwater_account(page, account_hint: str) -> bool:
@@ -2552,6 +2723,35 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
                            await _diag(page))
             else:
                 log.info("apply: POST-LOGIN STEP — topic feed loaded, now on %s", page.url)
+
+        # Widen the search window BEFORE capturing msearch. The saved search is
+        # on a rolling "Last 7 days", so an export taken earlier in the week has
+        # mentions that already fell out of it. Changing the range makes the app
+        # re-run its query, so drop the batches captured under the old window —
+        # otherwise we'd replay the narrow query and miss the same mentions.
+        if DATE_RANGE_LABEL:
+            if await set_date_range(page, DATE_RANGE_LABEL):
+                api_cap["msearches"].clear()
+                api_cap["got"] = asyncio.Event()
+                log.info("apply: DATE RANGE — cleared the pre-change msearch batches; "
+                         "waiting for the re-query on the wider window")
+                # Picking a preset usually re-queries on its own. If it doesn't,
+                # press the page's own Search button rather than sit here until
+                # the capture times out and we fall back to the card scanner.
+                try:
+                    await asyncio.wait_for(api_cap["got"].wait(), timeout=12)
+                except Exception:
+                    log.info("apply: DATE RANGE — no re-query yet; clicking Search")
+                    for sel in ('button:has-text("Search")',
+                                '[role="button"]:has-text("Search")',
+                                'xpath=//button[normalize-space(.)="Search"]'):
+                        try:
+                            el = await page.query_selector(sel)
+                            if el and await el.is_visible():
+                                await el.click()
+                                break
+                        except Exception:
+                            continue
 
         # Prefer tagging over the internal HTTP API now that we're on the right
         # account and the brand's Reddit search is open. The page's own msearch
