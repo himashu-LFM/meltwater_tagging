@@ -55,6 +55,14 @@ _BOILER = ("privacy policy", "cookie policy", "we value your privacy",
 
 # --- extraction helpers ------------------------------------------------------
 
+# Parse in an isolated, killable process by default so a page whose DOM makes
+# trafilatura/lxml spin at 100% CPU is bounded (it can't be killed in-thread, and
+# it holds the GIL). Generous timeout: a normal parse is <1s, so this only ever
+# fires on a genuine hang, which then yields no body -> the item goes to review.
+_PARSE_SUBPROCESS = os.environ.get("MELTWATER_PARSE_SUBPROCESS", "true").lower() == "true"
+_PARSE_TIMEOUT_S = int(os.environ.get("MELTWATER_PARSE_TIMEOUT", "30"))
+
+
 def _extract_body(html: str, url: str) -> str:
     # trafilatura parsing a huge DOM (heavy JS sites can be 1MB+) is slow; the
     # article body is near the top, so cap the HTML we parse to stay fast.
@@ -62,6 +70,61 @@ def _extract_body(html: str, url: str) -> str:
         html[:600000], url=url, include_comments=False, include_tables=False, favor_precision=True,
     )
     return (text or "").strip()
+
+
+def _extract_body_isolated(html: str, url: str) -> str:
+    """Same extraction as _extract_body, but run in a separate process killed on a
+    hard timeout. Falls back to in-process when disabled. On timeout/failure it
+    returns '' — the page then looks unreadable and is routed to review, never
+    silently dropped. On a normal page the output equals _extract_body exactly."""
+    if not _PARSE_SUBPROCESS or not html:
+        return _extract_body(html, url)
+    proj = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    fd_in, tin = tempfile.mkstemp(prefix="mw_parse_in_", suffix=".html")
+    fd_out, tout = tempfile.mkstemp(prefix="mw_parse_out_", suffix=".txt")
+    os.close(fd_out)
+    try:
+        with os.fdopen(fd_in, "w", encoding="utf-8", errors="replace") as f:
+            f.write(html[:600000])
+    except Exception:
+        _safe_unlink(tin); _safe_unlink(tout)
+        return _extract_body(html, url)   # couldn't stage input -> in-process
+    popen_kwargs = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "brands.bentley.parse_body", tin, tout, url or ""],
+            cwd=proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **popen_kwargs,
+        )
+    except Exception:
+        _safe_unlink(tin); _safe_unlink(tout)
+        return _extract_body(html, url)
+    try:
+        proc.wait(timeout=_PARSE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        _safe_unlink(tin); _safe_unlink(tout)
+        return ""   # genuine hang -> no body -> item goes to review
+    except Exception:
+        _kill_process_tree(proc)
+        _safe_unlink(tin); _safe_unlink(tout)
+        return ""
+    text = ""
+    try:
+        with open(tout, encoding="utf-8", errors="replace") as f:
+            text = f.read().strip()
+    except Exception:
+        text = ""
+    finally:
+        _safe_unlink(tin); _safe_unlink(tout)
+    return text
 
 
 def _body_ok(text: str) -> bool:
@@ -95,16 +158,47 @@ def _extract_meta(html: str) -> str:
     return "\n\n".join(p for p in (headline, desc) if p)
 
 
+def _looks_like_name(s: str) -> bool:
+    """A plausible person/desk byline: 2-80 chars, not an @handle or URL, not a
+    generic non-name token. Keeps a false author string from forcing 'Unique'."""
+    s = (s or "").strip()
+    if not (2 <= len(s) <= 80):
+        return False
+    if s.startswith("@") or "http" in s.lower() or "/" in s:
+        return False
+    if s.lower() in {"admin", "administrator", "author", "staff", "team", "editor", "unknown", "n/a", "-"}:
+        # these ARE valid Unique bylines per the client, but return them via the
+        # caller; here we only screen out obvious junk — keep them.
+        return True
+    return True
+
+
 def _extract_author(html: str) -> str:
-    """Best-effort author/byline from meta tags or JSON-LD (general)."""
-    a = _meta(html, "author", "name") or _meta(html, "article:author", "property")
-    if a and len(a) < 80:
-        return a
+    """Best-effort author/byline from structured metadata / JSON-LD (general).
+    Ordered most-reliable first; every hit is screened by _looks_like_name so a
+    stray value can't wrongly flip coverage to Unique."""
+    # 1) standard + publisher meta tags (all structured, low false-positive)
+    for prop, attr in (("author", "name"), ("article:author", "property"),
+                       ("parsely-author", "name"), ("sailthru.author", "name"),
+                       ("dc.creator", "name"), ("dcterms.creator", "name"),
+                       ("citation_author", "name")):
+        a = unescape(_meta(html, prop, attr) or "").strip()
+        if a and _looks_like_name(a):
+            return a
+    # 2) JSON-LD author (object form, then string form)
     for pat in (r'"author"\s*:\s*\{[^}]*?"name"\s*:\s*"([^"]{2,80})"',
                 r'"author"\s*:\s*"([^"]{2,80})"'):
         m = re.search(pat, html)
         if m:
-            return unescape(m.group(1)).strip()
+            a = unescape(m.group(1)).strip()
+            if _looks_like_name(a):
+                return a
+    # 3) rel="author" link text (common CMS pattern)
+    m = re.search(r'<a[^>]*rel=["\']author["\'][^>]*>([^<]{2,80})</a>', html, re.I)
+    if m:
+        a = unescape(m.group(1)).strip()
+        if _looks_like_name(a):
+            return a
     return ""
 
 
@@ -291,7 +385,22 @@ def _kill_process_tree(proc) -> None:
             pass
 
 
-def _retrieve_playwright_subprocess(url: str, timeout_s: int = 25) -> str:
+# Playwright render timeout (env-tunable). Lowered 25 -> 20s: a render that takes
+# longer than this almost always fails anyway, so the extra wait is wasted. Kept
+# generous enough that a slow-but-successful render still completes.
+_PW_TIMEOUT_S = int(os.environ.get("MELTWATER_PLAYWRIGHT_TIMEOUT", "20"))
+
+# Domains where Playwright ALSO fails (hard bot-walls) -> skip it and go straight
+# to review, saving the wasted render. EMPTY by default = no behavior change; add
+# domains only with evidence that Playwright cannot read them (same review outcome,
+# just faster). Comma-separated in MELTWATER_SKIP_PLAYWRIGHT_DOMAINS.
+_SKIP_PW_DOMAINS = {d.strip().lower() for d in
+                    os.environ.get("MELTWATER_SKIP_PLAYWRIGHT_DOMAINS", "").split(",") if d.strip()}
+
+
+def _retrieve_playwright_subprocess(url: str, timeout_s: int = None) -> str:
+    if timeout_s is None:
+        timeout_s = _PW_TIMEOUT_S
     """Render via a separate Python process (its own main thread) so it works
     from a webapp request worker thread WITHOUT hanging. Windows-/thread-safe.
 
@@ -378,7 +487,7 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
         httpx_html, status = _retrieve_httpx(url)
         out["status"] = status
         if status < 400 and httpx_html:
-            body = _extract_body(httpx_html, url)
+            body = _extract_body_isolated(httpx_html, url)
             # Syndicated stub (short teaser + read-more/source link to another
             # site) => flag it and stop; the caller marks it Not In Scope. Checked
             # only at _depth 0 so a followed-source fetch isn't itself flagged.
@@ -411,6 +520,10 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
     #  a stuck child can no longer block the caller. Set
     #  MELTWATER_PLAYWRIGHT_SUBPROCESS=false to fall back to skip->review.
     pw_html = None
+    # Skip Playwright for domains where it also fails (hard bot-walls) — go straight
+    # to review instead of burning a render. Empty list by default = no change.
+    if _SKIP_PW_DOMAINS and _host(url) in _SKIP_PW_DOMAINS:
+        return out
     try:
         if threading.current_thread() is threading.main_thread():
             pw_html = _retrieve_playwright(url)
@@ -422,7 +535,7 @@ def fetch_article(url: str, _depth: int = 0) -> dict:
             with _PW_SEMAPHORE:
                 pw_html = _retrieve_playwright_subprocess(url)
         if pw_html:
-            body = _extract_body(pw_html, url)
+            body = _extract_body_isolated(pw_html, url)
             if _body_ok(body):
                 _finish(body, "playwright", "body", pw_html)
                 return out
