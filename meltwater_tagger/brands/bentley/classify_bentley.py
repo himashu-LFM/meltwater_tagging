@@ -345,6 +345,19 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
                       text_source="reporting-exclusion")
         return result
 
+    # 1b-i) client rule (2026-09, confirmed): a regional / localized edition (a
+    #       country-code subdomain, e.g. mx.investing.com, uk.finance.yahoo.com) is
+    #       a translated duplicate — Not in Scope. Runs BEFORE the financial-source
+    #       rule so a regional investing.com edition is dropped, while the main
+    #       investing.com still gets Financial/IR.
+    if rules.is_regional_edition(url):
+        result.update(scope="out", tags=["Not in scope"],
+                      tags_by_family={"type_of_coverage": ["Not in scope"]},
+                      reason="Regional / localized edition (country-code subdomain) — regional "
+                             "articles are not tracked.",
+                      text_source="regional-edition")
+        return result
+
     # 1b-ii) A job posting / careers listing is not media coverage -> Not in Scope.
     #        Deterministic and URL-based, so a bot-walled careers page (which would
     #        otherwise go to review) is correctly dropped without a fetch.
