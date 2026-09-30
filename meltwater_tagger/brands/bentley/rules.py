@@ -134,6 +134,12 @@ QA_CORRECTIONS = [
     "Corporate - M&A, NEVER Financial/IR, even though it is financial in nature); or a company's revenue / "
     "market-cap mentioned as background/credibility context in a non-financial story (that stays "
     "Corporate - Events/Milestones/Awards).",
+    "SCOPE via finances (client-confirmed 2026-09): if Bentley Systems' OWN finances are discussed — its "
+    "stock/share price, valuation, an analyst rating or coverage of 'Bentley Systems (NASDAQ: BSY)', "
+    "earnings, or a 'is it time to buy' framing — the article is IN SCOPE and gets Corporate - Financial / "
+    "IR, from ANY source, even if the Bentley mention is short. That is a MATERIAL finance discussion, NOT a "
+    "passing mention. Only a bare name-in-a-vendor/competitor-list with NO finance discussion is a passing "
+    "mention -> Not in Scope (the sole exception being openpr, which is always Financial/IR).",
     "Substations serving customers/utility networks = Energy - Electric Utilities; assets that GENERATE energy = Energy - Power Generation.",
     "Corporate - General is a last resort: skip it if any other corporate/industry tag fits, or if the Bentley mention is brief.",
     # Repeatedly flagged: the model mislabels awards/event stories as HR. Corporate "
@@ -238,6 +244,60 @@ def is_jobs_page(url: str = "") -> bool:
     host = (p.netloc or "").lower().replace("www.", "")
     path = (p.path or "").lower()
     return host.startswith(_JOBS_HOST_PREFIXES) or any(m in path for m in _JOBS_PATH_MARKERS)
+
+
+# Regional / localized editions (e.g. mx.investing.com, uk.finance.yahoo.com) are
+# translated duplicates of a story republished across a global site's per-country
+# editions. Client rule (2026-09, confirmed): ALL regional articles are Not in
+# Scope. Detected SOLIDLY by a DNS SUBDOMAIN LABEL that is an ISO country code —
+# not a substring (so "brand.com" won't match "br") and NOT the TLD (so a genuine
+# national outlet like it-boltwise.de is left alone). Runs before the financial-
+# source rule so mx.investing.com is dropped while the main investing.com still
+# gets Financial/IR.
+_COUNTRY_CODES = set(
+    "ad ae af ag al am ao ar at au aw az ba bb bd be bf bg bh bi bj bn bo br bs bt "
+    "bw by bz ca cd cf cg ch ci cl cm cn co cr cu cv cy cz de dj dk dm do dz ec ee "
+    "eg er es et fi fj fr ga gb ge gh gm gn gq gr gt gw gy hk hn hr ht hu id ie il in "
+    "iq ir is it jm jo jp ke kg kh kr kw kz la lb lk lr ls lt lu lv ly ma mc md mg "
+    "mk ml mn mo mr mt mu mv mw mx my mz na ne ng ni nl no np nz om pa pe pg ph pk "
+    "pl pt py qa ro rs ru rw sa sc sd se sg si sk sl sn sr sv sy sz td tg th tj tn "
+    "tr tt tw tz ua ug uk uy uz ve vn ye za zm zw".split()
+)
+# Codes deliberately EXCLUDED because they are far more often generic tech/word
+# subdomains than a country edition (would false-flag): ai, tv, io, ad, ms, fm, me.
+_COUNTRY_CODES -= {"ai", "tv", "io", "ms", "fm", "me"}
+
+
+# A LOCALE code (language-country, e.g. en-gb, es-mx, fr-fr, pt-br, zh-cn) is an
+# unambiguous regional-edition marker wherever it appears — a subdomain label or a
+# path segment. Safe (nothing else has this exact shape). Deliberately NOT matched:
+# a BARE country code in a PATH segment (e.g. /it/ = IT department, not Italy — a
+# real false positive) and country ccTLDs (a genuine national outlet like
+# it-boltwise.de is tracked, not an edition).
+_LOCALE_RE = re.compile(r"^[a-z]{2}-[a-z]{2}$")
+
+
+def is_regional_edition(url: str = "") -> bool:
+    """True if the URL is a regional/localized edition. Pattern-based, so it applies
+    to ANY site, not a hardcoded list:
+      • a subdomain LABEL that is an ISO country code (mx.investing.com, uk.finance.yahoo.com), OR
+      • a LOCALE code (xx-yy) as a subdomain label OR a path segment (es-mx.site.com, site.com/en-gb/…)."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url or "")
+    except Exception:
+        return False
+    host = (p.netloc or "").lower().split("@")[-1].split(":")[0]   # strip userinfo/port
+    labels = [l for l in host.split(".") if l and l != "www"]
+    subdomain_labels = labels[:-2] if len(labels) > 2 else []       # exclude domain + TLD
+    if any(l in _COUNTRY_CODES for l in subdomain_labels):
+        return True
+    if any(_LOCALE_RE.match(l) for l in subdomain_labels):
+        return True
+    segs = [s for s in (p.path or "").lower().split("/") if s]
+    if any(_LOCALE_RE.match(s) for s in segs):
+        return True
+    return False
 
 
 def is_financial_ir_source(url: str = "", source: str = "") -> str | None:
