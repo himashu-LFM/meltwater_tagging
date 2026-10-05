@@ -300,6 +300,30 @@ def is_regional_edition(url: str = "") -> bool:
     return False
 
 
+# A finance / stock page: its host or path marks it as markets/investing content.
+# Client rule (2026-09): do NOT drop such a page as a "syndicated stub" — in the
+# Bentley feed it is there because it discusses Bentley's stock/finances, so it is
+# Corporate - Financial / IR, not Not-in-scope. (Regional country-subdomain finance
+# editions are already dropped earlier by is_regional_edition.)
+_FINANCE_HOST_MARKERS = ("finance.", "investing.", "markets.", "money.", "marketwatch",
+                         "stocktwits", "benzinga", "seekingalpha", "simplywall",
+                         "tipranks", "zacks", "fool.", "stockstory")
+_FINANCE_PATH_MARKERS = ("/stocks/", "/stock/", "/markets/", "/market/",
+                         "/analyst-ratings/", "/quote/", "/investing/")
+
+
+def is_finance_page(url: str = "") -> bool:
+    """True if the URL is a finance / stock-markets page (host or path signals)."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url or "")
+    except Exception:
+        return False
+    host = (p.netloc or "").lower()
+    path = (p.path or "").lower()
+    return any(m in host for m in _FINANCE_HOST_MARKERS) or any(m in path for m in _FINANCE_PATH_MARKERS)
+
+
 def is_financial_ir_source(url: str = "", source: str = "") -> str | None:
     """Return the matched source string if the item is a source-level
     Corporate - Financial / IR (e.g. openpr.com), else None. Deterministic —

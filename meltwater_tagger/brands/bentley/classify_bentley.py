@@ -420,6 +420,21 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         # read the full article — is Not In Scope (the originating outlet is the
         # item to track). The amount of text shown before the link can vary.
         if fetched.get("syndicated_stub"):
+            # Client rule (2026-09): do NOT syndicated-drop a FINANCE / stock page.
+            # In the Bentley feed such a page is there because it discusses Bentley's
+            # stock/finances, so tag it Corporate - Financial / IR (Region + Fin/IR
+            # only), not Not-in-scope. (Regional finance editions were already
+            # dropped earlier by is_regional_edition.)
+            if rules.is_finance_page(url):
+                region = taxonomy.region_for_country(pub_country)
+                fam = {"region": [region] if region else [],
+                       "corporate": ["Corporate - Financial / IR"]}
+                result.update(scope="in", tags_by_family=fam, tags=_flatten(fam),
+                              reason="Finance / stock page discussing Bentley — Corporate - Financial / IR "
+                                     "(not dropped as syndicated).",
+                              text_source="finance-page",
+                              needs_review=[] if region else ["region"])
+                return result
             result.update(scope="out", tags=["Not in scope"],
                           tags_by_family={"type_of_coverage": ["Not in scope"]},
                           reason="Syndicated content — a 'read more' link takes you to the full "
@@ -559,11 +574,13 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
                 out.append(c)
         fam[k] = out
 
-    # Product & Spokesperson are literal-name categories — scan the full text so
-    # recall doesn't depend on the model. Add any taxonomy product named in the
-    # text; validate spokespeople against the taxonomy (drops invented names like
-    # "Greg Bentley") and add any taxonomy person named in the text.
-    for lbl in taxonomy.products_in_text(text):
+    # Product & Spokesperson are literal-name categories — scan the full text for
+    # recall. For PRODUCTS, the deterministic add requires the name to appear at
+    # least TWICE: a product mentioned only once is typically a name-drop in an
+    # "About Bentley" / product-portfolio list (e.g. SYNCHRO beside MicroStation)
+    # that the model deliberately left off — don't re-add it. The model's own
+    # product picks (context-aware) are kept regardless of count.
+    for lbl in taxonomy.products_in_text(text, min_occurrences=2):
         if lbl not in fam.get("product", []):
             fam.setdefault("product", []).append(lbl)
 
