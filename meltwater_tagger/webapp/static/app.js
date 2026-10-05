@@ -83,12 +83,29 @@ async function handleFile(file) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Failed to read file");
     state.urls = data.urls;
+    // Per-row brands read from the export's Input Name column. A mixed file
+    // (Kaseya V2 + Kaseya Datto + Kaseya 365) is classified and tagged brand
+    // by brand instead of everything against the dropdown's single choice.
+    state.urlBrands = data.url_brands || {};
+    // Meltwater's own Document ID per row. When every row has one, apply tags
+    // directly by id and never opens a saved search.
+    state.urlDocs = data.url_docs || {};
     $("urls").value = "";
     if (data.brand) {
       const opt = [...$("brand").options].find(o => o.value.toLowerCase() === data.brand.toLowerCase());
       if (opt) { $("brand").value = opt.value; applyFetchModeRestriction(); }
     }
-    $("dzSub").textContent = `✓ ${data.count} URLs loaded from ${file.name}`;
+    const found = data.brands_in_file || [];
+    $("dzSub").textContent = `✓ ${data.count} URLs loaded from ${file.name}` +
+      (found.length > 1 ? ` · ${found.length} brands: ${found.join(", ")}` : "");
+    if (found.length > 1) {
+      Toast.info(`This file covers ${found.join(", ")}. Each row will be judged and tagged against its own brand.`,
+                 "Multiple brands detected");
+    }
+    if ((data.unresolved_inputs || []).length) {
+      Toast.info(`No matching brand for: ${data.unresolved_inputs.join(", ")}. Those rows will use the brand picked above — add them in Brand Studio to tag them separately.`,
+                 "Some Input Names unmatched");
+    }
     countUrls();
   } catch (err) {
     $("inputErr").textContent = err.message;
@@ -106,10 +123,23 @@ $("runBtn").addEventListener("click", run);
 // even with extended thinking on. Results are merged and rendered together.
 const CLASSIFY_CHUNK_SIZE = 8;
 
-async function classifyChunk(chunk, brand, fetchMode, isFinal, deferRun) {
+async function classifyChunk(chunk, brand, fetchMode, isFinal, deferRun, urlBrands, urlDocs) {
+  // Both maps are keyed by URL and cover the WHOLE upload, so send only the
+  // slice this chunk needs — otherwise a 100-URL run repeats the entire map in
+  // every request.
+  const sliceFor = (m) => {
+    const out = {};
+    if (m) for (const u of chunk) if (m[u]) out[u] = m[u];
+    return out;
+  };
   const r = await Auth.authedFetch("/api/classify", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ urls: chunk, brand, fetch_mode: fetchMode, defer_run: deferRun, final: isFinal }),
+    body: JSON.stringify({
+      urls: chunk, brand, fetch_mode: fetchMode, defer_run: deferRun, final: isFinal,
+      // Per-row brand (from the export's Input Name) and Meltwater Document ID.
+      url_brands: sliceFor(urlBrands),
+      url_docs: sliceFor(urlDocs),
+    }),
   });
   // A gateway timeout / crash returns HTML, not JSON. Detect it BEFORE parsing so
   // the user gets a clear message instead of "Unexpected token '<'".
@@ -150,8 +180,13 @@ async function run() {
   cycleLoaderText();
 
   try {
+    // Per-row brand / Document ID maps come from the uploaded export. Pasted
+    // URLs have neither, so send nothing and let the dropdown brand apply.
+    const urlBrands = pasted.length ? null : state.urlBrands;
+    const urlDocs = pasted.length ? null : state.urlDocs;
     for (let c = 0; c < chunks.length; c++) {
-      const data = await classifyChunk(chunks[c], brand, fetchMode, c === chunks.length - 1, deferRun);
+      const data = await classifyChunk(chunks[c], brand, fetchMode, c === chunks.length - 1, deferRun,
+                                       urlBrands, urlDocs);
       merged.push(...(data.results || []));
       if (data.labels) labels = data.labels;
       if (data.run_brand) runBrand = data.run_brand;
@@ -214,6 +249,14 @@ function renderResults(data) {
 
   refreshSummary(res);
 
+  // Show a Brand column only when the run actually spans several brands —
+  // otherwise it's a column of the same value repeated on every row.
+  const brandsInRun = [...new Set(res.map(r => r.brand).filter(Boolean))];
+  const multiBrand = brandsInRun.length > 1;
+  $("resHead").innerHTML =
+    `<th>#</th><th>Type</th>` + (multiBrand ? `<th>Brand</th>` : "") +
+    `<th>Sentiment</th><th>Tag</th><th>Reason</th><th>Post</th><th>Applied</th>`;
+
   const body = $("resBody");
   body.innerHTML = "";
   res.forEach((r, idx) => {
@@ -227,6 +270,7 @@ function renderResults(data) {
     tr.innerHTML = `
       <td>${idx + 1}</td>
       <td>${typeChip}</td>
+      ${multiBrand ? `<td><span class="chip type-comment">${escapeHtml(r.brand || "—")}</span></td>` : ""}
       <td class="cell-sentiment"></td>
       <td class="cell-tag">${escapeHtml(r.tag || "—")}</td>
       <td class="reason">${escapeHtml(r.reason || "")}</td>
@@ -605,7 +649,16 @@ $("applyBtn").addEventListener("click", async () => {
         Toast.info(`${data.unreached.length} post(s) weren't found in the Meltwater feed — check the topic's date range covers them.`, "Some posts not found");
       }
     } else {
-      t.error(data.error || data.message || "Apply failed.");
+      const why = data.error || data.message || "Apply failed.";
+      t.error(why);
+      // Also leave it on screen. A run takes minutes, so the analyst has often
+      // looked away by the time it fails — a toast that fades means they come
+      // back to a blank panel and have to ask someone to read the server log.
+      $("applyStatus").innerHTML =
+        `<span class="chip negative">✗ Apply stopped</span> ` +
+        `<span class="apply-why">${escapeHtml(String(why))}</span>` +
+        `<span class="apply-time">${new Date().toLocaleTimeString()}</span>`;
+      $("applyStatus").className = "apply-status";
     }
   } catch (err) {
     t.error(err.message);

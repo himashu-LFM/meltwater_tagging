@@ -58,6 +58,9 @@ body::after{content:"";position:fixed;inset:0;z-index:-1;
 .apply-status.ok{color:var(--pos)}
 .apply-status.err{color:var(--neg)}
 .apply-time{color:var(--muted);font-size:11px;margin-left:4px}
+/* Failure reason shown beside the "Apply stopped" chip. Wraps onto its own
+   line so a full sentence stays readable instead of being clipped. */
+.apply-why{display:block;margin-top:6px;font-size:13px;line-height:1.5;max-width:70ch}
 
 /* buttons mid-work / nothing-to-do states */
 .btn:disabled{opacity:.45;cursor:not-allowed;filter:grayscale(.4)}
