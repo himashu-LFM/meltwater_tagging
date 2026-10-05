@@ -37,7 +37,10 @@ from taxonomy import normalize_brand, tag_name, is_valid_tag
 
 PERMALINK_HINTS = ["url", "permalink", "link", "source url", "article url"]
 TEXT_HINTS = ["hit sentence", "snippet", "content", "body", "text", "summary", "opening text"]
-TOPIC_HINTS = ["search", "topic", "saved search", "query"]
+# "Input Name" is what a Meltwater export actually calls the saved search the
+# row came from — it was missing here, so brand auto-detection silently found
+# nothing on every real export.
+TOPIC_HINTS = ["input name", "search", "topic", "saved search", "query"]
 TAG_HINTS = ["tag", "tags"]
 
 
@@ -70,6 +73,35 @@ def load_export(path: str) -> tuple[pd.DataFrame, dict]:
             "Rename the post-URL column to include 'url' or 'permalink', or edit PERMALINK_HINTS."
         )
     return df, cols
+
+
+def _norm_key(s: str) -> str:
+    """Squash an Input Name / brand name to a comparable key: lowercase,
+    punctuation and separators gone. 'Kaseya_V2_Reddit_Test', 'Kaseya V2 |
+    Reddit' and 'kaseya v2' all reduce to 'kaseyav2reddittest' / 'kaseyav2reddit'
+    / 'kaseyav2' — close enough for prefix matching, exact enough that
+    'Kaseya V2' never matches 'Kaseya 365'."""
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def resolve_brand_from_input_name(input_name: str, known_brands: list[str]) -> str | None:
+    """Map one row's Input Name to one of the brands configured in the app.
+
+    Longest match wins, which is the whole point: 'Kaseya V2 | Reddit' must
+    resolve to 'Kaseya V2', not to 'Kaseya' — both are real brands and the
+    shorter one is a prefix of the longer. Returns None when nothing matches,
+    so the caller can surface it instead of guessing a brand.
+    """
+    key = _norm_key(input_name)
+    if not key:
+        return None
+    best = None
+    for b in known_brands:
+        bk = _norm_key(b)
+        if bk and bk in key:
+            if best is None or len(bk) > len(_norm_key(best)):
+                best = b
+    return best
 
 
 def infer_brand(df: pd.DataFrame, topic_col: str | None) -> str | None:
@@ -412,7 +444,32 @@ async def _fetch_reddit_bulk_rss(client: httpx.AsyncClient, posts: list[dict]) -
 # 10s). Each record echoes the submitted URL back in `query`, so mapping results
 # to mentions is an exact lookup rather than fuzzy matching.
 
-_APIFY_DELETED = {"[deleted]", "[removed]", "[deleted by user]"}
+# Reddit's tombstones for content that no longer exists. Every fetch route
+# runs into these, not just Apify: the JSON API and RSS return the literal
+# marker as the body, so without this check a deleted mention gets sent to
+# Claude to have its "sentiment" judged.
+# Every entry is bracketed on purpose. An un-bracketed phrase like
+# "deleted by user" is something a real person can write as their whole
+# comment, and matching it would tag that comment Neutral without ever
+# reading it.
+DELETED_MARKERS = {
+    "[deleted]", "[removed]", "[deleted by user]",
+    "[removed by reddit]", "[unavailable]",
+}
+
+
+def is_deleted_text(s: str | None) -> bool:
+    """True when the fetched body IS a Reddit tombstone and nothing else.
+
+    Deliberately an exact match (after trimming whitespace and the markdown
+    emphasis Reddit sometimes wraps it in) — a real comment that merely
+    mentions "[deleted]" while discussing something must not be swallowed.
+    """
+    t = (s or "").strip().strip("*_ \t\r\n").strip().lower()
+    return t in DELETED_MARKERS
+
+
+_APIFY_DELETED = DELETED_MARKERS  # back-compat alias
 
 
 def _url_key(u: str) -> str:
@@ -427,8 +484,7 @@ def _url_key(u: str) -> str:
 def _apify_is_deleted(rec: dict) -> bool:
     if rec.get("is_deleted_or_removed") is True:
         return True
-    body = (rec.get("body") or rec.get("selftext") or "").strip().lower()
-    return body in {d.lower() for d in _APIFY_DELETED}
+    return is_deleted_text(rec.get("body") or rec.get("selftext"))
 
 
 def _apify_apply_record(p: dict, rec: dict) -> None:

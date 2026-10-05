@@ -225,11 +225,29 @@ async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[b
         await _ms_fill_and_next(page, MS_SSO_SELECTORS["password"], password, "ms-password")
     except Exception:
         log.error("login[ms-sso]: STEP 3/6 FAILED — Microsoft password field never appeared %s", await _diag(page))
-        return False, f"Microsoft password field never appeared {await _diag(page)}"
+        return False, ("Microsoft's password screen never loaded, so the sign-in "
+                       "could not be completed. Nothing was tagged — please try "
+                       "Apply again, and report it if it keeps happening.")
     try:
         await page.wait_for_load_state("networkidle", timeout=20000)
     except Exception:
         pass
+
+    # Bail out NOW only if Microsoft rejected the CREDENTIALS. Without this the
+    # run walks on into the MFA steps, finds no Text option, and parks on
+    # "waiting for the SMS code" — so the analyst sits in front of an OTP box
+    # for a code that will never arrive.
+    #
+    # Deliberately narrow: the screens that appear right here are normally the
+    # MFA prompts, which STEP 4/5/6 exist to handle. Checking the full blocker
+    # list at this point aborted healthy runs. Everything else is left to
+    # STEP 8, by which time a real interstitial is the only thing that can
+    # still be on screen.
+    blocker = await classify_login_blocker(page)
+    if blocker and blocker[0] in ("wrong_password", "password_expired", "account_locked"):
+        code, message = blocker
+        log.error("login[ms-sso]: STEP 3/6 FAILED — blocked by %r %s", code, await _diag(page))
+        return False, message
 
     # Screen 4 — MFA "Approve sign in request": we can't approve a push, so pick
     # "I can't use my Microsoft Authenticator app right now" to reach the method
@@ -332,6 +350,40 @@ async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[b
     return False, f"The verification code was rejected {max_attempts} times."
 
 
+async def _dismiss_security_nag(page, timeout: int = 8000) -> bool:
+    """Click past Microsoft's "Let's keep your account secure" interstitial.
+
+    It appears right after a successful OTP and asks the user to register
+    another verification method. It is optional — there is a "Not now" /
+    "Skip for now" escape — but if nobody clicks it the sign-in never
+    completes and the redirect back to Meltwater never fires.
+
+    Returns True when something was dismissed.
+    """
+    try:
+        skip = await page.wait_for_selector(
+            'input[value="Not now"], button:has-text("Not now"), a:has-text("Not now"), '
+            'input[value="Skip setup"], button:has-text("Skip setup"), '
+            'button:has-text("Skip for now"), a:has-text("Skip for now"), '
+            'button:has-text("Ask later"), a:has-text("Ask later"), '
+            'button:has-text("Maybe later"), a:has-text("Maybe later")',
+            # NEVER match #idBtn_Back here. It is Microsoft's generic secondary
+            # button, and on the "Stay signed in?" prompt it means NO — which
+            # downgrades the sign-in to a browser-session-only one that dies in
+            # minutes instead of persisting for days. STEP 7 deliberately
+            # clicks YES on that prompt; this step must not race it.
+            timeout=timeout,
+        )
+        await skip.click()
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
 async def _finish_ms_sso(page) -> tuple[bool, str]:
     """Post-OTP navigation for the Microsoft Entra SSO flow.
 
@@ -344,14 +396,36 @@ async def _finish_ms_sso(page) -> tuple[bool, str]:
 
     Also dismisses Meltwater's own "Create a passkey" interstitial if it appears
     on the way in, mirroring the Auth0 flow."""
+    # STEP 6.5 — "Let's keep your account secure" / "Help us protect your
+    # account". Microsoft shows this straight after a successful OTP to nag the
+    # user into registering ANOTHER verification method. It is skippable —
+    # there is a "Not now" button — but nothing clicks it automatically, so the
+    # flow simply stopped here: STEP 7 found no KMSI prompt, STEP 8 waited for a
+    # redirect that was never coming, and the recovery navigation then bounced
+    # off app.meltwater.com/login because the SSO hand-off was never finished.
+    log.info("login[ms-sso]: STEP 6.5 — dismissing the 'keep your account secure' nag (if shown)")
+    if await _dismiss_security_nag(page, timeout=8000):
+        log.info("login[ms-sso]: STEP 6.5 — dismissed it ✓")
+    else:
+        log.info("login[ms-sso]: STEP 6.5 — no 'keep your account secure' prompt shown (skipping)")
+
     # STEP 7 — "Stay signed in?" (KMSI). Optional; absent on some tenants.
     log.info("login[ms-sso]: STEP 7 — handling the 'Stay signed in?' prompt (if shown)")
-    try:
-        kmsi = await page.wait_for_selector(MS_SSO_SELECTORS["kmsi_yes"], timeout=8000)
-        await kmsi.click()
-        log.info("login[ms-sso]: STEP 7 — clicked 'Yes' on 'Stay signed in?'")
-    except Exception:
-        log.info("login[ms-sso]: STEP 7 — no 'Stay signed in?' prompt shown (skipping)")
+    # Only hunt for it while we are still ON a Microsoft page. The selector
+    # includes a generic `button:has-text("Yes")`, so once the redirect has
+    # already carried us to app.meltwater.com it can match an unrelated button
+    # in Meltwater's own UI — which is exactly what happened: it "clicked Yes"
+    # on the app and fired a PATCH against the user's record.
+    if "login.microsoftonline.com" not in (page.url or "").lower():
+        log.info("login[ms-sso]: STEP 7 — already past Microsoft (%s); not looking for the "
+                 "'Stay signed in?' prompt", page.url)
+    else:
+        try:
+            kmsi = await page.wait_for_selector(MS_SSO_SELECTORS["kmsi_yes"], timeout=8000)
+            await kmsi.click()
+            log.info("login[ms-sso]: STEP 7 — clicked 'Yes' on 'Stay signed in?'")
+        except Exception:
+            log.info("login[ms-sso]: STEP 7 — no 'Stay signed in?' prompt shown (skipping)")
 
     # STEP 8 — wait for the redirect chain back to Meltwater to settle.
     log.info("login[ms-sso]: STEP 8 — waiting for redirect back to app.meltwater.com")
@@ -400,6 +474,21 @@ async def _finish_ms_sso(page) -> tuple[bool, str]:
     # This only runs when the normal landing already failed, so the happy path
     # (already `landed`) is unaffected.
     if not landed:
+        # Check the nag ONE more time before navigating away. If it's still on
+        # screen the SSO hand-off is mid-flight, and navigating now throws it
+        # away — which is exactly how this ended up bouncing to
+        # app.meltwater.com/login with no session.
+        if await _dismiss_security_nag(page, timeout=4000):
+            log.info("login[ms-sso]: STEP 8 — dismissed a late 'keep your account secure' prompt; "
+                     "re-checking for the redirect")
+            for _ in range(8):
+                url = (page.url or "").lower()
+                if "app.meltwater.com" in url and "/login" not in url:
+                    landed = True
+                    break
+                await page.wait_for_timeout(1500)
+
+    if not landed:
         log.warning("login[ms-sso]: STEP 8 — not on the app after OTP (url=%s); forcing a "
                     "navigation to the app root to recover", page.url)
         for _ in range(2):
@@ -423,12 +512,20 @@ async def _finish_ms_sso(page) -> tuple[bool, str]:
                 break
 
     if not landed:
+        # Say WHICH screen we're stuck on. The full page diagnostics still go to
+        # the log; the analyst gets the plain-language half in the dashboard.
+        blocker = await classify_login_blocker(page)
+        if blocker:
+            code, message = blocker
+            log.error("login[ms-sso]: STEP 8 FAILED — blocked by %r %s", code, await _diag(page))
+            return False, message
         log.error("login[ms-sso]: STEP 8 FAILED — never reached the Meltwater app after OTP %s",
                    await _diag(page))
         return False, (
-            "Signed in to Microsoft, but the browser never landed back on the Meltwater "
-            f"app after the code {await _diag(page)}. The 'Stay signed in?' step or the "
-            "redirect back to Meltwater may have changed."
+            "Signed in to Microsoft, but the browser stopped on a screen we don't "
+            "recognise instead of opening Meltwater. Nothing was tagged. Please "
+            "send this to whoever maintains the tagger — the server log has the "
+            "page it stopped on."
         )
     log.info("login[ms-sso]: STEP 8 — landed on the Meltwater app %s", await _diag(page))
     log.info("login[ms-sso]: ===== Microsoft SSO flow DONE =====")
@@ -456,6 +553,12 @@ CARD_SELECTOR = os.environ.get(
 #    this makes the headless run look like an ordinary desktop Chrome.
 #  --window-size: give the SPA a real desktop viewport so it lays out normally.
 # All harmless locally; essential on Render.
+# Set MELTWATER_HEADLESS=false to watch the automation drive a real window.
+# The only way to see what the flow sees when a login works by hand but not
+# under automation — the server log only ever shows the page it ended up on.
+HEADLESS = os.environ.get("MELTWATER_HEADLESS", "true").lower() != "false"
+SLOW_MO = int(os.environ.get("MELTWATER_SLOW_MO", "0"))  # ms between actions
+
 CHROMIUM_LAUNCH_ARGS = [
     "--disable-dev-shm-usage",
     "--no-sandbox",
@@ -906,6 +1009,132 @@ async def _diag(page) -> str:
     except Exception:
         pass
     return f"(page url: {page.url} | title: {title!r} | visible text: {snippet!r})"
+
+
+# Screens that stop the automation mid-login. Each entry is
+# (code, [text fragments], analyst-facing explanation).
+#
+# Why this exists: without it every one of these surfaces as the same generic
+# "never landed back on the Meltwater app", and the only way to tell them apart
+# is to read the server log. The analyst can act on most of them themselves —
+# but only if we say which one it is.
+_LOGIN_BLOCKERS: list[tuple[str, tuple[str, ...], str]] = [
+    ("security_info_setup",
+     ("keep your account secure", "more information required",
+      "help us protect your account",
+      "action required to keep your account secure",
+      "set up your account for additional security verification",
+      "setupsecurityinfo", "aka.ms/mfasetup"),
+     "Microsoft is asking this account to finish setting up its security info "
+     "(the 'Keep your account secure' screen), and it blocks everything until "
+     "that's done. Sign in to this Meltwater account once by hand in a normal "
+     "browser, complete that prompt, then run Apply again."),
+
+    ("wrong_password",
+     ("your account or password is incorrect",
+      "password is incorrect", "that microsoft account doesn't exist",
+      "we couldn't find an account"),
+     "Microsoft rejected the email or password saved for this account. Update "
+     "it on the Profile page, then run Apply again."),
+
+    ("password_expired",
+     ("your password has expired", "update your password",
+      "you need to update your password"),
+     "Microsoft says this account's password has expired. Change it by hand "
+     "first, then save the new password on the Profile page."),
+
+    ("wrong_otp",
+     ("that code didn't work", "the code you entered didn't work",
+      "verification code is incorrect", "enter the code again"),
+     "Microsoft rejected the SMS code. It may have been mistyped or it expired "
+     "— codes are only valid for a few minutes. Run Apply again and enter the "
+     "new code promptly."),
+
+    ("account_locked",
+     ("your account has been locked", "account is temporarily locked",
+      "too many attempts", "sign-in was blocked"),
+     "Microsoft has temporarily locked this account after too many sign-in "
+     "attempts. Wait a while, or have IT unlock it, before running Apply again."),
+
+    ("conditional_access",
+     ("you can't get there from here", "blocked by conditional access",
+      "you cannot access this right now", "device is not compliant",
+      "access has been blocked by your organization"),
+     "Microsoft's Conditional Access policy blocked this sign-in — usually "
+     "because it came from an unapproved network or device. This needs "
+     "Meltwater/IT to allow the server, it can't be fixed from the dashboard."),
+
+    # NOTE: a bare "terms of use" needle is useless here — Microsoft puts
+    # "Terms of use | Privacy & cookies" in the footer of EVERY sign-in page,
+    # so it matched every screen. Only the actual acceptance wording counts.
+    ("terms_of_use",
+     ("you must accept the terms", "accept the terms of use to continue",
+      "please accept the terms of use"),
+     "Microsoft is showing a Terms of Use page that has to be accepted once. "
+     "Sign in by hand in a normal browser, accept it, then run Apply again."),
+
+    ("register_mfa_method",
+     ("more information is required to keep your account secure",
+      "register your device", "download the microsoft authenticator",
+      "your organization requires you to set up"),
+     "Microsoft wants a new verification method registered on this account "
+     "before it will let the sign-in through. Complete that by hand in a "
+     "normal browser once, then run Apply again."),
+]
+
+
+# The ordinary MFA screens. These are NOT failures — STEP 4/5/6 are built to
+# walk through them (pick "can't use Authenticator" -> Text -> enter the code).
+# Treating one as a blocker aborts a run that was working, so they win over
+# every pattern above.
+_NORMAL_MFA_SCREENS = (
+    "approve sign in request", "approve a request on my microsoft authenticator",
+    "open your authenticator app", "enter the number if prompted",
+    "didn't receive a sign-in request", "verify your identity",
+    "use a verification code", "we texted your phone", "enter the code",
+    "having trouble verifying your account",
+)
+
+
+def _is_normal_mfa_screen(text: str) -> bool:
+    return any(n in text for n in _NORMAL_MFA_SCREENS)
+
+
+async def classify_login_blocker(page) -> tuple[str, str] | None:
+    """Work out WHICH screen the login is stuck on, so the analyst gets a
+    plain-language reason in the dashboard instead of having to read the log.
+
+    Returns (code, message), or None when the screen isn't one we recognise.
+    Matching is on visible text plus the URL — never on DOM/input values, so a
+    typed password can't leak into the message shown in the UI.
+    """
+    try:
+        text = (await page.locator("body").inner_text(timeout=2000)).lower()
+    except Exception:
+        text = ""
+    url = (page.url or "").lower()
+    haystack = f"{text} {url}"
+
+    # A normal MFA prompt is the flow working, not a blocker. Bail out before
+    # any pattern can fire — a false positive here kills a healthy run.
+    if _is_normal_mfa_screen(text):
+        return None
+
+    for code, needles, message in _LOGIN_BLOCKERS:
+        if any(n in haystack for n in needles):
+            return code, message
+
+    # Signed in to Microsoft, but Meltwater itself didn't open a session and
+    # bounced us back to its own login screen. Distinct from the cases above:
+    # nothing is wrong with the analyst's credentials.
+    if "app.meltwater.com" in url and "/login" in url:
+        return ("meltwater_login_bounce",
+                "Microsoft accepted the sign-in, but Meltwater sent the browser "
+                "straight back to its own login page instead of opening the app. "
+                "That usually means Meltwater didn't accept the SSO hand-off. "
+                "Try Apply once more; if it keeps happening the login flow needs "
+                "a developer.")
+    return None
 
 
 async def login_to_meltwater(page, email: str, password: str, request_otp=None) -> tuple[bool, str]:
@@ -1681,6 +1910,41 @@ def _hits_from_msearch(text: str) -> dict:
     return out
 
 
+async def _click_search_button(page) -> bool:
+    """Press the results page's own Search button. That always fires a fresh
+    DOCUMENT msearch, which is what we replay."""
+    for sel in ('button:has-text("Search")',
+                '[role="button"]:has-text("Search")',
+                'xpath=//button[normalize-space(.)="Search"]'):
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _is_doc_msearch(body: str) -> bool:
+    """True when an msearch body asks for DOCUMENTS (it carries a pagination
+    block), as opposed to the analytics/count batch the app fires alongside it.
+
+    Only the document batch can ever resolve a permalink, so this is what the
+    date-range step must wait for.
+    """
+    try:
+        obj = json.loads(body)
+    except Exception:
+        # Unparseable: treat as a document batch rather than waiting forever.
+        return True
+    for r in (obj.get("requests") or []) if isinstance(obj, dict) else []:
+        req = r.get("request") if isinstance(r, dict) else None
+        if isinstance(req, dict) and isinstance(req.get("pagination"), dict):
+            return True
+    return False
+
+
 def _attach_api_capture(context) -> dict:
     """Watch a browser context's requests and harvest what the internal tagging
     API needs: the bearer token, the account id, and every distinct msearch
@@ -1735,12 +1999,72 @@ def _attach_api_capture(context) -> dict:
                     # which, no query rewriting, no group expansion.
                     cap["msearches"].append({"url": u, "account": (m.group(1) if m else None),
                                              "body": body})
-                    cap["got"].set()
+                    # Only a DOCUMENT batch counts as "we got what we waited
+                    # for". The analytics/count batch fires alongside it and
+                    # carries no documents at all — latching onto that one
+                    # left us replaying a query that returns 0 docs, which
+                    # dumped the whole run onto the slow card scanner.
+                    if _is_doc_msearch(body):
+                        cap["got"].set()
         except Exception:
             pass
 
     context.on("request", on_request)
     return cap
+
+
+def _docmap_from_results(results: list[dict]) -> dict:
+    """Build the documentId lookup straight from a Meltwater export instead of
+    from a replayed search.
+
+    The export's `Document ID` is exactly what the tagging API wants, so when
+    it's present there is nothing to resolve: no saved search to open, no date
+    range to widen, no pagination to walk, and no way for a mention to come
+    back "NOT IN SEARCH". `Document Tags` rides along so the skip-if-tagged
+    rule still applies without a lookup.
+    """
+    docmap = {}
+    for r in results:
+        did = (r.get("document_id") or "").strip()
+        if not did or not r.get("permalink"):
+            continue
+        docmap[norm_permalink(r["permalink"])] = {
+            "documentId": did,
+            "matchSentence": "",
+            "keywords": [],
+            "tags": [t for t in (r.get("existing_tags") or []) if isinstance(t, str)],
+        }
+    return docmap
+
+
+async def _tag_via_document_ids(token: str, to_apply: dict, docmap: dict) -> dict:
+    """Tag using document ids we already hold. Same enqueue path as the search
+    route — only the resolve step is replaced."""
+    applied, failed, unreached, skipped_already = [], [], [], []
+    async with httpx.AsyncClient(timeout=60) as c:
+        tr = await c.get(BFF_TAGS_URL, headers={**_API_BASE_HEADERS, "authorization": token})
+        tr.raise_for_status()
+        name_to_id = {t["name"]: t["id"] for t in tr.json() if t.get("name")}
+        log.info("apply-doc: %d tags available; %d document id(s) from the export",
+                 len(name_to_id), len(docmap))
+        # Empty list = the token isn't scoped to this workspace. Same guard as
+        # the search path: fall back rather than fail every tag.
+        if not name_to_id:
+            return {"ok": False, "message": ("tag list came back empty — the captured token is "
+                                             "not valid for this account"),
+                    "applied": [], "failed": [], "unreached": [], "_fallback": True}
+
+        await _do_enqueue(c, token, to_apply, docmap, name_to_id,
+                          applied, failed, unreached, skipped_already)
+
+    log.info("apply-doc: done applied=%d already_tagged=%d failed=%d unreached=%d",
+             len(applied), len(skipped_already), len(failed), len(unreached))
+    return {"ok": True,
+            "message": (f"Applied {len(applied)} tag(s) by document id"
+                        + (f"; left {len(skipped_already)} already-tagged mention(s) untouched."
+                           if skipped_already else ".")),
+            "applied": applied, "failed": failed, "unreached": unreached,
+            "skipped_already": skipped_already}
 
 
 async def _capture_session(email: str, password: str, topic_url: str, request_otp=None) -> dict:
@@ -1749,7 +2073,7 @@ async def _capture_session(email: str, password: str, topic_url: str, request_ot
     msearch URL+body. Bails as soon as those are captured so the heavy feed
     render never completes (that render is what OOMs a small instance)."""
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
+        browser = await pw.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO, args=CHROMIUM_LAUNCH_ARGS)
         context = await _new_browser_context(browser)
 
         cap = _attach_api_capture(context)
@@ -1939,9 +2263,22 @@ async def _do_enqueue(c, token, to_apply, docmap, name_to_id,
     for key, val in to_apply.items():
         hit = docmap.get(key)
         if not hit:
-            # Name it. "unreached=1" alone leaves you diffing an export against
-            # the UI to work out which mention the search never returned.
-            log.warning("apply-api: NOT IN SEARCH — %s", val["orig"])
+            # Name it, and say WHICH kind of miss it is. "unreached=1" alone
+            # leaves you diffing an export against the UI by hand.
+            #   parent present -> the thread is in the search but this specific
+            #                     comment isn't a document in it
+            #   nothing        -> the search never returned this thread at all
+            #                     (out of window, excluded by a filter, or
+            #                     indexed after this run started)
+            post_id = (key.split("reddit:")[-1].split("/")[0] if key.startswith("reddit:") else "")
+            siblings = [k for k in docmap if post_id and k.startswith(f"reddit:{post_id}")]
+            if siblings:
+                log.warning("apply-api: NOT IN SEARCH — %s | thread IS in the search "
+                            "(%d other document(s) from it), but this exact comment is not",
+                            val["orig"], len(siblings))
+            else:
+                log.warning("apply-api: NOT IN SEARCH — %s | the whole thread is absent from "
+                            "the search results", val["orig"])
             unreached.append(val["orig"])
             continue
         # Leave a mention that ALREADY carries a tag completely alone.
@@ -2629,7 +2966,7 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
         return bad_input
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
+        browser = await pw.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO, args=CHROMIUM_LAUNCH_ARGS)
         # Load the saved browser session (cookies + localStorage) if we have one.
         ctx_kwargs = {}
         if saved_state:
@@ -2650,6 +2987,19 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
             log.info("apply: SESSION REUSE — trying the saved Meltwater session (no OTP)…")
             if await _is_logged_in(page):
                 log.info("apply: SESSION REUSE — saved session is VALID; skipping login/OTP ✓")
+                # Write the session BACK after a successful reuse. Meltwater
+                # rotates its tokens on every `auth/token/refresh`, so the
+                # browser now holds newer ones than the copy we loaded. Without
+                # this we kept re-sending the original tokens; Meltwater
+                # tolerated that for a while and then started answering with
+                # /logout, which looked like the session had "expired on its
+                # own" even though nobody logged out.
+                if on_state_captured is not None:
+                    try:
+                        on_state_captured(json.dumps(await context.storage_state()))
+                        log.info("apply: SESSION REFRESH — saved the rotated session back ✓")
+                    except Exception as e:
+                        log.warning("apply: SESSION REFRESH — could not re-save the session: %s", e)
             else:
                 # Expired/invalid. Per the product rule, do NOT auto-prompt OTP
                 # while a saved session exists — ask the user to clear it.
@@ -2694,6 +3044,35 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
                         "message": (f"Could not switch into the '{account_hint}' Meltwater "
                                      "account/environment. Check the brand's Environment value in "
                                      "Brand Studio matches an account name in Meltwater exactly.")}
+
+            # FAST PATH — the export already told us every document id, so
+            # there is nothing to look up. Skip Explore, the saved search and
+            # the date range entirely: those steps only ever existed to turn a
+            # permalink into a document id, and they are what makes mentions
+            # come back "NOT IN SEARCH". One pass covers every brand in the
+            # file, because document ids don't care which search a row is from.
+            doc_map = _docmap_from_results(results)
+            if doc_map and len(doc_map) == len(to_apply):
+                log.info("apply: DOC-ID PATH — all %d target(s) carry a Document ID; "
+                         "tagging directly (no search, no date range)", len(to_apply))
+                tok = api_cap.get("token")
+                if tok:
+                    try:
+                        rep = await _tag_via_document_ids(tok, to_apply, doc_map)
+                        if not rep.get("_fallback"):
+                            await browser.close()
+                            return rep
+                        log.warning("apply: DOC-ID PATH unusable (%s) — falling back to the "
+                                    "saved search", rep.get("message"))
+                    except Exception:
+                        log.exception("apply: DOC-ID PATH errored — falling back to the saved search")
+                else:
+                    log.warning("apply: DOC-ID PATH — no bearer token captured yet; "
+                                "falling back to the saved search")
+            elif doc_map:
+                log.info("apply: DOC-ID PATH skipped — only %d/%d target(s) carry a Document ID",
+                         len(doc_map), len(to_apply))
+
             feed_opened = await open_advanced_search_via_explore(page, brand_name or account_hint)
             if not feed_opened:
                 log.error("apply: POST-LOGIN STEP FAILED — switched into %r but could not open "
@@ -2742,16 +3121,7 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
                     await asyncio.wait_for(api_cap["got"].wait(), timeout=12)
                 except Exception:
                     log.info("apply: DATE RANGE — no re-query yet; clicking Search")
-                    for sel in ('button:has-text("Search")',
-                                '[role="button"]:has-text("Search")',
-                                'xpath=//button[normalize-space(.)="Search"]'):
-                        try:
-                            el = await page.query_selector(sel)
-                            if el and await el.is_visible():
-                                await el.click()
-                                break
-                        except Exception:
-                            continue
+                    await _click_search_button(page)
 
         # Prefer tagging over the internal HTTP API now that we're on the right
         # account and the brand's Reddit search is open. The page's own msearch
@@ -2768,25 +3138,53 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
         # Only replay batches belonging to the account we ended up in — a batch
         # captured before an account switch would 401 (and could resolve against
         # the wrong workspace).
-        batches = [m for m in api_cap["msearches"]
-                   if not api_cap["account"] or m.get("account") == api_cap["account"]]
-        if api_cap["token"] and batches:
-            log.info("apply: API TAGGING — %d/%d msearch batch(es) for account=%s "
+        def _batches():
+            return [m for m in api_cap["msearches"]
+                    if not api_cap["account"] or m.get("account") == api_cap["account"]]
+
+        # Two attempts. If the first replay resolves no documents at all, the
+        # batch we captured was the analytics one (or the feed had not settled),
+        # so press Search for a guaranteed-fresh document msearch and try again
+        # before giving up on the fast path.
+        for attempt in (1, 2):
+            batches = _batches()
+            if not (api_cap["token"] and batches):
+                log.warning("apply: API TAGGING unavailable (token=%s msearches=%d) — using the "
+                            "card scanner", bool(api_cap["token"]), len(api_cap["msearches"]))
+                break
+
+            log.info("apply: API TAGGING — attempt %d, %d/%d msearch batch(es) for account=%s "
                      "(token from msearch=%s) — tagging over HTTP (no card scan)",
-                     len(batches), len(api_cap["msearches"]), api_cap["account"],
+                     attempt, len(batches), len(api_cap["msearches"]), api_cap["account"],
                      api_cap["token_from_msearch"])
             try:
                 report = await _tag_via_api_http(api_cap["token"], batches, to_apply)
-                if not report.get("ok"):
-                    log.warning("apply: API TAGGING did not succeed (%s) — falling back to the "
-                                "card scanner", report.get("message"))
-                    report = None
-            except Exception:
-                log.exception("apply: API TAGGING errored — falling back to the card scanner")
+                if report.get("ok"):
+                    break
+                log.warning("apply: API TAGGING did not succeed (%s)", report.get("message"))
                 report = None
-        else:
-            log.warning("apply: API TAGGING unavailable (token=%s msearches=%d) — using the "
-                        "card scanner", bool(api_cap["token"]), len(api_cap["msearches"]))
+            except Exception:
+                log.exception("apply: API TAGGING errored")
+                report = None
+
+            if attempt == 1:
+                log.info("apply: API TAGGING — retrying once with a fresh document msearch "
+                         "(clicking Search)")
+                api_cap["msearches"].clear()
+                api_cap["got"] = asyncio.Event()
+                if not await _click_search_button(page):
+                    log.warning("apply: API TAGGING — no Search button found; "
+                                "falling back to the card scanner")
+                    break
+                try:
+                    await asyncio.wait_for(api_cap["got"].wait(), timeout=30)
+                    await asyncio.sleep(4)
+                except Exception:
+                    log.warning("apply: API TAGGING — no document msearch after Search; "
+                                "falling back to the card scanner")
+                    break
+            else:
+                log.warning("apply: API TAGGING failed twice — falling back to the card scanner")
 
         if report is None:
             report = await _walk_feed_and_tag(page, to_apply)
@@ -2809,7 +3207,7 @@ async def apply_via_session(storage_value: str, topic_url: str, results: list[di
         return bad_input
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
+        browser = await pw.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO, args=CHROMIUM_LAUNCH_ARGS)
         context = await _new_browser_context(browser)
 
         # Inject the cached token into Local Storage BEFORE any page script
