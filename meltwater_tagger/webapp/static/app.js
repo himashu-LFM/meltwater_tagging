@@ -98,6 +98,34 @@ async function handleFile(file) {
 
 // ---- classify ----
 $("runBtn").addEventListener("click", run);
+
+// A large batch is CHUNKED into several smaller /api/classify requests so no
+// single request outlives a proxy/gateway timeout — which returns an HTML error
+// page that the browser can't parse as JSON (the "Unexpected token '<'" error).
+// Each chunk is small enough to finish well under a typical 60s gateway timeout,
+// even with extended thinking on. Results are merged and rendered together.
+const CLASSIFY_CHUNK_SIZE = 8;
+
+async function classifyChunk(chunk, brand, fetchMode, isFinal, deferRun) {
+  const r = await Auth.authedFetch("/api/classify", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls: chunk, brand, fetch_mode: fetchMode, defer_run: deferRun, final: isFinal }),
+  });
+  // A gateway timeout / crash returns HTML, not JSON. Detect it BEFORE parsing so
+  // the user gets a clear message instead of "Unexpected token '<'".
+  const ctype = r.headers.get("content-type") || "";
+  if (!ctype.includes("application/json")) {
+    const body = await r.text().catch(() => "");
+    if ([502, 503, 504].includes(r.status) || /^\s*<(?:!doctype|html)/i.test(body)) {
+      throw new Error(`The server timed out on a batch of ${chunk.length} URLs (gateway ${r.status || "timeout"}). It may still be processing — retry, or use a smaller batch.`);
+    }
+    throw new Error(`Unexpected non-JSON response from the server (status ${r.status || "?"}).`);
+  }
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || "Classification failed");
+  return data;
+}
+
 async function run() {
   $("inputErr").textContent = "";
   const brand = $("brand").value.trim();
@@ -108,35 +136,69 @@ async function run() {
 
   state.brand = brand;
   showView("loadingView");
+  const fetchMode = $("fetchMode").value;
+
+  const chunks = [];
+  for (let i = 0; i < urls.length; i += CLASSIFY_CHUNK_SIZE) chunks.push(urls.slice(i, i + CLASSIFY_CHUNK_SIZE));
+
+  // Only "defer" (skip per-chunk history) when we actually split into >1 request;
+  // a single-request batch saves its run to history exactly as before.
+  const deferRun = chunks.length > 1;
+  const merged = [];
+  let labels = null, runBrand = brand;
+  setLoaderProgress(0, urls.length);
   cycleLoaderText();
 
   try {
-    const r = await Auth.authedFetch("/api/classify", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ urls, brand, fetch_mode: $("fetchMode").value }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || "Classification failed");
-    state.results = data.results;
-    state.runId = data.run_id || null;
-    renderResults(data);
-    showView("resultsView");
-    const taggable = data.results.filter(x => x.action === "apply").length;
-    Toast.success(`Classified ${data.results.length} items · ${taggable} taggable.`, "Classification done");
+    for (let c = 0; c < chunks.length; c++) {
+      const data = await classifyChunk(chunks[c], brand, fetchMode, c === chunks.length - 1, deferRun);
+      merged.push(...(data.results || []));
+      if (data.labels) labels = data.labels;
+      if (data.run_brand) runBrand = data.run_brand;
+      setLoaderProgress(merged.length, urls.length);
+    }
   } catch (err) {
-    showView("inputView");
-    $("inputErr").textContent = err.message;
-    Toast.error(err.message, "Classification failed");
+    clearInterval(loaderTimer);
+    if (merged.length) {
+      // Keep whatever already succeeded so a late failure doesn't lose earlier work.
+      state.results = merged;
+      state.runId = null;
+      renderResults({ run_brand: runBrand, results: merged, labels: labels || undefined });
+      showView("resultsView");
+      Toast.error(`${err.message} Showing the ${merged.length} of ${urls.length} classified so far.`, "Partial result");
+    } else {
+      showView("inputView");
+      $("inputErr").textContent = err.message;
+      Toast.error(err.message, "Classification failed");
+    }
+    return;
   }
+
+  state.results = merged;
+  state.runId = null;
+  renderResults({ run_brand: runBrand, results: merged, labels: labels || undefined });
+  showView("resultsView");
+  const taggable = merged.filter(x => x.action === "apply").length;
+  Toast.success(`Classified ${merged.length} items · ${taggable} taggable.`, "Classification done");
 }
 
 let loaderTimer;
+let _loaderMsgIdx = 0;
+let _loaderProgress = { done: 0, total: 0 };
+const _LOADER_MSGS = ["Reading articles…", "Understanding coverage…", "Applying tagging rules…", "Assigning tags…"];
+function renderLoader() {
+  const p = _loaderProgress.total ? `  ·  ${_loaderProgress.done}/${_loaderProgress.total} done` : "";
+  $("loaderText").textContent = _LOADER_MSGS[_loaderMsgIdx] + p;
+}
+function setLoaderProgress(done, total) {
+  _loaderProgress = { done, total };
+  renderLoader();
+}
 function cycleLoaderText() {
-  const msgs = ["Reading articles…", "Understanding coverage…", "Applying tagging rules…", "Assigning tags…"];
-  let i = 0;
-  $("loaderText").textContent = msgs[0];
+  _loaderMsgIdx = 0;
+  renderLoader();
   clearInterval(loaderTimer);
-  loaderTimer = setInterval(() => { i = (i + 1) % msgs.length; $("loaderText").textContent = msgs[i]; }, 1800);
+  loaderTimer = setInterval(() => { _loaderMsgIdx = (_loaderMsgIdx + 1) % _LOADER_MSGS.length; renderLoader(); }, 1800);
 }
 
 // ---- render ----

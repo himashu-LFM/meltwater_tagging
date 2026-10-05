@@ -114,7 +114,10 @@ def run(jobs: list, workers: int = 6, prefer_snippet: bool = False) -> list[dict
                 flag = " [confirm]"
             else:
                 flag = ""
-            print(f"[{i}/{total}] {scope:6s} {ntags:2d} tags via {src:16s}{flag}  {u[:70]}")
+            # Print the FULL url (last column, so no misalignment) — a previous
+            # [:70] clip made links look truncated even though the stored url and
+            # everything downstream (fetch, decisions.json, apply) use it in full.
+            print(f"[{i}/{total}] {scope:6s} {ntags:2d} tags via {src:16s}{flag}  {u}")
 
     # keep input order in the output
     order = {j["url"]: i for i, j in enumerate(jobs)}

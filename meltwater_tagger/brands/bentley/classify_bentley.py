@@ -19,14 +19,103 @@ CLI:
 
 import argparse
 import json
+import os
+import signal
+import subprocess
 import sys
+import tempfile
 from urllib.parse import urlparse
 
 from anthropic import Anthropic
 
 import config
+
+# Extended thinking makes the model WORK THROUGH the protocol/rules instead of
+# pattern-matching on keywords — the single biggest lever on judgment adherence
+# (industry / corporate / pillar / coverage). It was disabled earlier purely for
+# speed; a bounded budget keeps each call to ~30-60s (well inside the timeout).
+# Tunable/disable-able without a code change: set MELTWATER_THINKING_BUDGET=0 off.
+_THINK_BUDGET = int(os.environ.get("MELTWATER_THINKING_BUDGET", "2000"))
+# Allow more time per call than before, since thinking legitimately adds latency;
+# a genuinely stuck call still flags for review rather than hanging.
+_CLASSIFY_TIMEOUT = float(os.environ.get("MELTWATER_CLASSIFY_TIMEOUT", "150"))
 from brands.bentley import prompts, rules, taxonomy
 from brands.bentley.fetcher import fetch_article
+
+# Run the whole fetch in a SEPARATE, killable process so a page that makes a
+# native parse OR a regex pass spin at 100% CPU can be killed on a hard timeout
+# instead of freezing the batch (in-thread it holds the GIL and starves every
+# other worker). On timeout the item is treated as unreadable -> review, never
+# dropped. Disable with MELTWATER_FETCH_ISOLATED=false (falls back to in-process).
+_FETCH_ISOLATED = os.environ.get("MELTWATER_FETCH_ISOLATED", "true").lower() == "true"
+_FETCH_TIMEOUT_S = int(os.environ.get("MELTWATER_FETCH_TIMEOUT", "90"))
+
+
+def _kill_tree(proc):
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _blocked_fetch(url, detail):
+    return {"url": url, "ok": False, "text": "", "chars": 0, "status": None,
+            "error": detail, "via": None, "summary_only": False, "author": "",
+            "syndicated_stub": False}
+
+
+def _fetch_isolated(url: str) -> dict:
+    """fetch_article in a killable subprocess with a hard timeout. Falls back to
+    in-process when disabled. A timeout/failure returns a not-ok result, which the
+    caller routes to review — identical output to fetch_article on any page that
+    completes normally (same code runs)."""
+    if not _FETCH_ISOLATED:
+        return fetch_article(url)
+    proj = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    fd, out = tempfile.mkstemp(prefix="mw_fetch_", suffix=".json")
+    os.close(fd)
+    kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" \
+        else {"start_new_session": True}
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "brands.bentley.fetch_worker", url, out],
+            cwd=proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+    except Exception as e:
+        try:
+            os.remove(out)
+        except Exception:
+            pass
+        return fetch_article(url)   # couldn't spawn -> in-process
+    try:
+        proc.wait(timeout=_FETCH_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        try:
+            os.remove(out)
+        except Exception:
+            pass
+        return _blocked_fetch(url, f"fetch exceeded {_FETCH_TIMEOUT_S}s (killed)")
+    try:
+        with open(out, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = _blocked_fetch(url, "fetch worker produced no result")
+    finally:
+        try:
+            os.remove(out)
+        except Exception:
+            pass
+    return data
 from brands.bentley.live_rules import rules_block
 
 _SINGLE = ["type_of_publication", "type_of_coverage", "region"]
@@ -256,6 +345,28 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
                       text_source="reporting-exclusion")
         return result
 
+    # 1b-i) client rule (2026-09, confirmed): a regional / localized edition (a
+    #       country-code subdomain, e.g. mx.investing.com, uk.finance.yahoo.com) is
+    #       a translated duplicate — Not in Scope. Runs BEFORE the financial-source
+    #       rule so a regional investing.com edition is dropped, while the main
+    #       investing.com still gets Financial/IR.
+    if rules.is_regional_edition(url):
+        result.update(scope="out", tags=["Not in scope"],
+                      tags_by_family={"type_of_coverage": ["Not in scope"]},
+                      reason="Regional / localized edition (country-code subdomain) — regional "
+                             "articles are not tracked.",
+                      text_source="regional-edition")
+        return result
+
+    # 1b-ii) A job posting / careers listing is not media coverage -> Not in Scope.
+    #        Deterministic and URL-based, so a bot-walled careers page (which would
+    #        otherwise go to review) is correctly dropped without a fetch.
+    if rules.is_jobs_page(url):
+        result.update(scope="out", reason="Job posting / careers listing — not media coverage.",
+                      tags=["Not in scope"], tags_by_family={"type_of_coverage": ["Not in scope"]},
+                      text_source="jobs-page")
+        return result
+
     # 1c) client rule (2026-09): openpr.com is ALWAYS Corporate - Financial / IR,
     #     even when Bentley is mentioned only in passing (every other source with a
     #     passing mention is Not in Scope). Emit Region + Financial/IR only — the
@@ -301,7 +412,7 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         #   open (fetch) the document URL and classify from its content. Then,
         #   per the client rule, branch on reachability:
         #     readable -> classify;  dead link -> Not in scope;  blocked -> review.
-        fetched = fetch_article(url)
+        fetched = _fetch_isolated(url)
         result["fetch"] = {"ok": fetched["ok"], "chars": fetched["chars"],
                            "status": fetched["status"], "error": fetched["error"]}
         # Client rule (2026-09): a SYNDICATED stub — a page with a "read more /
@@ -373,27 +484,31 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     result["live_rules_applied"] = n_learned
 
     # timeout so a slow/stuck call FLAGS for review instead of hanging for minutes
-    client = Anthropic(timeout=90.0)
+    client = Anthropic(timeout=_CLASSIFY_TIMEOUT)
+    kwargs = dict(
+        model=config.MODEL,
+        # max_tokens is the TOTAL cap (thinking + output); the structured decision
+        # itself is small, so this comfortably covers a full thinking budget too.
+        max_tokens=8000,
+        system=system_prompt,
+        messages=[{
+            "role": "user",
+            "content": prompts.ARTICLE_TEMPLATE.format(
+                source=source or _domain(url) or "(unknown outlet)",
+                pub_country=(pub_country or "(not provided - infer the region from the outlet's domain)"),
+                byline=(byline or "(none)"),
+                url=url,
+                text=text,
+            ),
+        }],
+        output_config={"format": {"type": "json_schema", "schema": prompts.DECISION_SCHEMA}},
+    )
+    # Extended thinking: let the model reason through the SELF-CHECK/rules before it
+    # commits to tags. Verified compatible with structured output. Env-gated.
+    if _THINK_BUDGET > 0:
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": _THINK_BUDGET}
     try:
-        resp = client.messages.create(
-            model=config.MODEL,
-            max_tokens=8000,
-            # No extended thinking: it was the main time sink (~minutes on big/non-EN
-            # articles). Classification is guided by explicit rules + deterministic
-            # post-processing, so standard generation is plenty and far faster.
-            system=system_prompt,
-            messages=[{
-                "role": "user",
-                "content": prompts.ARTICLE_TEMPLATE.format(
-                    source=source or _domain(url) or "(unknown outlet)",
-                    pub_country=(pub_country or "(not provided - infer the region from the outlet's domain)"),
-                    byline=(byline or "(none)"),
-                    url=url,
-                    text=text,
-                ),
-            }],
-            output_config={"format": {"type": "json_schema", "schema": prompts.DECISION_SCHEMA}},
-        )
+        resp = client.messages.create(**kwargs)
     except Exception as e:
         emsg = str(e).lower()
         if "credit balance" in emsg or "billing" in emsg:
@@ -495,6 +610,15 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         # guess — so do NOT keep the model's guess here. Clear it; missing_mandatory
         # then flags Region for review (and the country should be added to the map).
         fam["region"] = []
+
+    # Client rule (2026-09): M&A is its OWN category — an acquisition/merger story
+    # is Corporate - M&A, NEVER Financial / IR, even though it is financial in
+    # nature. If the model added both (a common error, e.g. the Naviam/Cohesive
+    # deal), M&A wins: drop Financial/IR so the Financial/IR-only suppression below
+    # does NOT delete the M&A + Product & Technology tags the client wants kept.
+    corp = fam.get("corporate") or []
+    if "Corporate - M&A" in corp and "Corporate - Financial / IR" in corp:
+        fam["corporate"] = [c for c in corp if c != "Corporate - Financial / IR"]
 
     # Client rule (2026-09): for a Corporate–Financial/IR article, output ONLY
     # Region + Corporate–Financial/IR — suppress every other family (Type of
