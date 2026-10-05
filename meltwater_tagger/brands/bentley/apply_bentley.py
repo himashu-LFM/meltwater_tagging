@@ -96,6 +96,8 @@ def plan_item(item: dict, allow: set[str] | None = None) -> dict:
 
 def build_plan(decisions: list[dict]) -> list[dict]:
     """Plan for every decision. Shared allowlist computed once."""
+    from brands.bentley import live_taxonomy
+    live_taxonomy.sync(taxonomy.RUN_BRAND)   # honour UI-added/removed tags
     allow = taxonomy.applicable_labels() | {NOT_IN_SCOPE}
     return [plan_item(d, allow) for d in decisions]
 

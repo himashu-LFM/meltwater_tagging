@@ -45,7 +45,8 @@ def _menu() -> str:
     return "\n".join(lines)
 
 
-SYSTEM_PROMPT = """You are a Bentley Systems media-monitoring classification specialist applying \
+def _build_system_prompt() -> str:
+    return """You are a Bentley Systems media-monitoring classification specialist applying \
 Bentley's official Meltwater Tag Protocol. You classify ONE article at a time and return JSON.
 
 ## CORE PRINCIPLE — tag only what is SIGNIFICANTLY discussed
@@ -209,10 +210,13 @@ Return the structured decision:
 - qa_validation: keep it SHORT — 1-2 sentences total covering only the key judgment calls (e.g. a confused tag you deliberately did NOT assign). Do NOT write a justification for every tag; brevity matters for speed.
 - uncertain: list any tag or decision you are NOT confident about (a genuine borderline call). Each entry = the tag + a few-word reason (e.g. "Industry - AEC (multi-sector, could be Energy)"). Still assign your best guess above; this just flags it so a human can confirm. Leave empty if you are confident.
 """.format(
-    not_in_scope="\n".join(f"- {t}" for t in rules.NOT_IN_SCOPE_TOPICS),
-    qa="\n".join(f"- {c}" for c in rules.QA_CORRECTIONS),
-    menu=_menu(),
-)
+        not_in_scope="\n".join(f"- {t}" for t in rules.NOT_IN_SCOPE_TOPICS),
+        qa="\n".join(f"- {c}" for c in rules.QA_CORRECTIONS),
+        menu=_menu(),
+    )
+
+
+SYSTEM_PROMPT = _build_system_prompt()
 
 
 # Per-article user message. Metadata (publication country, byline, source) is
@@ -240,60 +244,72 @@ def _labels(group):
     return [it["label"] for it in group]
 
 
-DECISION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "decision": {"type": "string", "enum": ["In Scope", "Not in Scope"]},
-        "reasoning": {"type": "string", "description": "One line justifying the scope decision."},
-        "type_of_publication": {
-            "type": "string",
-            "enum": _labels(tax.TYPE_OF_PUBLICATION) + [""],
-            "description": "Outlet kind. Empty only if Not in Scope.",
+def _build_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string", "enum": ["In Scope", "Not in Scope"]},
+            "reasoning": {"type": "string", "description": "One line justifying the scope decision."},
+            "type_of_publication": {
+                "type": "string",
+                "enum": _labels(tax.TYPE_OF_PUBLICATION) + [""],
+                "description": "Outlet kind. Empty only if Not in Scope.",
+            },
+            "type_of_coverage": {
+                "type": "string",
+                "enum": _labels(tax.TYPE_OF_COVERAGE),
+                "description": "Use 'Not in scope' when decision is Not in Scope.",
+            },
+            "region": {
+                "type": "string",
+                "enum": _labels(tax.REGION) + [""],
+                "description": "By publication country of origin. Empty only if Not in Scope.",
+            },
+            "corporate": {
+                "type": "array",
+                "items": {"type": "string", "enum": _labels(tax.CORPORATE)},
+                "description": "Zero or more Corporate tags.",
+            },
+            "pillar": {
+                "type": "array",
+                "items": {"type": "string", "enum": _labels(tax.PILLAR)},
+            },
+            "industry": {
+                "type": "array",
+                "items": {"type": "string", "enum": _labels(tax.INDUSTRY)},
+                "description": "At most one; leave EMPTY when there is no material industry theme (Industry is optional).",
+            },
+            "product": {
+                "type": "array",
+                "items": {"type": "string", "enum": _labels(tax.PRODUCT)},
+                "description": "Only products explicitly named in the text.",
+            },
+            "spokesperson": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Format 'Spokesperson | <Name>', only if quoted / a significant source.",
+            },
+            "qa_validation": {
+                "type": "string",
+                "description": "SHORT: 1-2 sentences on the key judgment calls only. Not a per-tag essay.",
+            },
+            "uncertain": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Tags/decisions you are NOT confident about (borderline) — each: tag + short reason. Empty if confident.",
+            },
         },
-        "type_of_coverage": {
-            "type": "string",
-            "enum": _labels(tax.TYPE_OF_COVERAGE),
-            "description": "Use 'Not in scope' when decision is Not in Scope.",
-        },
-        "region": {
-            "type": "string",
-            "enum": _labels(tax.REGION) + [""],
-            "description": "By publication country of origin. Empty only if Not in Scope.",
-        },
-        "corporate": {
-            "type": "array",
-            "items": {"type": "string", "enum": _labels(tax.CORPORATE)},
-            "description": "Zero or more Corporate tags.",
-        },
-        "pillar": {
-            "type": "array",
-            "items": {"type": "string", "enum": _labels(tax.PILLAR)},
-        },
-        "industry": {
-            "type": "array",
-            "items": {"type": "string", "enum": _labels(tax.INDUSTRY)},
-            "description": "At most one; leave EMPTY when there is no material industry theme (Industry is optional).",
-        },
-        "product": {
-            "type": "array",
-            "items": {"type": "string", "enum": _labels(tax.PRODUCT)},
-            "description": "Only products explicitly named in the text.",
-        },
-        "spokesperson": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Format 'Spokesperson | <Name>', only if quoted / a significant source.",
-        },
-        "qa_validation": {
-            "type": "string",
-            "description": "SHORT: 1-2 sentences on the key judgment calls only. Not a per-tag essay.",
-        },
-        "uncertain": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Tags/decisions you are NOT confident about (borderline) — each: tag + short reason. Empty if confident.",
-        },
-    },
-    "required": ["decision", "reasoning", "type_of_coverage", "qa_validation"],
-    "additionalProperties": False,
-}
+        "required": ["decision", "reasoning", "type_of_coverage", "qa_validation"],
+        "additionalProperties": False,
+    }
+
+
+DECISION_SCHEMA = _build_schema()
+
+
+def rebuild() -> None:
+    """Regenerate SYSTEM_PROMPT + DECISION_SCHEMA from the CURRENT taxonomy —
+    called by live_taxonomy after the client adds/removes tags in the UI."""
+    global SYSTEM_PROMPT, DECISION_SCHEMA
+    SYSTEM_PROMPT = _build_system_prompt()
+    DECISION_SCHEMA = _build_schema()

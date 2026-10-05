@@ -87,6 +87,12 @@ async def apply_results(email, password, results, request_otp=None, throttle_s=0
     ask the analyst to clear it. On a fresh login (no saved_state), the
     resulting session is captured via `on_state_captured(state_json)` so later
     runs need no OTP until it's cleared."""
+    # Never apply a tag the client removed in Brand studio's Tag list (no-op
+    # when nothing has been removed there).
+    from brands.bentley import live_taxonomy
+    results, ui_removed = live_taxonomy.drop_removed_tags(results)
+    if ui_removed:
+        log.info("bentley apply: skipping tags removed in the Tag list: %s", sorted(ui_removed))
     tag_map = aa.resolve_tag_map()
     manifest, unmapped = aa.manifest_from_results(results, tag_map)
     if not manifest:

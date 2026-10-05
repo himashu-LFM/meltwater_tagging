@@ -212,6 +212,24 @@ def delete_feedback_rule(rule_id: str) -> None:
     get_client().table("feedback_rules").delete().eq("id", rule_id).execute()
 
 
+# --- Client-edited tag list (taxonomy brands like Bentley) ------------------
+
+def get_taxonomy_overrides(brand_name: str) -> dict:
+    r = (get_client().table("taxonomy_overrides")
+         .select("overrides").eq("brand_name", brand_name).execute())
+    return (r.data[0].get("overrides") or {}) if r.data else {}
+
+
+def save_taxonomy_overrides(brand_name: str, overrides: dict,
+                            updated_by: str | None = None) -> None:
+    from datetime import datetime, timezone
+    payload = {"brand_name": brand_name, "overrides": overrides,
+               "updated_at": datetime.now(timezone.utc).isoformat()}
+    if updated_by:
+        payload["updated_by"] = updated_by
+    get_client().table("taxonomy_overrides").upsert(payload, on_conflict="brand_name").execute()
+
+
 def upsert_brand(name: str, roll_up_terms: list[str] | None = None,
                   meltwater_topic_url: str | None = None,
                   environment: str | None = None) -> dict:

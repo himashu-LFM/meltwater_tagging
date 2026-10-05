@@ -209,3 +209,29 @@ tr.row-edited td:first-child { box-shadow: inset 3px 0 0 #fdb913; }
   font-weight:600;padding:4px 10px;font-size:11px}
 .chip.warn{background:rgba(255,190,80,.14);color:#ffbe50;border:1px solid rgba(255,190,80,.3)}
 .tags-cell{display:flex;flex-wrap:wrap;gap:5px;max-width:420px}
+
+/* Brand studio — editable tag list */
+.tl-chips{display:flex;flex-wrap:wrap;gap:6px;padding:4px 4px 14px 30px}
+.tl-toolbar{display:flex;align-items:center;gap:14px;margin:18px 0 8px}
+.tl-toolbar input{flex:1;max-width:360px;padding:10px 14px;font-size:14px}
+.tl-fam{border-top:1px solid var(--stroke)}
+.tl-fam-head{all:unset;box-sizing:border-box;width:100%;display:flex;align-items:center;gap:10px;padding:11px 4px;cursor:pointer;font-size:14px}
+.tl-fam-head:hover .tl-fam-name{color:var(--accent)}
+.tl-fam-head:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:8px}
+.tl-caret{display:inline-block;width:16px;color:var(--muted);transition:transform .2s}
+.tl-fam.open .tl-caret{transform:rotate(90deg)}
+.tl-fam-name{font-weight:600;color:var(--txt)}
+.tl-count{color:var(--muted);font-size:12px}
+.tl-badge{font-size:11px;padding:2px 8px;border-radius:999px}
+.tl-badge.new{background:rgba(37,208,160,.14);color:var(--pos)}
+.tl-badge.gone{border:1px dashed rgba(255,255,255,.25);color:var(--muted)}
+.tag-card .chip.tl-chip{display:inline-flex;align-items:center;gap:6px;text-transform:none}
+.tl-chip em{font-style:normal;font-size:10px;opacity:.75;text-transform:uppercase;letter-spacing:.04em}
+.tl-chip.tl-custom{background:rgba(37,208,160,.14);color:var(--pos);border-color:rgba(37,208,160,.35)}
+.tl-chip.tl-removed{background:transparent;color:var(--muted);border:1px dashed rgba(255,255,255,.2)}
+.tl-x,.tl-restore{background:none;border:0;color:inherit;cursor:pointer;font-size:14px;line-height:1;padding:0 0 0 2px;opacity:.6}
+.tl-x:hover,.tl-restore:hover{opacity:1}
+
+/* Brand studio — inactive feedback rules (kept, but not sent to the classifier) */
+.tag-card.fb-inactive{opacity:.55;border-style:dashed}
+.tag-card .chip.fb-inactive-chip{background:transparent;color:var(--muted);border:1px dashed rgba(255,255,255,.25);margin-left:6px;text-transform:none}

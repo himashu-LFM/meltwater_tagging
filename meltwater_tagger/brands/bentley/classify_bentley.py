@@ -117,6 +117,7 @@ def _fetch_isolated(url: str) -> dict:
             pass
     return data
 from brands.bentley.live_rules import rules_block
+from brands.bentley import live_taxonomy
 
 _SINGLE = ["type_of_publication", "type_of_coverage", "region"]
 _MULTI = ["corporate", "pillar", "industry", "product", "spokesperson"]
@@ -328,6 +329,9 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     result = {"url": url, "scope": None, "tags": [], "tags_by_family": {},
               "reason": "", "qa": "", "needs_review": [], "fetch": {},
               "live_rules_applied": 0, "text_source": None}
+
+    # Pick up any tags the client added/removed in the UI (TTL-cached).
+    live_taxonomy.sync(taxonomy.RUN_BRAND)
 
     # 1) deterministic block-list — no LLM, no fetch needed
     blocked = rules.blocked_source(url=url, source=source)

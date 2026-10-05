@@ -181,7 +181,11 @@ def region_for_country(country: str) -> str:
     c = (country or "").strip().lower().rstrip(".")
     if not c:
         return ""
-    return _REGION_BY_COUNTRY.get(c, "")
+    region = _REGION_BY_COUNTRY.get(c, "")
+    # A Region tag the client removed in the UI must not be emitted.
+    if region and region not in {t["label"] for t in REGION}:
+        return ""
+    return region
 
 # ---------------------------------------------------------------------------
 # CORPORATE — about the COMPANY Bentley. "Exclusive to other types": use a
@@ -510,11 +514,19 @@ def applicable_labels() -> set[str]:
 # spokespeople are named). So we can reliably find them by scanning the full
 # article text, instead of relying on the model's recall.
 # ---------------------------------------------------------------------------
-def products_in_text(text: str) -> list[str]:
+def products_in_text(text: str, min_occurrences: int = 1) -> list[str]:
+    """Products named in the text. `min_occurrences` is the total alias-hit count a
+    product must reach to be returned: with 1, any single mention counts; with 2+,
+    a product named only ONCE (typically in an 'About Bentley' / product-portfolio
+    boilerplate list, e.g. SYNCHRO listed beside MicroStation/ProjectWise) is NOT
+    returned — only products actually discussed/repeated are. The caller uses a
+    higher threshold for the deterministic add-on so it doesn't over-tag a product
+    the model deliberately left off as a mere name-drop."""
     low = (text or "").lower()
     out = []
     for p in PRODUCT:
-        if any(a.lower() in low for a in p.get("aliases", [])):
+        count = sum(low.count(a.lower()) for a in p.get("aliases", []))
+        if count >= min_occurrences:
             out.append(p["label"])
     return out
 
@@ -593,21 +605,9 @@ _FAMILY_LISTS = {
 }
 
 
-def _apply_overrides() -> dict:
-    """Apply optional external taxonomy overrides. Mutates the family lists +
-    SPOKESPEOPLE IN PLACE (so ALL_TAG_GROUPS and every helper see the change).
-    Returns a {added, removed, renamed} summary, or {} if nothing was applied.
-    Never raises — a missing/invalid file leaves the hardcoded protocol intact."""
-    import os
-    import json
-    path = os.environ.get("BENTLEY_TAXONOMY_OVERRIDES") or \
-        os.path.join(os.path.dirname(__file__), "taxonomy_overrides.json")
-    if not os.path.exists(path):
-        return {}
-    try:
-        ov = json.load(open(path, encoding="utf-8"))
-    except Exception:
-        return {}
+def _apply_ov(ov: dict) -> dict:
+    """Apply one overrides dict (format above) to the lists IN PLACE. Returns a
+    {added, removed, renamed} summary, or {} if nothing changed."""
     if not isinstance(ov, dict):
         return {}
     summary = {"added": 0, "removed": 0, "renamed": 0}
@@ -620,7 +620,7 @@ def _apply_overrides() -> dict:
         have = {t.get("label") for t in lst}
         for it in items:
             if isinstance(it, dict) and it.get("label") and it["label"] not in have:
-                lst.append(it)
+                lst.append(dict(it))
                 have.add(it["label"])
                 summary["added"] += 1
 
@@ -647,7 +647,7 @@ def _apply_overrides() -> dict:
     have_sp = {sp.get("name") for sp in SPOKESPEOPLE}
     for sp in (ov.get("spokespeople_add") or []):
         if isinstance(sp, dict) and sp.get("name") and sp["name"] not in have_sp:
-            SPOKESPEOPLE.append(sp)
+            SPOKESPEOPLE.append(dict(sp))
             have_sp.add(sp["name"])
             summary["added"] += 1
     sp_rm = set(ov.get("spokespeople_remove") or [])
@@ -659,5 +659,52 @@ def _apply_overrides() -> dict:
     return summary if any(summary.values()) else {}
 
 
+def _apply_overrides() -> dict:
+    """Apply the optional overrides FILE. Never raises — a missing/invalid file
+    leaves the hardcoded protocol intact."""
+    import os
+    import json
+    path = os.environ.get("BENTLEY_TAXONOMY_OVERRIDES") or \
+        os.path.join(os.path.dirname(__file__), "taxonomy_overrides.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        ov = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return {}
+    return _apply_ov(ov)
+
+
 # Applied once, at import — safe no-op when no overrides file is present.
 OVERRIDES_APPLIED = _apply_overrides()
+
+
+# ---------------------------------------------------------------------------
+# UI-EDITED OVERRIDES (DB-backed) — the client adds/removes tags from the Brand
+# studio page; live_taxonomy.py fetches that overrides dict from Supabase and
+# calls set_runtime_overrides() before each classify/apply. It is applied on top
+# of a snapshot of the BASE taxonomy (hardcoded + overrides file), so removing
+# an override cleanly restores the base tag.
+# ---------------------------------------------------------------------------
+import copy as _copy
+
+_BASE = {name: _copy.deepcopy(lst) for name, lst in _FAMILY_LISTS.items()}
+_BASE_SPOKESPEOPLE = _copy.deepcopy(SPOKESPEOPLE)
+
+
+def set_runtime_overrides(ov: dict | None) -> dict:
+    """Reset every family list to the base taxonomy, then apply `ov` (same
+    format as the overrides file). Mutates IN PLACE so every module holding a
+    reference sees the change. Returns the apply summary."""
+    for name, lst in _FAMILY_LISTS.items():
+        lst[:] = _copy.deepcopy(_BASE[name])
+    SPOKESPEOPLE[:] = _copy.deepcopy(_BASE_SPOKESPEOPLE)
+    return _apply_ov(ov or {})
+
+
+def base_labels() -> dict:
+    """{FAMILY_KEY: [labels]} of the base taxonomy (before UI overrides), plus
+    "SPOKESPERSON": [names]. Lets the UI tell built-in tags from client-added."""
+    out = {name: [t["label"] for t in lst] for name, lst in _BASE.items()}
+    out["SPOKESPERSON"] = [sp["name"] for sp in _BASE_SPOKESPEOPLE]
+    return out
