@@ -67,6 +67,21 @@ ALLOW_CDP = os.environ.get("MELTWATER_ALLOW_CDP", "true").lower() == "true"
 # Set MELTWATER_USE_API=false to force the old browser tagger.
 USE_API_APPLY = os.environ.get("MELTWATER_USE_API", "true").lower() == "true"
 
+# --- Throughput knobs (surfaced to the dashboard) ----------------------------
+# The dashboard splits a big batch into CLASSIFY_CHUNK_SIZE-URL requests and
+# keeps CLASSIFY_PARALLEL of them in flight. They live here, not hardcoded in
+# app.js, so throughput can be retuned with an env var + restart instead of a
+# code change and redeploy.
+# Keep CLASSIFY_PARALLEL BELOW gunicorn's --threads so page loads never starve
+# while a batch runs. Total concurrent Anthropic calls is roughly
+# CLASSIFY_PARALLEL x MELTWATER_CLASSIFY_CONCURRENCY.
+CLASSIFY_CHUNK_SIZE = int(os.environ.get("MELTWATER_CLASSIFY_CHUNK_SIZE", "8"))
+CLASSIFY_PARALLEL = int(os.environ.get("MELTWATER_CLASSIFY_PARALLEL", "3"))
+# Warn when a classify request is slower than this per post, so a throughput
+# regression shows up in the logs instead of only as a user complaint.
+SLOW_CLASSIFY_SECONDS_PER_POST = float(
+    os.environ.get("MELTWATER_SLOW_CLASSIFY_SECONDS", "6"))
+
 
 # --- MFA (Microsoft SSO OTP) human-in-the-loop bridge -----------------------
 # For @meltwater.com logins the apply job pauses mid-login waiting for the SMS
@@ -158,6 +173,8 @@ def run_async(coro):
 @app.route("/")
 def index():
     return render_template("index.html", allow_cdp=ALLOW_CDP,
+                            classify_chunk_size=CLASSIFY_CHUNK_SIZE,
+                            classify_parallel=CLASSIFY_PARALLEL,
                             supabase_url=db.SUPABASE_URL, supabase_anon_key=db.SUPABASE_ANON_KEY)
 
 
@@ -863,6 +880,7 @@ def extract():
 @app.route("/api/classify", methods=["POST"])
 @require_auth
 def classify():
+    _t_req = _time.monotonic()
     data = request.get_json(force=True)
     urls = [u.strip() for u in data.get("urls", []) if u and u.strip()]
     brand = (data.get("brand") or "").strip()
@@ -930,8 +948,19 @@ def classify():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
     applied = sum(1 for r in results if r.get("tag"))
-    log.info("classify done: brand=%r total=%d tagged=%d (user=%s)",
-              brand, len(results), applied, g.user.id)
+    _elapsed = _time.monotonic() - _t_req
+    _per_post = _elapsed / max(1, len(urls))
+    log.info("classify done: brand=%r total=%d tagged=%d in %.1fs (%.2fs/post) (user=%s)",
+              brand, len(results), applied, _elapsed, _per_post, g.user.id)
+    if _per_post > SLOW_CLASSIFY_SECONDS_PER_POST:
+        log.warning(
+            "classify SLOW: %.2fs/post (threshold %.1fs). Throughput today: the dashboard "
+            "sends %d request(s) of %d URL(s) in parallel, and each request classifies %d "
+            "post(s) at once. If the box is idle, raise MELTWATER_CLASSIFY_PARALLEL "
+            "(keep it under gunicorn --threads) and/or MELTWATER_CLASSIFY_CONCURRENCY. "
+            "Check the per-stage fetch/llm timings above first, and rule out Anthropic 429s.",
+            _per_post, SLOW_CLASSIFY_SECONDS_PER_POST, CLASSIFY_PARALLEL,
+            CLASSIFY_CHUNK_SIZE, config.CLASSIFY_CONCURRENCY)
 
     # Don't save a run per chunk (it would fragment history into many partial
     # runs). Chunked runs are simply not written to history for now; a single
@@ -1095,6 +1124,7 @@ def _classify_bentley_urls(urls):
 async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_docs=None):
     posts = [{"permalink": u, "excerpt": ""} for u in urls]
 
+    _t_fetch = _time.monotonic()
     log.info("fetch start: mode=%r posts=%d", fetch_mode, len(posts))
     if fetch_mode == "apify":
         # Paid Apify actor: one record per URL (post OR the specific comment),
@@ -1163,7 +1193,8 @@ async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_
             posts = await asyncio.gather(*[_f(p) for p in posts])
 
     got_text = sum(1 for p in posts if p.get("text"))
-    log.info("fetch done: mode=%r got_text=%d/%d", fetch_mode, got_text, len(posts))
+    _fetch_s = _time.monotonic() - _t_fetch
+    log.info("fetch done: mode=%r got_text=%d/%d in %.1fs", fetch_mode, got_text, len(posts), _fetch_s)
     if got_text < len(posts) * 0.5:
         log.warning("fetch got text for less than half the posts (mode=%r) — "
                      "classifications for the rest will be unreliable", fetch_mode)
@@ -1195,6 +1226,7 @@ async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_
 
     anthropic = AsyncAnthropic()
     sem = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
+    _t_llm = _time.monotonic()
     decisions = await asyncio.gather(
         *[classify_web.classify_post(
             anthropic, config.MODEL, p["_brand"], p["permalink"], p.get("text", ""), sem,
@@ -1205,6 +1237,9 @@ async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_
             deleted=bool(p.get("deleted")),
         ) for p in posts]
     )
+    _llm_s = _time.monotonic() - _t_llm
+    log.info("classify llm: %d post(s) in %.1fs (%.2fs/post, concurrency=%d); fetch took %.1fs",
+             len(posts), _llm_s, _llm_s / max(1, len(posts)), config.CLASSIFY_CONCURRENCY, _fetch_s)
     brand_by_url = {p["permalink"]: p["_brand"] for p in posts}
 
     errors = [d for d in decisions if "classification error" in (d.get("reason") or "")]

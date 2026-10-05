@@ -121,7 +121,22 @@ $("runBtn").addEventListener("click", run);
 // page that the browser can't parse as JSON (the "Unexpected token '<'" error).
 // Each chunk is small enough to finish well under a typical 60s gateway timeout,
 // even with extended thinking on. Results are merged and rendered together.
-const CLASSIFY_CHUNK_SIZE = 8;
+// Server-provided (MELTWATER_CLASSIFY_CHUNK_SIZE); falls back to 8 so the page
+// still works if the template didn't supply it.
+const CLASSIFY_CHUNK_SIZE = Number(window.__CLASSIFY_CHUNK_SIZE__) || 8;
+
+// How many chunk requests may be IN FLIGHT at once.
+// Chunks used to run strictly one-after-another, so only CLASSIFY_CHUNK_SIZE
+// posts were ever being classified at any moment — a 116-URL batch became 15
+// sequential round trips (~15 min). Overlapping them keeps each request just as
+// small (so the gateway-timeout protection above still holds) while actually
+// using the server's capacity.
+// Keep this BELOW gunicorn's --threads (see Dockerfile/Procfile) so a thread is
+// always free to serve page loads while a batch is running. Raising it also
+// multiplies concurrent Anthropic calls (this x the server's
+// MELTWATER_CLASSIFY_CONCURRENCY), so dial it back if rate limits start showing
+// up as "classification error" rows.
+const CLASSIFY_PARALLEL = Number(window.__CLASSIFY_PARALLEL__) || 3;
 
 async function classifyChunk(chunk, brand, fetchMode, isFinal, deferRun, urlBrands, urlDocs) {
   // Both maps are keyed by URL and cover the WHOLE upload, so send only the
@@ -179,20 +194,52 @@ async function run() {
   setLoaderProgress(0, urls.length);
   cycleLoaderText();
 
+  // Results are collected PER CHUNK INDEX and flattened at the end, so the
+  // rendered order still matches the upload order even though chunks now finish
+  // out of order.
+  const perChunk = new Array(chunks.length);
+  let classified = 0;
+  const collect = () => perChunk.filter(Boolean).flat();
+
   try {
     // Per-row brand / Document ID maps come from the uploaded export. Pasted
     // URLs have neither, so send nothing and let the dropdown brand apply.
     const urlBrands = pasted.length ? null : state.urlBrands;
     const urlDocs = pasted.length ? null : state.urlDocs;
-    for (let c = 0; c < chunks.length; c++) {
-      const data = await classifyChunk(chunks[c], brand, fetchMode, c === chunks.length - 1, deferRun,
+
+    const sendChunk = async (i, isFinal) => {
+      const data = await classifyChunk(chunks[i], brand, fetchMode, isFinal, deferRun,
                                        urlBrands, urlDocs);
-      merged.push(...(data.results || []));
+      perChunk[i] = data.results || [];
+      // Every chunk of a run returns the same labels/run_brand, so which one
+      // lands last doesn't matter.
       if (data.labels) labels = data.labels;
       if (data.run_brand) runBrand = data.run_brand;
-      setLoaderProgress(merged.length, urls.length);
-    }
+      classified += perChunk[i].length;
+      setLoaderProgress(classified, urls.length);
+    };
+
+    // The LAST chunk carries final=true, which tells the server to release the
+    // per-user upload cache. It must therefore be the last one to RUN — if it
+    // finished while other chunks were still going, they'd lose the cached
+    // per-row metadata (publication country / byline / Document ID). So every
+    // other chunk runs in a small concurrent pool first, then the final chunk
+    // goes on its own.
+    const lastIdx = chunks.length - 1;
+    const queue = chunks.map((_, i) => i).filter(i => i !== lastIdx);
+    let next = 0;
+    const worker = async () => {
+      while (next < queue.length) await sendChunk(queue[next++], false);
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(CLASSIFY_PARALLEL, queue.length) }, worker));
+    await sendChunk(lastIdx, true);
+
+    merged.push(...collect());
   } catch (err) {
+    // Keep whatever finished before the failure (same as before, just gathered
+    // from the per-chunk slots).
+    merged.push(...collect());
     clearInterval(loaderTimer);
     if (merged.length) {
       // Keep whatever already succeeded so a late failure doesn't lose earlier work.
