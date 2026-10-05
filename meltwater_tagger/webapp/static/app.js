@@ -13,6 +13,9 @@ async function loadBrands() {
   const data = await r.json();
   const sel = $("brand");
   if (data.brands && data.brands.length) {
+    // Remember each brand's pipeline — `run()` chunks only for taxonomy ones.
+    state.brandStyle = {};
+    data.brands.forEach(b => { state.brandStyle[b.name] = b.style || "sentiment"; });
     sel.innerHTML = data.brands.map(b => `<option value="${escAttr(b.name)}">${escapeHtml(b.name)}</option>`).join("");
     // Brands come back alphabetically, so without this the first one is
     // auto-selected — and running the wrong brand silently uses the wrong
@@ -121,6 +124,17 @@ $("runBtn").addEventListener("click", run);
 // page that the browser can't parse as JSON (the "Unexpected token '<'" error).
 // Each chunk is small enough to finish well under a typical 60s gateway timeout,
 // even with extended thinking on. Results are merged and rendered together.
+// TAXONOMY brands (Bentley) only. That pipeline reads each article in full and
+// is slow enough per item that one big request hits the gateway timeout, which
+// is what this splitting was added for.
+//
+// SENTIMENT brands (Kaseya and friends) deliberately do NOT chunk. They fetch
+// through Apify, where each request is a separate actor run and most of a
+// run's time is the actor booting (~90s measured), not scraping. Splitting
+// there pays that boot cost once per chunk, and it also shrank the per-run
+// maxPosts/maxComments the server derived from the batch size — together that
+// turned a 63-URL fetch that took 10s and resolved 63/63 into an 8-URL fetch
+// taking ~98s and resolving 1/8.
 const CLASSIFY_CHUNK_SIZE = 8;
 
 async function classifyChunk(chunk, brand, fetchMode, isFinal, deferRun, urlBrands, urlDocs) {
@@ -168,8 +182,12 @@ async function run() {
   showView("loadingView");
   const fetchMode = $("fetchMode").value;
 
+  // Split only for the taxonomy pipeline. Sentiment brands go in one request,
+  // the way they did before chunking existed — see CLASSIFY_CHUNK_SIZE.
+  const isTaxonomy = (state.brandStyle || {})[brand] === "taxonomy";
+  const size = isTaxonomy ? CLASSIFY_CHUNK_SIZE : urls.length;
   const chunks = [];
-  for (let i = 0; i < urls.length; i += CLASSIFY_CHUNK_SIZE) chunks.push(urls.slice(i, i + CLASSIFY_CHUNK_SIZE));
+  for (let i = 0; i < urls.length; i += Math.max(1, size)) chunks.push(urls.slice(i, i + Math.max(1, size)));
 
   // Only "defer" (skip per-chunk history) when we actually split into >1 request;
   // a single-request batch saves its run to history exactly as before.

@@ -188,6 +188,17 @@ def brands_page():
 def get_brands():
     try:
         brands = db.list_brands()
+        # Tell the UI which pipeline each brand uses. It needs this to decide
+        # whether to split a big upload into several requests: the taxonomy
+        # path (Bentley) is slow enough per item to hit a gateway timeout, but
+        # the sentiment path fetches through Apify, where every extra request
+        # is another actor cold start — so splitting there makes it slower.
+        from brands import get_profile
+        for b in brands:
+            try:
+                b["style"] = get_profile(b.get("name") or "").style
+            except Exception:
+                b["style"] = "sentiment"
         log.info("listed %d brands for user=%s", len(brands), g.user.id)
         return jsonify({"brands": brands})
     except Exception as e:
@@ -802,10 +813,25 @@ def extract():
                 log.info("extract: Input Name -> brand: %s%s",
                          {k: v for k, v in seen_inputs.items()},
                          f" | UNRESOLVED: {unresolved}" if unresolved else "")
-            # A single-brand file should still drive the dropdown.
-            distinct = {v for v in url_brands.values()}
-            if len(distinct) == 1 and not brand:
-                brand = next(iter(distinct))
+            # The resolved per-row brand OVERRIDES infer_brand(). infer_brand
+            # runs the Input Name through normalize_brand(), which rolls every
+            # Kaseya product up to plain "Kaseya" — so a Kaseya V2 export came
+            # back as "Kaseya" and the UI auto-selected that in the dropdown.
+            # "Kaseya" is a real brand pointing at a DIFFERENT saved search
+            # ("Kaseya / Datto Brand Only | Reddit"), so the run looked right
+            # and silently tagged against the wrong search.
+            if url_brands:
+                counts: dict[str, int] = {}
+                for v in url_brands.values():
+                    counts[v] = counts.get(v, 0) + 1
+                # Most rows win. For a mixed file this only sets the dropdown
+                # default — every row still carries its own brand — so the
+                # choice just decides where UNRESOLVED rows land.
+                top = max(counts, key=lambda k: counts[k])
+                if top != brand:
+                    log.info("extract: dropdown brand %r -> %r (from Input Name; %s)",
+                             brand or "(none)", top, counts)
+                brand = top
 
     # If this is a Meltwater taxonomy export (carries a Document ID), stash the
     # FULL rows (country, byline, snippet, body, document id, existing tags) so

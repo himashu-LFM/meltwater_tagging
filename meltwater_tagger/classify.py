@@ -535,6 +535,13 @@ async def fetch_via_apify(posts: list[dict]) -> list[dict]:
     # Token goes in the Authorization HEADER, never the query string — httpx logs
     # the full URL, so a ?token=... would end up in plain text in the app logs.
     url = f"https://api.apify.com/v2/acts/{config.APIFY_ACTOR}/run-sync-get-dataset-items"
+    # `build` pins the actor version. Without it Apify runs whatever the author
+    # last tagged "latest", so a bad release lands on us with no warning — which
+    # is exactly what happened on 2026-10-05. The thread-recovery pass below
+    # reuses this same `url`, so both calls stay on the pinned build.
+    if config.APIFY_BUILD:
+        url += f"?build={config.APIFY_BUILD}"
+        print(f"apify: pinned to build {config.APIFY_BUILD}", flush=True)
     headers = {"Authorization": f"Bearer {config.APIFY_TOKEN}"}
 
     async with httpx.AsyncClient(timeout=config.APIFY_TIMEOUT + 30) as client:
@@ -545,8 +552,16 @@ async def fetch_via_apify(posts: list[dict]) -> list[dict]:
                 # We judge each mention on its OWN content, so never pull a
                 # thread's other comments (they'd also be billed).
                 "scrapeComments": False,
-                "maxPosts": len(chunk) + 10,
-                "maxComments": len(chunk) + 10,
+                # NOT len(chunk)+10. These are caps on how much the actor
+                # looks at, not on how much we get billed for — billing is per
+                # record returned. Tying them to the batch size meant a small
+                # batch starved the actor: with 63 URLs the cap was 73 and it
+                # resolved 63/63 in 10s, but once the UI started sending
+                # batches of 8 the cap fell to 18, the actor gave up before
+                # reaching the target comments, and it resolved 1/8 in ~98s —
+                # then the thread fallback had to re-scrape anyway.
+                "maxPosts": config.APIFY_MAX_POSTS,
+                "maxComments": config.APIFY_MAX_COMMENTS,
             }
             try:
                 r = await client.post(url, json=payload, headers=headers)
@@ -609,22 +624,30 @@ async def _apify_recover_via_threads(client, url, headers, missing: list[dict]) 
     print(f"apify: retrying {len(missing)} unresolved mention(s) via "
           f"{len(by_thread)} parent thread(s)", flush=True)
 
-    for pid, group in by_thread.items():
+    # Each thread is a SEPARATE Apify actor run, and most of a run's wall time is
+    # the actor booting, not the scraping — measured 94s for the first call then
+    # 25s/22s once it was warm. Running the threads one after another therefore
+    # paid that overhead once per thread. Fire them together instead; the
+    # semaphore keeps us inside Apify's concurrent-run allowance.
+    sem = asyncio.Semaphore(max(1, config.APIFY_THREAD_CONCURRENCY))
+
+    async def _one_thread(pid: str, group: list[dict]) -> None:
         sub = group[0].get("permalink", "").split("/comment/")[0]
-        try:
-            r = await client.post(url, headers=headers, json={
-                "urls": [sub],
-                "scrapeComments": True,       # needed to reach the comment
-                "maxPosts": 2,
-                "maxComments": config.APIFY_THREAD_MAX_COMMENTS,
-            })
-            if r.status_code not in (200, 201):
-                print(f"apify: thread retry failed for {pid} (HTTP {r.status_code})", flush=True)
-                continue
-            records = r.json() or []
-        except Exception as e:
-            print(f"apify: thread retry errored for {pid}: {type(e).__name__}: {e}", flush=True)
-            continue
+        async with sem:
+            try:
+                r = await client.post(url, headers=headers, json={
+                    "urls": [sub],
+                    "scrapeComments": True,       # needed to reach the comment
+                    "maxPosts": 2,
+                    "maxComments": config.APIFY_THREAD_MAX_COMMENTS,
+                })
+                if r.status_code not in (200, 201):
+                    print(f"apify: thread retry failed for {pid} (HTTP {r.status_code})", flush=True)
+                    return
+                records = r.json() or []
+            except Exception as e:
+                print(f"apify: thread retry errored for {pid}: {type(e).__name__}: {e}", flush=True)
+                return
 
         by_id = {(rec.get("id") or "").lower(): rec for rec in records if rec.get("id")}
         # Thread-scraped comment records carry no postTitle, so take the parent
@@ -647,6 +670,11 @@ async def _apify_recover_via_threads(client, url, headers, missing: list[dict]) 
             else:
                 print(f"apify: still unresolved after thread retry: {p.get('permalink')}",
                       flush=True)
+
+    # Each task only touches its own group's dicts, so there is nothing shared
+    # to race on. return_exceptions keeps one bad thread from killing the rest.
+    await asyncio.gather(*[_one_thread(pid, grp) for pid, grp in by_thread.items()],
+                         return_exceptions=True)
 
 
 async def fetch_reddit_scraper_bulk(posts: list[dict]) -> list[dict]:

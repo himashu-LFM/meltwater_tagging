@@ -72,7 +72,28 @@ APIFY_BATCH_SIZE = int(os.environ.get("APIFY_BATCH_SIZE", "200"))
 # Comment cap for the parent-thread retry used when the actor's direct
 # comment-permalink lookup returns nothing. Every comment returned is billed, so
 # this is a ceiling on the cost of recovering one missed mention.
+# How far the direct-lookup run is allowed to look before giving up. These are
+# search limits, NOT billing limits — Apify charges per record returned, so a
+# generous cap costs nothing extra and just stops the actor quitting before it
+# reaches the comments we asked for.
+# Pin the actor to a specific build. Empty = whatever the author tagged
+# "latest". The author ships builds often (191 so far), and build 1.9.46
+# released 2026-10-05 07:05 UTC stopped resolving comment permalinks: the same
+# request that returned 63/63 in 10s on an earlier build now returns 0/96 in
+# ~195s. Set this to a known-good build (e.g. "1.9.45") or a tag ("beta") to
+# step off a bad release without touching code.
+APIFY_BUILD = os.environ.get("APIFY_BUILD", "").strip()
+
+APIFY_MAX_POSTS = int(os.environ.get("APIFY_MAX_POSTS", "200"))
+APIFY_MAX_COMMENTS = int(os.environ.get("APIFY_MAX_COMMENTS", "200"))
+
 APIFY_THREAD_MAX_COMMENTS = int(os.environ.get("APIFY_THREAD_MAX_COMMENTS", "500"))
+# How many parent-thread recovery scrapes run at once. Each one is its own
+# Apify actor run, and most of a run's time is the actor booting — so running
+# them together collapses that overhead instead of paying it per thread.
+# Kept modest: Apify caps concurrent actor runs per account, and going wide
+# would also spike memory usage there.
+APIFY_THREAD_CONCURRENCY = int(os.environ.get("APIFY_THREAD_CONCURRENCY", "4"))
 # Bulk OAuth fetch: requests/minute budget and how many calls may be in flight.
 # Reddit's documented budget is ~100 rpm per client id; stay just under it.
 # Concurrency only hides latency — the token bucket is what caps the rate.

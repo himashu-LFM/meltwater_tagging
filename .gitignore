@@ -72,6 +72,14 @@ ehthumbs.db
 .mw_browser_profile/
 meltwater_tagger/.mw_browser_profile/
 
+# Renamed-aside stray git repos. A second `git init` inside meltwater_tagger/
+# made VS Code show a phantom "master" branch with every file untracked, and
+# committing from it would have gone nowhere. The directories are kept as a
+# short-lived backup and must never be committed — git's own hook samples,
+# config and HEAD live inside them.
+.git_DELETE_ME/
+**/.git_DELETE_ME/
+
 file1.txt
 
 .python-version
