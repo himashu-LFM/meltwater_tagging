@@ -60,7 +60,7 @@ async function selectBrand(id) {
   // from a big protocol taxonomy and are guided by uploaded client feedback docs.
   // So for them we swap the sentiment "Tags & rules" card for an upload card.
   if (isTaxonomyBrand(selected.name)) {
-    $("tagsHeading").textContent = "Client feedback docs";
+    $("tagsHeading").textContent = "Tags & client feedback";
     renderFeedbackDocs(id);
     return;
   }
@@ -100,6 +100,36 @@ function isTaxonomyBrand(name) {
 // Render the "Client feedback docs" card: upload + list of uploaded docs.
 async function renderFeedbackDocs(id) {
   $("tagCards").innerHTML = `
+    <div class="tag-card" style="margin-bottom:12px">
+      <div class="field-label" style="margin:0 0 10px">Tag list</div>
+      <p class="section-sub" style="margin:0 0 12px">
+        The tags the classifier can assign. Add a new tag or remove one — it takes effect on the
+        next run, no code change needed. Type the tag <b>exactly</b> as it appears in Meltwater
+        (the tag must also exist in Meltwater for "Apply" to set it).
+      </p>
+      <div class="row" style="margin-bottom:0; align-items:flex-end">
+        <label class="field" style="flex:0 0 190px">
+          <span class="field-label">Family</span>
+          <select id="tlFamily"></select>
+        </label>
+        <label class="field" style="flex:2">
+          <span class="field-label">Tag</span>
+          <input type="text" id="tlLabel" placeholder="Product - New Product" />
+        </label>
+        <label class="field" style="flex:1.4">
+          <span class="field-label">Match words (optional, comma-separated)</span>
+          <input type="text" id="tlKeywords" placeholder="e.g. new product, NP" />
+        </label>
+        <button class="btn primary" id="tlAddBtn" style="flex:0 0 auto">
+          <span class="btn-shine"></span><span class="btn-label">Add tag</span>
+        </button>
+      </div>
+      <div class="tl-toolbar">
+        <input type="search" id="tlSearch" placeholder="Search tags…" autocomplete="off" />
+        <span class="section-sub" id="tlSummary"></span>
+      </div>
+      <div id="tlFamilies"></div>
+    </div>
     <div class="tag-card">
       <p class="section-sub" style="margin:0 0 12px">
         Upload the client's "Tagging Adjustments" feedback docs (.docx, .txt, .md).
@@ -121,6 +151,43 @@ async function renderFeedbackDocs(id) {
 
   loadFeedbackDocs(id);
   loadFeedbackRules(id);
+  loadTagList(id);
+
+  // Fill the dropdown up front — it must work even if the list fails to load.
+  $("tlFamily").innerHTML = TAG_FAMILIES.map(f =>
+    `<option value="${f.key}">${escapeHtml(f.name)}</option>`).join("");
+  $("tlLabel").value = TAG_FAMILIES[0].prefix;
+  $("tlFamily").addEventListener("change", () => {
+    const fam = TAG_FAMILIES.find(f => f.key === $("tlFamily").value);
+    if (!fam) return;
+    // Swap the family prefix on whatever was typed, keeping the name part.
+    const v = $("tlLabel").value;
+    const old = TAG_FAMILIES.find(f => v.toLowerCase().startsWith(f.prefix.toLowerCase()));
+    const rest = old ? v.slice(old.prefix.length) : v;
+    $("tlLabel").value = fam.prefix + rest.replace(/^\s+/, "");
+    $("tlLabel").placeholder = fam.prefix + "…";
+    $("tlLabel").focus();
+  });
+  tlView.open.clear(); tlView.q = "";
+  $("tlSearch").addEventListener("input", () => { tlView.q = $("tlSearch").value; renderTagList(id); });
+  $("tlLabel").addEventListener("keydown", (e) => { if (e.key === "Enter") $("tlAddBtn").click(); });
+  $("tlAddBtn").addEventListener("click", async () => {
+    const family = $("tlFamily").value;
+    const label = $("tlLabel").value.trim();
+    if (!label) return Toast.error("Type the tag name first.");
+    const r = await Auth.authedFetch(`/api/brands/${id}/tag-list`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ family, label, keywords: $("tlKeywords").value }),
+    });
+    const d = await r.json();
+    if (!r.ok) return Toast.error(d.error || "Could not add tag.");
+    Toast.success(`"${label}" added to the tag list.`, "Tag added");
+    const fam = TAG_FAMILIES.find(f => f.key === family);
+    $("tlLabel").value = fam ? fam.prefix : "";
+    $("tlKeywords").value = "";
+    tlView.open.add(family);
+    renderTagList(id, d.families);
+  });
 
   $("fbUploadBtn").addEventListener("click", async () => {
     const input = $("fbFile");
@@ -150,19 +217,155 @@ async function renderFeedbackDocs(id) {
   });
 }
 
+// --- Tag list (add / remove tags without a code change) ----------------------
+// Mirrors _TAG_FAMILIES in app.py (key, display name, exact Meltwater prefix).
+const TAG_FAMILIES = [
+  { key: "TYPE_OF_PUBLICATION", name: "Type of Publication", prefix: "Type of Publication - " },
+  { key: "TYPE_OF_COVERAGE",    name: "Type of Coverage",    prefix: "Type of Coverage - " },
+  { key: "REGION",              name: "Region",              prefix: "Region - " },
+  { key: "CORPORATE",           name: "Corporate",           prefix: "Corporate - " },
+  { key: "PILLAR",              name: "Pillar",              prefix: "Pillar - " },
+  { key: "INDUSTRY",            name: "Industry",            prefix: "Industry | " },
+  { key: "PRODUCT",             name: "Product",             prefix: "Product - " },
+  { key: "SPOKESPERSON",        name: "Spokesperson",        prefix: "Spokesperson | " },
+];
+
+// Tags the classifier's own code assigns (not just the model). Removing one
+// stops it being APPLIED to Meltwater, but results will still show it.
+const CODE_ASSIGNED_TAGS = new Set([
+  "Corporate - Financial / IR",
+  "Corporate - Product & Technology",
+  "Type of Coverage - Press release",
+  "Type of Coverage - Unique",
+  "Type of Coverage - 3rd party press release",
+]);
+
+async function loadTagList(id) {
+  let r, d;
+  try {
+    r = await Auth.authedFetch(`/api/brands/${id}/tag-list`);
+    d = await r.json();
+  } catch (e) {
+    d = {};
+  }
+  if (!r || !r.ok) {
+    $("tlFamilies").innerHTML = `<p class="section-sub" style="margin:0">${escapeHtml(d.error || "Could not load the tag list.")}</p>`;
+    return;
+  }
+  renderTagList(id, d.families);
+}
+
+// View state for the tag list: which families are expanded + the search text.
+const tlView = { families: [], open: new Set(), q: "" };
+
+function renderTagList(id, families) {
+  if (families) tlView.families = families;
+  const q = tlView.q.trim().toLowerCase();
+  const match = (l) => !q || l.toLowerCase().includes(q);
+  // Show the name without the family prefix (the family is the row heading).
+  const short = (f, l) => l.toLowerCase().startsWith(f.prefix.toLowerCase()) ? l.slice(f.prefix.length) : l;
+
+  let total = 0, added = 0, removed = 0, shown = 0;
+  const rows = tlView.families.map(f => {
+    total += f.tags.length;
+    const nNew = f.tags.filter(t => t.custom).length;
+    added += nNew; removed += f.removed.length;
+    const tags = f.tags.filter(t => match(t.label));
+    const gone = f.removed.filter(match);
+    if (q && !tags.length && !gone.length) return "";
+    shown += tags.length;
+    const open = q ? true : tlView.open.has(f.key);
+    return `
+      <div class="tl-fam ${open ? "open" : ""}">
+        <button class="tl-fam-head" data-fam="${escAttr(f.key)}" aria-expanded="${open}">
+          <span class="tl-caret">▸</span>
+          <span class="tl-fam-name">${escapeHtml(f.name)}</span>
+          <span class="tl-count">${q ? `${tags.length} of ${f.tags.length}` : f.tags.length}</span>
+          ${nNew ? `<span class="tl-badge new">${nNew} new</span>` : ""}
+          ${f.removed.length ? `<span class="tl-badge gone">${f.removed.length} removed</span>` : ""}
+        </button>
+        ${open ? `
+        <div class="tl-chips">
+          ${tags.map(t => `
+            <span class="chip tag tl-chip ${t.custom ? "tl-custom" : ""}" title="${escAttr(t.label)}${t.custom ? " — added from this page" : ""}">
+              ${escapeHtml(short(f, t.label))}${t.custom ? ' <em>new</em>' : ''}
+              <button class="tl-x" title="Remove" data-fam="${escAttr(f.key)}" data-label="${escAttr(t.label)}">×</button>
+            </span>`).join("") || (gone.length ? "" : '<span class="section-sub">No tags.</span>')}
+          ${gone.map(l => `
+            <span class="chip tl-chip tl-removed" title="${escAttr(l)} — removed, click ↺ to restore">
+              <s>${escapeHtml(short(f, l))}</s>
+              <button class="tl-restore" title="Restore" data-fam="${escAttr(f.key)}" data-label="${escAttr(l)}">↺</button>
+            </span>`).join("")}
+        </div>` : ""}
+      </div>`;
+  }).join("");
+
+  $("tlFamilies").innerHTML = rows ||
+    `<p class="section-sub" style="margin:8px 0 0">No tags match "${escapeHtml(tlView.q.trim())}".</p>`;
+  $("tlSummary").textContent = q
+    ? `${shown} match${shown === 1 ? "" : "es"}`
+    : `${total} tags` + (added ? ` · ${added} new` : "") + (removed ? ` · ${removed} removed` : "");
+
+  $("tlFamilies").querySelectorAll(".tl-fam-head").forEach(btn => btn.addEventListener("click", () => {
+    if (tlView.q.trim()) return;          // while searching, matches stay open
+    const k = btn.dataset.fam;
+    tlView.open.has(k) ? tlView.open.delete(k) : tlView.open.add(k);
+    renderTagList(id);
+  }));
+
+  $("tlFamilies").querySelectorAll(".tl-x").forEach(btn => btn.addEventListener("click", async () => {
+    const label = btn.dataset.label;
+    const ok = await Modal.confirm({
+      title: "Remove this tag?",
+      message: CODE_ASSIGNED_TAGS.has(label)
+        ? `"${label}" is assigned by built-in tagging rules, so it will still appear in results — ` +
+          `but "Apply to Meltwater" will skip it. You can restore it later.`
+        : `"${label}" will no longer be assigned by the classifier. You can restore it later.`,
+      okText: "Remove", danger: true,
+    });
+    if (!ok) return;
+    const r = await Auth.authedFetch(`/api/brands/${id}/tag-list`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ family: btn.dataset.fam, label }),
+    });
+    const d = await r.json();
+    if (!r.ok) return Toast.error(d.error || "Could not remove tag.");
+    Toast.success(`"${label}" removed.`);
+    renderTagList(id, d.families);
+  }));
+
+  $("tlFamilies").querySelectorAll(".tl-restore").forEach(btn => btn.addEventListener("click", async () => {
+    const r = await Auth.authedFetch(`/api/brands/${id}/tag-list`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ family: btn.dataset.fam, label: btn.dataset.label }),
+    });
+    const d = await r.json();
+    if (!r.ok) return Toast.error(d.error || "Could not restore tag.");
+    Toast.success(`"${btn.dataset.label}" restored.`);
+    renderTagList(id, d.families);
+  }));
+}
+
 async function loadFeedbackRules(id) {
   const r = await Auth.authedFetch(`/api/brands/${id}/feedback-rules`);
   const d = await r.json();
-  const rules = d.rules || [];
-  $("fbRuleCount").textContent = rules.length ? `· ${rules.length}` : "";
+  // Active rules first; inactive ones are kept for reference but NOT sent to
+  // the classifier (live_rules reads active rules only).
+  const rules = (d.rules || []).slice().sort((a, b) => (b.active !== false) - (a.active !== false));
+  const nInactive = rules.filter(r => r.active === false).length;
+  $("fbRuleCount").textContent = !rules.length ? ""
+    : nInactive ? `· ${rules.length - nInactive} active · ${nInactive} inactive` : `· ${rules.length}`;
   if (!rules.length) {
     $("fbRules").innerHTML = `<p class="section-sub" style="margin:0">No rules yet — upload a doc to extract some.</p>`;
     return;
   }
   $("fbRules").innerHTML = rules.map(rule => `
-    <div class="tag-card" style="margin-bottom:8px">
+    <div class="tag-card ${rule.active === false ? "fb-inactive" : ""}" style="margin-bottom:8px">
       <div class="tag-card-head" style="justify-content:space-between">
-        <span class="chip flag">${escapeHtml(rule.category || "general")}</span>
+        <span>
+          <span class="chip flag">${escapeHtml(rule.category || "general")}</span>
+          ${rule.active === false ? '<span class="chip fb-inactive-chip" title="Not used by the classifier">inactive</span>' : ""}
+        </span>
         <button class="mini-btn danger" data-rule="${escAttr(rule.id)}">Delete</button>
       </div>
       <div style="margin-top:8px">${escapeHtml(rule.rule_text || "")}</div>

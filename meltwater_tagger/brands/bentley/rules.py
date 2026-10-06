@@ -83,7 +83,7 @@ CORP_PRODUCT_TECH_LABEL = "Corporate - Product & Technology"
 # right BEFORE an announcement verb (Bentley as the subject that announced), which
 # a partner-issued release does not (there Bentley appears AFTER "acquire … from").
 # ---------------------------------------------------------------------------
-PRESS_RELEASE_LABEL = "Type of Coverage - Press release"
+PRESS_RELEASE_LABEL = "Type of Coverage - Press Release"
 
 # "Bentley Systems (Nasdaq: BSY), the infrastructure engineering software company,
 #  today announced …"  ->  Bentley is the announcer. The {0,160} span skips the
@@ -298,6 +298,84 @@ def is_regional_edition(url: str = "") -> bool:
     if any(_LOCALE_RE.match(s) for s in segs):
         return True
     return False
+
+
+# A finance / stock page: its host or path marks it as markets/investing content.
+# Client rule (2026-09): do NOT drop such a page as a "syndicated stub" — in the
+# Bentley feed it is there because it discusses Bentley's stock/finances, so it is
+# Corporate - Financial / IR, not Not-in-scope. (Regional country-subdomain finance
+# editions are already dropped earlier by is_regional_edition.)
+_FINANCE_HOST_MARKERS = ("finance.", "investing.", "markets.", "money.", "marketwatch",
+                         "stocktwits", "benzinga", "seekingalpha", "simplywall",
+                         "tipranks", "zacks", "fool.", "stockstory")
+_FINANCE_PATH_MARKERS = ("/stocks/", "/stock/", "/markets/", "/market/",
+                         "/analyst-ratings/", "/quote/", "/investing/")
+
+
+def is_finance_page(url: str = "") -> bool:
+    """True if the URL is a finance / stock-markets page (host or path signals)."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url or "")
+    except Exception:
+        return False
+    host = (p.netloc or "").lower()
+    path = (p.path or "").lower()
+    return any(m in host for m in _FINANCE_HOST_MARKERS) or any(m in path for m in _FINANCE_PATH_MARKERS)
+
+
+# Unambiguous read-more / truncation markers a teaser excerpt ends with: the
+# WordPress "[…]" marker and explicit read-more link text. These are link/CMS
+# artifacts that essentially never end a sentence of real article prose, so any
+# CMS — not just WordPress — is recognised.
+_READMORE_PHRASES = ("read more", "continue reading", "read full article",
+                     "read the full article", "read full story")
+
+
+def _teaser_kind(block: str) -> str:
+    """Classify a block's trailing marker: 'strong' = an unambiguous read-more
+    marker (bracketed "[…]" or explicit "Read more"/"Continue reading" link
+    text); 'weak' = a bare trailing ellipsis, which also ends ordinary prose and
+    so only counts toward a listing page when a strong marker is also present;
+    '' = not a teaser."""
+    s = block.rstrip().rstrip("»›→▸>").rstrip()
+    if s.endswith("[…]") or s.endswith("[...]"):
+        return "strong"
+    low = s.lower()
+    if any(low.endswith(p) for p in _READMORE_PHRASES):
+        return "strong"
+    if s.endswith("…") or s.endswith("..."):
+        return "weak"
+    return ""
+
+
+def is_listing_page(text: str = "") -> bool:
+    """True if the extracted body is a category / archive / feed page — a stack
+    of 'read more' teaser excerpts for several different stories, not a single
+    article. Each excerpt ends with a truncation / read-more marker (the
+    WordPress "[…]", a trailing ellipsis, or a "Read more" / "Continue reading"
+    link). Tagging the concatenation would merge unrelated stories (observed: a
+    highway digital-twin URL whose body was six unrelated Bentley teasers — HR
+    appointment, award, education MoU, power-grid, product news), so the caller
+    flags it for manual review instead.
+
+    A genuine article may carry a couple of trailing 'related posts' teasers, so
+    the teasers must DOMINATE the body (≥3 of them AND ≥50% of all blocks) before
+    we treat the extraction as a listing page. We also require at least one
+    STRONG marker among them, so a real article whose paragraphs merely end in
+    bare ellipses (a listicle, Q&A, or dramatic prose) is not misread as a feed."""
+    if not text:
+        return False
+    blocks = [b.strip() for b in re.split(r"\n+", text) if b.strip()]
+    if len(blocks) < 3:
+        return False
+    kinds = [_teaser_kind(b) for b in blocks]
+    teasers = [k for k in kinds if k]
+    if len(teasers) < 3:
+        return False
+    if not any(k == "strong" for k in kinds):
+        return False   # bare-ellipsis prose alone is not a listing page
+    return len(teasers) / len(blocks) >= 0.5
 
 
 def is_financial_ir_source(url: str = "", source: str = "") -> str | None:

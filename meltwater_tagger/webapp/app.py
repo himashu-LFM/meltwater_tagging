@@ -409,6 +409,188 @@ def delete_feedback_doc_route(brand_id, doc_id):
     return jsonify({"ok": True})
 
 
+# --- brand tag list (taxonomy brands like Bentley) ---------------------------
+# The client adds / removes tags from Brand studio. Edits are stored as an
+# overrides dict (taxonomy_overrides.json format) in Supabase and applied on top
+# of the code's base taxonomy by brands.bentley.live_taxonomy at classify/apply.
+
+# family key -> (display name, required label prefix). The prefix check keeps a
+# label in its family's exact Meltwater format and stops another brand's tag in
+# the shared account (e.g. "Positive - Kaseya") from being added to Bentley.
+_TAG_FAMILIES = {
+    "TYPE_OF_PUBLICATION": ("Type of Publication", "Type of Publication - "),
+    "TYPE_OF_COVERAGE":    ("Type of Coverage", "Type of Coverage - "),
+    "REGION":              ("Region", "Region - "),
+    "CORPORATE":           ("Corporate", "Corporate - "),
+    "PILLAR":              ("Pillar", "Pillar - "),
+    "INDUSTRY":            ("Industry", "Industry | "),
+    "PRODUCT":             ("Product", "Product - "),
+    "SPOKESPERSON":        ("Spokesperson", "Spokesperson | "),
+}
+# Tags the pipeline itself depends on — never removable from the UI.
+_PROTECTED_TAGS = {"Not in scope"}
+
+
+def _taxonomy_brand_or_404(brand_id):
+    brand = db.get_brand_by_id(brand_id)
+    if not brand:
+        return None, (jsonify({"error": "brand not found"}), 404)
+    try:
+        from brands import get_profile
+        if get_profile(brand["name"]).style != "taxonomy":
+            return None, (jsonify({"error": "tag list editing is only for taxonomy brands"}), 400)
+    except Exception:
+        return None, (jsonify({"error": "unknown brand profile"}), 400)
+    return brand, None
+
+
+def _tag_list_payload(ov: dict) -> dict:
+    """Current tag list per family, marking client-added tags and the built-in
+    tags the client removed (so they can be restored)."""
+    from brands.bentley import taxonomy
+    base = taxonomy.base_labels()
+    adds = ov.get("add") or {}
+    removes = ov.get("remove") or {}
+    families = []
+    for key, (name, prefix) in _TAG_FAMILIES.items():
+        if key == "SPOKESPERSON":
+            base_items = base["SPOKESPERSON"]
+            added = [sp.get("name") for sp in (ov.get("spokespeople_add") or [])]
+            removed = set(ov.get("spokespeople_remove") or [])
+        else:
+            base_items = base.get(key, [])
+            added = [t.get("label") for t in (adds.get(key) or [])]
+            removed = set(removes.get(key) or [])
+        show = (lambda n: prefix + n) if key == "SPOKESPERSON" else (lambda l: l)
+        tags = [{"label": show(l), "custom": False} for l in base_items if l not in removed]
+        tags += [{"label": show(l), "custom": True} for l in added if l and l not in base_items]
+        families.append({"key": key, "name": name, "prefix": prefix, "tags": tags,
+                         "removed": [show(l) for l in base_items if l in removed]})
+    return {"families": families}
+
+
+def _save_tag_overrides(brand, ov: dict):
+    from brands.bentley import live_taxonomy
+    db.save_taxonomy_overrides(brand["name"], ov, updated_by=g.user.id)
+    live_taxonomy.apply(ov)          # this worker: immediate; others: within TTL
+    live_taxonomy.clear_cache()
+
+
+@app.route("/api/brands/<int:brand_id>/tag-list", methods=["GET"])
+@require_auth
+def get_tag_list_route(brand_id):
+    brand, err = _taxonomy_brand_or_404(brand_id)
+    if err:
+        return err
+    try:
+        ov = db.get_taxonomy_overrides(brand["name"])
+    except Exception:
+        log.exception("tag list: could not read taxonomy_overrides")
+        return jsonify({"error": "Could not read the tag list from the database. Has the "
+                                 "taxonomy_overrides table been created? (run "
+                                 "supabase/taxonomy_overrides.sql in Supabase)"}), 500
+    return jsonify(_tag_list_payload(ov))
+
+
+@app.route("/api/brands/<int:brand_id>/tag-list", methods=["POST"])
+@require_auth
+def add_tag_route(brand_id):
+    """Add a tag (or restore a removed built-in one). Body: {family, label, keywords?}."""
+    from brands.bentley import taxonomy
+    brand, err = _taxonomy_brand_or_404(brand_id)
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    fam = str(body.get("family") or "").upper()
+    label = re.sub(r"\s+", " ", str(body.get("label") or "")).strip()
+    keywords = [k.strip() for k in str(body.get("keywords") or "").split(",") if k.strip()]
+    if fam not in _TAG_FAMILIES:
+        return jsonify({"error": "Choose a tag family."}), 400
+    prefix = _TAG_FAMILIES[fam][1]
+    if not label:
+        return jsonify({"error": "Type the tag name."}), 400
+    if not label.lower().startswith(prefix.lower()):
+        return jsonify({"error": f'{_TAG_FAMILIES[fam][0]} tags must start with "{prefix}" — '
+                                 f"type it exactly as it appears in Meltwater."}), 400
+    if len(label) <= len(prefix):
+        return jsonify({"error": "Type the tag name after the prefix."}), 400
+
+    ov = db.get_taxonomy_overrides(brand["name"])
+    base = taxonomy.base_labels()
+    if fam == "SPOKESPERSON":
+        name = label[len(prefix):].strip()
+        removed = ov.setdefault("spokespeople_remove", [])
+        added = ov.setdefault("spokespeople_add", [])
+        if name in removed:
+            removed.remove(name)                          # restore built-in
+        elif name in base["SPOKESPERSON"] or any(sp.get("name") == name for sp in added):
+            return jsonify({"error": f'"{label}" is already in the list.'}), 409
+        else:
+            added.append({"name": name, "aliases": keywords} if keywords else {"name": name})
+    else:
+        removed = ov.setdefault("remove", {}).setdefault(fam, [])
+        added = ov.setdefault("add", {}).setdefault(fam, [])
+        if label in removed:
+            removed.remove(label)                         # restore built-in
+        elif label in base.get(fam, []) or any(t.get("label") == label for t in added):
+            return jsonify({"error": f'"{label}" is already in the list.'}), 409
+        else:
+            item = {"label": label}
+            if fam == "PRODUCT":
+                # Products are matched by literal name in the text.
+                item["aliases"] = keywords or [label[len(prefix):].strip()]
+            elif keywords:
+                item["keywords"] = keywords
+            added.append(item)
+    _save_tag_overrides(brand, ov)
+    log.info("tag list: %s added %r to %s/%s", g.user.id, label, brand["name"], fam)
+    return jsonify(_tag_list_payload(ov))
+
+
+@app.route("/api/brands/<int:brand_id>/tag-list", methods=["DELETE"])
+@require_auth
+def remove_tag_route(brand_id):
+    """Remove a tag from the list. Body: {family, label}."""
+    from brands.bentley import taxonomy
+    brand, err = _taxonomy_brand_or_404(brand_id)
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    fam = str(body.get("family") or "").upper()
+    label = str(body.get("label") or "").strip()
+    if fam not in _TAG_FAMILIES or not label:
+        return jsonify({"error": "family and label are required"}), 400
+    if label in _PROTECTED_TAGS:
+        return jsonify({"error": f'"{label}" is required by the tagger and cannot be removed.'}), 400
+
+    ov = db.get_taxonomy_overrides(brand["name"])
+    base = taxonomy.base_labels()
+    if fam == "SPOKESPERSON":
+        name = label[len("Spokesperson | "):] if label.startswith("Spokesperson | ") else label
+        added = ov.setdefault("spokespeople_add", [])
+        if any(sp.get("name") == name for sp in added):
+            ov["spokespeople_add"] = [sp for sp in added if sp.get("name") != name]
+        elif name in base["SPOKESPERSON"]:
+            rm = ov.setdefault("spokespeople_remove", [])
+            if name not in rm:
+                rm.append(name)
+        else:
+            return jsonify({"error": "tag not found"}), 404
+    else:
+        added = ov.setdefault("add", {}).setdefault(fam, [])
+        if any(t.get("label") == label for t in added):
+            ov["add"][fam] = [t for t in added if t.get("label") != label]
+        elif label in base.get(fam, []):
+            rm = ov.setdefault("remove", {}).setdefault(fam, [])
+            if label not in rm:
+                rm.append(label)
+        else:
+            return jsonify({"error": "tag not found"}), 404
+    _save_tag_overrides(brand, ov)
+    log.info("tag list: %s removed %r from %s/%s", g.user.id, label, brand["name"], fam)
+    return jsonify(_tag_list_payload(ov))
+
+
 # --- profile: meltwater + reddit creds ---------------------------------------
 
 @app.route("/api/auth/welcome", methods=["POST"])
