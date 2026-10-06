@@ -30,12 +30,18 @@ import pandas as pd
 
 from brands.bentley import taxonomy as tax
 
-FAMILIES = ["publication", "coverage", "region", "corporate", "pillar",
-            "industry", "product", "spokesperson"]
+# CONTENT families drive the in-scope tag comparison and the scope decision.
+# "status" (e.g. Inaccessible) is NOT content — it marks a dead/non-existent URL
+# — so it is kept out of the in-scope loop and scored on its own over all rows.
+CONTENT_FAMILIES = ["publication", "coverage", "region", "corporate", "pillar",
+                    "industry", "product", "spokesperson"]
+FAMILIES = CONTENT_FAMILIES + ["status"]   # all keys parse_tags populates
 
 # Ordered MOST-SPECIFIC FIRST. Each match records (family, canonical) and its text
 # span is consumed so a later, shorter pattern can't re-match inside it.
 _PATTERNS = [
+    # --- status (distinctive single word; match before anything else) ---
+    (r"\binaccessible\b", "status", "inaccessible"),
     # --- coverage ---
     (r"3rd\s*part(?:y|ies)\s*press\s*release", "coverage", "3rd party press release"),
     (r"third\s*part(?:y|ies)\s*press\s*release", "coverage", "3rd party press release"),
@@ -142,9 +148,12 @@ def _resolve_sp(name: str) -> str:
 
 def _scope(parsed: dict) -> str:
     cov = parsed["coverage"]
-    if cov == {"not in scope"}:
+    # A status tag (Inaccessible) or the explicit "Not in scope" marker -> out.
+    # status is deliberately excluded from the "any content?" test below so an
+    # Inaccessible-only row is not mistaken for in-scope coverage.
+    if parsed.get("status") or cov == {"not in scope"}:
         return "out"
-    if not any(parsed[f] for f in FAMILIES):
+    if not any(parsed[f] for f in CONTENT_FAMILIES):
         return "out"          # empty cell / pure note -> treat as not-in-scope
     return "in"
 
@@ -171,7 +180,7 @@ def score(df: pd.DataFrame, ours_col: str, human_col: str, url_col: str) -> None
     both_in = [(u, o, h) for u, o, h in rows if _scope(o) == "in" and _scope(h) == "in"]
     print(f"\nPer-family agreement over the {len(both_in)} rows both call IN-SCOPE:")
     print("-" * 72)
-    for fam in FAMILIES:
+    for fam in CONTENT_FAMILIES:
         comp = [(u, o[fam], h[fam]) for u, o, h in both_in if o[fam] or h[fam]]
         if not comp:
             print(f"{fam:13}  (no values on either side)")
@@ -184,6 +193,19 @@ def score(df: pd.DataFrame, ours_col: str, human_col: str, url_col: str) -> None
                 miss = ", ".join(sorted(b - a)) or "∅"
                 extra = ", ".join(sorted(a - b)) or "∅"
                 print(f"      ~ missing:[{miss}]  extra:[{extra}]  {u[:60]}")
+
+    # status (e.g. Inaccessible) — scored over ALL rows, independent of scope,
+    # since it marks out-of-scope (dead/non-existent) URLs that the per-family
+    # in-scope loop above deliberately excludes.
+    st_comp = [(u, o["status"], h["status"]) for u, o, h in rows if o["status"] or h["status"]]
+    if st_comp:
+        ok = sum(1 for _, a, b in st_comp if a == b)
+        print(f"\nSTATUS (Inaccessible) agreement over the {len(st_comp)} rows "
+              f"with a status tag: {ok}/{len(st_comp)} = {ok/len(st_comp)*100:.0f}%")
+        for u, a, b in st_comp:
+            if a != b:
+                print(f"      ~ ours:[{', '.join(sorted(a)) or '∅'}]  "
+                      f"human:[{', '.join(sorted(b)) or '∅'}]  {u[:60]}")
 
 
 def main():

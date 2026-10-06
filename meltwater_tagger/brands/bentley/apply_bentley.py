@@ -48,11 +48,15 @@ def parse_existing_tags(document_tags) -> set[str]:
 def _target_tags(item: dict) -> list[str]:
     """The tags this item SHOULD carry, per its classification."""
     scope = item.get("scope")
+    tags = list(dict.fromkeys(t for t in (item.get("tags") or []) if t))
     if scope == "out":
-        return [NOT_IN_SCOPE]
+        # Usually the single "Not in scope" tag, but an out-of-scope result may
+        # instead carry a deterministic status tag (e.g. a dead/non-existent URL
+        # tagged ["Inaccessible"]). Honor whatever the classifier emitted; only
+        # fall back to "Not in scope" when it left tags empty.
+        return tags or [NOT_IN_SCOPE]
     if scope == "in":
-        # de-dup, preserve order
-        return list(dict.fromkeys(t for t in (item.get("tags") or []) if t))
+        return tags  # de-duped, order preserved
     return []  # review / error -> nothing to apply
 
 

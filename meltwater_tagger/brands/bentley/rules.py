@@ -324,26 +324,57 @@ def is_finance_page(url: str = "") -> bool:
     return any(m in host for m in _FINANCE_HOST_MARKERS) or any(m in path for m in _FINANCE_PATH_MARKERS)
 
 
+# Unambiguous read-more / truncation markers a teaser excerpt ends with: the
+# WordPress "[…]" marker and explicit read-more link text. These are link/CMS
+# artifacts that essentially never end a sentence of real article prose, so any
+# CMS — not just WordPress — is recognised.
+_READMORE_PHRASES = ("read more", "continue reading", "read full article",
+                     "read the full article", "read full story")
+
+
+def _teaser_kind(block: str) -> str:
+    """Classify a block's trailing marker: 'strong' = an unambiguous read-more
+    marker (bracketed "[…]" or explicit "Read more"/"Continue reading" link
+    text); 'weak' = a bare trailing ellipsis, which also ends ordinary prose and
+    so only counts toward a listing page when a strong marker is also present;
+    '' = not a teaser."""
+    s = block.rstrip().rstrip("»›→▸>").rstrip()
+    if s.endswith("[…]") or s.endswith("[...]"):
+        return "strong"
+    low = s.lower()
+    if any(low.endswith(p) for p in _READMORE_PHRASES):
+        return "strong"
+    if s.endswith("…") or s.endswith("..."):
+        return "weak"
+    return ""
+
+
 def is_listing_page(text: str = "") -> bool:
     """True if the extracted body is a category / archive / feed page — a stack
     of 'read more' teaser excerpts for several different stories, not a single
-    article. Such pages end each excerpt with the WordPress-style truncation
-    marker "[…]". Tagging the concatenation would merge unrelated stories
-    (observed: a highway digital-twin URL whose body was six unrelated Bentley
-    teasers — HR appointment, award, education MoU, power-grid, product news),
-    so the caller flags it for manual review instead.
+    article. Each excerpt ends with a truncation / read-more marker (the
+    WordPress "[…]", a trailing ellipsis, or a "Read more" / "Continue reading"
+    link). Tagging the concatenation would merge unrelated stories (observed: a
+    highway digital-twin URL whose body was six unrelated Bentley teasers — HR
+    appointment, award, education MoU, power-grid, product news), so the caller
+    flags it for manual review instead.
 
     A genuine article may carry a couple of trailing 'related posts' teasers, so
-    the teasers must DOMINATE the body (≥3 of them AND ≥50% of all blocks)
-    before we treat the extraction as a listing page."""
+    the teasers must DOMINATE the body (≥3 of them AND ≥50% of all blocks) before
+    we treat the extraction as a listing page. We also require at least one
+    STRONG marker among them, so a real article whose paragraphs merely end in
+    bare ellipses (a listicle, Q&A, or dramatic prose) is not misread as a feed."""
     if not text:
         return False
     blocks = [b.strip() for b in re.split(r"\n+", text) if b.strip()]
     if len(blocks) < 3:
         return False
-    teasers = [b for b in blocks if b.endswith("[…]") or b.endswith("[...]")]
+    kinds = [_teaser_kind(b) for b in blocks]
+    teasers = [k for k in kinds if k]
     if len(teasers) < 3:
         return False
+    if not any(k == "strong" for k in kinds):
+        return False   # bare-ellipsis prose alone is not a listing page
     return len(teasers) / len(blocks) >= 0.5
 
 

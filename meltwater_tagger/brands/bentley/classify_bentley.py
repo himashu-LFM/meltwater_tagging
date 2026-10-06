@@ -190,15 +190,18 @@ _SOFT_BLOCK_MARKERS = (
 )
 
 # Strong, unambiguous challenge/interstitial phrases. If one of these appears
-# near the TOP of the body it means the page is a bot-wall / JS-challenge shell
-# (not an article) no matter how long the rendered shell is — e.g. the Anubis
-# "Making sure you're not a bot! Loading…" page (1k+ chars) that sailed past the
-# 800-char length gate and was wrongly classified Not-in-scope.
+# right at the TOP of the body it means the page is a bot-wall / JS-challenge
+# shell (not an article) no matter how long the rendered shell is — e.g. the
+# Anubis "Making sure you're not a bot! Loading…" page (1k+ chars) that sailed
+# past the 800-char length gate and was wrongly classified Not-in-scope.
+# Keep these SPECIFIC: a bare word like "anubis" or a common phrase like "just a
+# moment" would false-positive on a real article's lede and drop it to review.
+# (The Anubis page is caught by "making sure you're not a bot"; Cloudflare by
+# "checking your browser", so no coverage is lost by excluding the ambiguous ones.)
 _STRONG_BLOCK_MARKERS = (
     "making sure you're not a bot", "making sure you are not a bot",
-    "anubis", "just a moment", "checking your browser",
-    "verify you are human", "enable javascript and cookies",
-    "please enable javascript", "attention required",
+    "checking your browser", "verify you are human",
+    "enable javascript and cookies", "please enable javascript",
 )
 
 
@@ -230,8 +233,11 @@ def _looks_soft_blocked(text: str) -> bool:
     t = (text or "").strip().lower()
     if not t:
         return False
-    # A strong challenge phrase near the top = bot-wall shell, any length.
-    head = t[:300]
+    # A strong challenge phrase near the top = bot-wall shell, any length. The
+    # markers are specific enough (they do not occur in real article prose) that
+    # a generous window is safe and catches pages that show a cookie/nav preamble
+    # before the challenge text.
+    head = t[:400]
     if any(m in head for m in _STRONG_BLOCK_MARKERS):
         return True
     if len(t) > 800:
