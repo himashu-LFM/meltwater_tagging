@@ -189,6 +189,18 @@ _SOFT_BLOCK_MARKERS = (
     "super-human speed", "pardon the interruption", "automated access",
 )
 
+# Strong, unambiguous challenge/interstitial phrases. If one of these appears
+# near the TOP of the body it means the page is a bot-wall / JS-challenge shell
+# (not an article) no matter how long the rendered shell is — e.g. the Anubis
+# "Making sure you're not a bot! Loading…" page (1k+ chars) that sailed past the
+# 800-char length gate and was wrongly classified Not-in-scope.
+_STRONG_BLOCK_MARKERS = (
+    "making sure you're not a bot", "making sure you are not a bot",
+    "anubis", "just a moment", "checking your browser",
+    "verify you are human", "enable javascript and cookies",
+    "please enable javascript", "attention required",
+)
+
 
 # Client rule (2026-09, confirmed): ANY byline present makes coverage "Unique" —
 # a person's name, the outlet's own name/brand ("CW Team"), an editorial desk
@@ -216,7 +228,13 @@ def _looks_soft_blocked(text: str) -> bool:
     rather than a real article: short AND dominated by a block phrase. The length
     gate keeps a normal article that merely mentions e.g. 'captcha' from tripping."""
     t = (text or "").strip().lower()
-    if not t or len(t) > 800:
+    if not t:
+        return False
+    # A strong challenge phrase near the top = bot-wall shell, any length.
+    head = t[:300]
+    if any(m in head for m in _STRONG_BLOCK_MARKERS):
+        return True
+    if len(t) > 800:
         return False
     return any(m in t for m in _SOFT_BLOCK_MARKERS)
 
@@ -449,28 +467,47 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         if reach == "readable":
             text = fetched["text"]
             result["text_source"] = "fetch"
+            # Listing / feed page: the extraction is a stack of 'read more'
+            # teaser excerpts for several different stories, not one article
+            # (observed: a highway digital-twin URL whose body was six unrelated
+            # Bentley teasers, which produced tags for all six). Tagging that
+            # mash-up is wrong, so flag for manual review instead of emitting it.
+            if rules.is_listing_page(text):
+                result.update(scope="review",
+                              reason="Listing / feed page — the extracted body is multiple 'read "
+                                     "more' article teasers, not a single article. Could not isolate "
+                                     "the target article; flagged for manual review.",
+                              needs_review=["manual-review-required: listing/feed page (multiple teasers)"],
+                              text_source="listing-page")
+                return result
             # Client rule (2026-09): ANY byline present → Unique (see the coverage
             # override below), so accept whatever author the page exposes. The only
             # special case (wire services) is handled there, not here.
             if not byline and (fetched.get("author") or "").strip():
                 byline = fetched["author"].strip()
         elif reach == "dead":
-            # Dead / unreachable link (404/410 or host unreachable) -> Not in scope.
+            # Client rule (confirmed 2026-10): the URL is INCORRECT / DOES NOT
+            # EXIST (404/410, host unreachable, DNS failure, connection refused)
+            # -> apply the "Inaccessible" tag. This is ONLY for non-existent /
+            # wrong URLs, NOT for pages that are slow or that we simply cannot
+            # read (those go to manual review in the branch below).
             detail = fetched.get("status") or (fetched.get("error") or "unreachable")
-            result.update(scope="out", tags=["Not in scope"],
-                          tags_by_family={"type_of_coverage": ["Not in scope"]},
-                          reason=f"Dead / unreachable link ({detail}) — tagged Not in scope.",
-                          text_source="dead-link")
+            result.update(scope="out", tags=["Inaccessible"],
+                          tags_by_family={"status": ["Inaccessible"]},
+                          reason=f"URL does not exist / is unreachable ({detail}) — tagged Inaccessible.",
+                          text_source="inaccessible")
             return result
         else:
-            # Reachable but unreadable (paywall / bot-wall / JS-only / server
-            # error / partial) -> manual review, NOT Not in scope. The export
-            # snippet (if any) is kept on the result so a reviewer can use it.
+            # Client rule (confirmed 2026-10): reachable but the tool CANNOT open
+            # or read it — paywall / bot-wall / challenge page / JS-only / server
+            # error / timed out (incl. the 90s fetch cap) -> MANUAL REVIEW so a
+            # human can open it. These are NOT tagged Inaccessible (that is only
+            # for URLs that do not exist). The export snippet (if any) is kept.
             detail = fetched.get("status") or (fetched.get("error") or "unreadable")
             result.update(scope="review",
                           reason=f"Source reachable but not readable ({detail}) — likely a "
-                                 "paywall/bot-wall or JS-only page. Flagged for manual review.",
-                          needs_review=["manual-review-required: source unreadable (paywall/blocked)"],
+                                 "paywall/bot-wall or JS-only page, or it timed out. Flagged for manual review.",
+                          needs_review=["manual-review-required: source unreadable (paywall/blocked/slow)"],
                           text_source="blocked")
             if snippet_body:
                 result["snippet_for_review"] = snippet_body
@@ -613,7 +650,7 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
     #  4. No byline otherwise => leave the model's coverage call (3rd party / press).
     byline = (byline or "").strip()
     if byline and _is_wire_service_byline(byline):
-        fam["type_of_coverage"] = ["Type of Coverage - 3rd party press release"]
+        fam["type_of_coverage"] = ["Type of Coverage - 3rd Party Press Release"]
     elif byline:
         fam["type_of_coverage"] = ["Type of Coverage - Unique"]
     elif rules.is_bentley_press_release(text):

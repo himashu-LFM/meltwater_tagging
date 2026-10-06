@@ -83,10 +83,10 @@ topic it touches. Concretely:
     • Product & Technology — a specifically named Bentley product appears.
   Do NOT tag HR or Education for an awards, event, or product story. Multiple Corporate tags are allowed
   when each genuinely applies; adding wrong ones is the error the client flags.
-- Type of Publication (pick ONE, by the OUTLET's nature, not the story): Mainstream/Business = general
-  news, business, or financial outlets (incl. wire/newswire and finance press); Technology = technology-
-  focused publications; Trade/Industry = sector trade press (construction, engineering, mining, water,
-  transport trade magazines). An M&A or financial story on a business/finance wire is Mainstream/Business.
+- Type of publication (pick ONE, by the OUTLET's nature, not the story): Mainstream = general
+  news, business, or financial outlets (incl. wire/newswire and finance press); Technology Publication =
+  technology-focused publications; Trade Media = sector trade press (construction, engineering, mining,
+  water, transport trade magazines). An M&A or financial story on a business/finance wire is Mainstream.
 - Corporate - General: last resort; skip if any other corporate/industry tag already fits.
 - When in doubt about a tag, LEAVE IT OFF. A short, precise tag set is the goal.
 
@@ -151,7 +151,7 @@ publication's country from the outlet/domain, leave Region EMPTY (it will be fla
 
 ## PUBLICATION & REGION — infer, NEVER default
 Type of Publication and Region are normally inferable from the outlet + its domain, so INFER them from there.
-Do NOT fall back to a "safe default" — no automatic NALA, no automatic Mainstream/Business. If, and ONLY if,
+Do NOT fall back to a "safe default" — no automatic NALA, no automatic Mainstream. If, and ONLY if,
 you genuinely cannot determine one from the outlet/domain, leave that field EMPTY; it will be flagged for a
 human to fill (that is better than a wrong guess). Then add every other tag that genuinely applies.
 
@@ -165,8 +165,8 @@ Do not pattern-match on keywords; decide each step deliberately from the text.
 2. COVERAGE TYPE: byline present (incl. Editor/Newsroom/News Desk/an outlet brand/Admin) -> Unique. A wire
    service byline (ANI, PNN) -> 3rd party press release. No byline AND Bentley itself is the announcer near
    the top -> Press release. No byline AND another organisation issued it -> 3rd party press release.
-3. TYPE OF PUBLICATION = the OUTLET's nature: finance/markets/investing or general news/business -> Mainstream/
-   Business; a technology publication -> Technology; a sector trade magazine -> Trade/Industry.
+3. TYPE OF PUBLICATION = the OUTLET's nature: finance/markets/investing or general news/business -> Mainstream;
+   a technology publication -> Technology Publication; a sector trade magazine -> Trade Media.
 4. INDUSTRY: only if there is a MATERIAL industry theme (else leave EMPTY). If yes, the ONE specific sector —
    a mining outlet/story -> Mining, a water-utility story -> Water, etc.
    AEC test (AEC is the most over-used tag — apply it ONLY on the LEFT side): assign AEC when the article is

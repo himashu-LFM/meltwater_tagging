@@ -83,7 +83,7 @@ CORP_PRODUCT_TECH_LABEL = "Corporate - Product & Technology"
 # right BEFORE an announcement verb (Bentley as the subject that announced), which
 # a partner-issued release does not (there Bentley appears AFTER "acquire … from").
 # ---------------------------------------------------------------------------
-PRESS_RELEASE_LABEL = "Type of Coverage - Press release"
+PRESS_RELEASE_LABEL = "Type of Coverage - Press Release"
 
 # "Bentley Systems (Nasdaq: BSY), the infrastructure engineering software company,
 #  today announced …"  ->  Bentley is the announcer. The {0,160} span skips the
@@ -322,6 +322,29 @@ def is_finance_page(url: str = "") -> bool:
     host = (p.netloc or "").lower()
     path = (p.path or "").lower()
     return any(m in host for m in _FINANCE_HOST_MARKERS) or any(m in path for m in _FINANCE_PATH_MARKERS)
+
+
+def is_listing_page(text: str = "") -> bool:
+    """True if the extracted body is a category / archive / feed page — a stack
+    of 'read more' teaser excerpts for several different stories, not a single
+    article. Such pages end each excerpt with the WordPress-style truncation
+    marker "[…]". Tagging the concatenation would merge unrelated stories
+    (observed: a highway digital-twin URL whose body was six unrelated Bentley
+    teasers — HR appointment, award, education MoU, power-grid, product news),
+    so the caller flags it for manual review instead.
+
+    A genuine article may carry a couple of trailing 'related posts' teasers, so
+    the teasers must DOMINATE the body (≥3 of them AND ≥50% of all blocks)
+    before we treat the extraction as a listing page."""
+    if not text:
+        return False
+    blocks = [b.strip() for b in re.split(r"\n+", text) if b.strip()]
+    if len(blocks) < 3:
+        return False
+    teasers = [b for b in blocks if b.endswith("[…]") or b.endswith("[...]")]
+    if len(teasers) < 3:
+        return False
+    return len(teasers) / len(blocks) >= 0.5
 
 
 def is_financial_ir_source(url: str = "", source: str = "") -> str | None:

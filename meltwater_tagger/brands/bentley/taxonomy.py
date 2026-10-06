@@ -57,9 +57,9 @@ FAMILIES = {
 # TYPE OF PUBLICATION — what kind of outlet is it. (metadata/outlet-driven)
 # ---------------------------------------------------------------------------
 TYPE_OF_PUBLICATION = [
-    {"key": "pub_mainstream", "label": "Type of Publication - Mainstream/Business"},
-    {"key": "pub_technology", "label": "Type of Publication - Technology"},
-    {"key": "pub_trade",      "label": "Type of Publication - Trade/Industry"},
+    {"key": "pub_mainstream", "label": "Type of publication - Mainstream"},
+    {"key": "pub_technology", "label": "Type of publication - Technology Publication"},
+    {"key": "pub_trade",      "label": "Type of publication - Trade Media"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -72,9 +72,9 @@ TYPE_OF_PUBLICATION = [
 TYPE_OF_COVERAGE = [
     {"key": "cov_unique",      "label": "Type of Coverage - Unique",
      "hint": "has an author byline / original journalism"},
-    {"key": "cov_press",       "label": "Type of Coverage - Press release",
+    {"key": "cov_press",       "label": "Type of Coverage - Press Release",
      "hint": "issued by Bentley Systems (listed on bentley.com/newsroom)"},
-    {"key": "cov_3rd_party",   "label": "Type of Coverage - 3rd party press release",
+    {"key": "cov_3rd_party",   "label": "Type of Coverage - 3rd Party Press Release",
      "hint": "a press release from a party other than Bentley Systems"},
     {"key": "cov_not_in_scope", "label": "Not in scope",
      "hint": "do not track — see rules.py NOT_IN_SCOPE_* for triggers"},
@@ -235,7 +235,7 @@ PILLAR = [
      "definition": "Solving data being incomplete/inaccessible/siloed — an open, integrated environment giving "
                    "the right people the right data at the right time. Tag when the story frames the problem as "
                    "disconnected/fragmented data and Bentley tech as the connective solution."},
-    {"key": "pillar_resilient", "label": "Pillar - Resillient Built World",
+    {"key": "pillar_resilient", "label": "Pillar - Resilient Built World",
      "keywords": ["resilience", "resilient", "risk assessment", "predictive maintenance", "extend asset life",
                   "structural risk", "subsurface", "digital twin monitoring", "downtime", "recovery"],
      "definition": "Safe, sustainable, long-lasting infrastructure: predicting/preventing instability, extending "
@@ -473,6 +473,16 @@ def spokespeople_without_mw_tag() -> set[str]:
     return {spokesperson_label(sp["name"]) for sp in SPOKESPEOPLE if sp.get("no_mw_tag")}
 
 
+# ---------------------------------------------------------------------------
+# STATUS — not a content tag. Set deterministically (never offered to the LLM
+# enum). "Inaccessible" is applied by the client in Meltwater to articles whose
+# content cannot be read (bot-wall / challenge page / JS-only shell / paywall).
+# ---------------------------------------------------------------------------
+STATUS = [
+    {"key": "inaccessible", "label": "Inaccessible",
+     "hint": "the article content could not be read (bot-wall / challenge / JS-only / paywall)"},
+]
+
 ALL_TAG_GROUPS = {
     "type_of_publication": TYPE_OF_PUBLICATION,
     "type_of_coverage": TYPE_OF_COVERAGE,
@@ -481,6 +491,7 @@ ALL_TAG_GROUPS = {
     "pillar": PILLAR,
     "industry": INDUSTRY,
     "product": PRODUCT,
+    "status": STATUS,
 }
 
 
