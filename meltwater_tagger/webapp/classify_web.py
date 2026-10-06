@@ -22,6 +22,7 @@ from prompts import (
     DECISION_SCHEMA,
 )
 from taxonomy import normalize_brand, SENTIMENTS
+from classify import is_deleted_text
 from logging_setup import get_logger
 
 log = get_logger("classify_web")
@@ -121,6 +122,16 @@ async def classify_post(anthropic, model, run_brand, permalink, text, sem, cfg,
     #    tag Neutral (the mention still exists in Meltwater and needs a tag).
     #  * FETCH FAILED — we don't know what it said, so never invent a sentiment;
     #    flag it for review instead of silently tagging everything Neutral.
+    #
+    # `deleted` is only set by the Apify route. Every other route (JSON API,
+    # RSS, scraper, browser) hands back Reddit's literal "[deleted]"/"[removed]"
+    # tombstone as the body, which is non-empty — so without the text check
+    # below those mentions were being sent to Claude to have a sentiment
+    # invented for a post that no longer exists.
+    if is_deleted_text(usable):
+        deleted = True
+        usable = ""
+
     if deleted and not (usable or "").strip():
         log.info("deleted/removed on Reddit: %s — tagging Neutral", permalink)
         return {"permalink": permalink, "action": "apply",

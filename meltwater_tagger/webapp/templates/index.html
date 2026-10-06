@@ -160,6 +160,10 @@
   <script>
     window.__SUPABASE_URL__ = {{ supabase_url|tojson }};
     window.__SUPABASE_ANON_KEY__ = {{ supabase_anon_key|tojson }};
+    // Batch-throughput knobs come from the server (env-tunable) so they can be
+    // retuned without editing JS. app.js falls back to its own defaults.
+    window.__CLASSIFY_CHUNK_SIZE__ = {{ classify_chunk_size|tojson }};
+    window.__CLASSIFY_PARALLEL__ = {{ classify_parallel|tojson }};
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>

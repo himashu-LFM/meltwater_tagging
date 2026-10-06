@@ -41,6 +41,7 @@ import config
 from classify import (
     fetch_and_enrich, fetch_via_cdp, fetch_reddit_scraper_bulk, fetch_via_apify,
     _find_col, PERMALINK_HINTS, infer_brand, TOPIC_HINTS,
+    resolve_brand_from_input_name,
 )
 import httpx
 
@@ -65,6 +66,21 @@ ALLOW_CDP = os.environ.get("MELTWATER_ALLOW_CDP", "true").lower() == "true"
 # Use the memory-safe API apply path (no feed rendering) with browser fallback.
 # Set MELTWATER_USE_API=false to force the old browser tagger.
 USE_API_APPLY = os.environ.get("MELTWATER_USE_API", "true").lower() == "true"
+
+# --- Throughput knobs (surfaced to the dashboard) ----------------------------
+# The dashboard splits a big batch into CLASSIFY_CHUNK_SIZE-URL requests and
+# keeps CLASSIFY_PARALLEL of them in flight. They live here, not hardcoded in
+# app.js, so throughput can be retuned with an env var + restart instead of a
+# code change and redeploy.
+# Keep CLASSIFY_PARALLEL BELOW gunicorn's --threads so page loads never starve
+# while a batch runs. Total concurrent Anthropic calls is roughly
+# CLASSIFY_PARALLEL x MELTWATER_CLASSIFY_CONCURRENCY.
+CLASSIFY_CHUNK_SIZE = int(os.environ.get("MELTWATER_CLASSIFY_CHUNK_SIZE", "8"))
+CLASSIFY_PARALLEL = int(os.environ.get("MELTWATER_CLASSIFY_PARALLEL", "3"))
+# Warn when a classify request is slower than this per post, so a throughput
+# regression shows up in the logs instead of only as a user complaint.
+SLOW_CLASSIFY_SECONDS_PER_POST = float(
+    os.environ.get("MELTWATER_SLOW_CLASSIFY_SECONDS", "6"))
 
 
 # --- MFA (Microsoft SSO OTP) human-in-the-loop bridge -----------------------
@@ -157,6 +173,8 @@ def run_async(coro):
 @app.route("/")
 def index():
     return render_template("index.html", allow_cdp=ALLOW_CDP,
+                            classify_chunk_size=CLASSIFY_CHUNK_SIZE,
+                            classify_parallel=CLASSIFY_PARALLEL,
                             supabase_url=db.SUPABASE_URL, supabase_anon_key=db.SUPABASE_ANON_KEY)
 
 
@@ -880,6 +898,57 @@ async def _check_reddit_cookie(cookie: str) -> bool:
 _BENTLEY_UPLOADS: dict = {}
 
 
+def _group_results_by_brand(results: list[dict], default_brand: str) -> dict[str, list[dict]]:
+    """Split rows by the brand each was classified against, preserving order.
+
+    A single-brand run yields exactly one group, so the apply path behaves
+    identically to before this existed.
+    """
+    groups: dict[str, list[dict]] = {}
+    for r in results:
+        b = (r.get("brand") or "").strip() or default_brand
+        groups.setdefault(b, []).append(r)
+    return groups
+
+
+# Report keys that are lists of rows and can simply be concatenated across
+# per-brand passes.
+_APPLY_LIST_KEYS = ("applied", "failed", "unreached", "skipped_already", "unmapped")
+
+
+def _merge_apply_reports(sub_reports: list[tuple[str, dict]]) -> dict:
+    """Fold one report per brand into the single report the UI expects."""
+    merged: dict = {k: [] for k in _APPLY_LIST_KEYS}
+    per_brand, failed_brands = [], []
+    session_expired = None
+
+    for brand, rep in sub_reports:
+        for k in _APPLY_LIST_KEYS:
+            v = rep.get(k)
+            if isinstance(v, list):
+                merged[k].extend(v)
+        if rep.get("_session_expired") and session_expired is None:
+            session_expired = rep.get("message")
+        n = len(rep.get("applied") or [])
+        per_brand.append(f"{brand}: {n} applied")
+        # A brand whose pass never ran (wrong search, login blocker, ...) must
+        # not be hidden behind another brand's success.
+        if not rep.get("ok"):
+            failed_brands.append(f"{brand} ({rep.get('message') or 'did not succeed'})")
+
+    merged["ok"] = not failed_brands and session_expired is None
+    if session_expired:
+        merged["_session_expired"] = True
+        merged["message"] = session_expired
+    else:
+        msg = f"Applied {len(merged['applied'])} tag(s) across {len(sub_reports)} brand(s) — " \
+              + "; ".join(per_brand)
+        if failed_brands:
+            msg += ". Did not complete for " + "; ".join(failed_brands)
+        merged["message"] = msg
+    return merged
+
+
 @app.route("/api/extract", methods=["POST"])
 @require_auth
 def extract():
@@ -900,7 +969,42 @@ def extract():
         return jsonify({"error": f"No URL column found. Columns: {list(df.columns)}"}), 400
 
     urls = [str(u).strip() for u in df[url_col].dropna() if str(u).strip().lower() != "nan"]
-    brand = infer_brand(df, _find_col(df, TOPIC_HINTS)) or ""
+    topic_col = _find_col(df, TOPIC_HINTS)
+    brand = infer_brand(df, topic_col) or ""
+
+    # PER-ROW brands. One export can mix several saved searches (Kaseya V2 /
+    # Kaseya Datto / Kaseya 365), and each row must be judged and tagged against
+    # its OWN brand — rolling them all up to "Kaseya" would both misjudge the
+    # sentiment and tag against the wrong Meltwater search.
+    url_brands: dict[str, str] = {}
+    unresolved: list[str] = []
+    if topic_col:
+        try:
+            known = [b["name"] for b in db.list_brands()] if db.is_configured() else []
+        except Exception:
+            log.exception("extract: could not list brands — per-row brand mapping skipped")
+            known = []
+        if known:
+            seen_inputs: dict[str, str | None] = {}
+            for _u, _in in zip(df[url_col], df[topic_col]):
+                u, name = str(_u).strip(), str(_in).strip()
+                if not u or u.lower() == "nan" or not name or name.lower() == "nan":
+                    continue
+                if name not in seen_inputs:
+                    seen_inputs[name] = resolve_brand_from_input_name(name, known)
+                resolved = seen_inputs[name]
+                if resolved:
+                    url_brands[u] = resolved
+                elif name not in unresolved:
+                    unresolved.append(name)
+            if seen_inputs:
+                log.info("extract: Input Name -> brand: %s%s",
+                         {k: v for k, v in seen_inputs.items()},
+                         f" | UNRESOLVED: {unresolved}" if unresolved else "")
+            # A single-brand file should still drive the dropdown.
+            distinct = {v for v in url_brands.values()}
+            if len(distinct) == 1 and not brand:
+                brand = next(iter(distinct))
 
     # If this is a Meltwater taxonomy export (carries a Document ID), stash the
     # FULL rows (country, byline, snippet, body, document id, existing tags) so
@@ -918,15 +1022,47 @@ def extract():
     except Exception:
         log.debug("extract: not a taxonomy export (or reader failed) — URL-only mode")
 
-    log.info("extracted %d URLs from %r, brand=%r, taxonomy_export=%s (user=%s)",
-             len(urls), f.filename, brand, taxonomy_export, g.user.id)
+    # Meltwater's own Document ID for each row. This is what the tagging API
+    # actually takes — when the export carries it we can tag directly and skip
+    # opening the saved search entirely (no date-range juggling, no "not in
+    # search" misses). `Document Tags` comes along so the skip-if-tagged rule
+    # still works without a lookup.
+    url_docs: dict[str, dict] = {}
+    doc_col = next((c for c in df.columns if str(c).strip().lower() == "document id"), None)
+    tags_col = next((c for c in df.columns if str(c).strip().lower() == "document tags"), None)
+    if doc_col:
+        for i, _u in enumerate(df[url_col]):
+            u = str(_u).strip()
+            if not u or u.lower() == "nan":
+                continue
+            # Meltwater wraps the id in literal quote characters in the export.
+            did = str(df[doc_col].iloc[i]).strip().strip('"').strip()
+            if not did or did.lower() == "nan":
+                continue
+            raw_tags = str(df[tags_col].iloc[i]).strip() if tags_col else ""
+            existing = ([t.strip() for t in raw_tags.split(",") if t.strip()]
+                        if raw_tags and raw_tags.lower() != "nan" else [])
+            url_docs[u] = {"document_id": did, "existing_tags": existing}
+        log.info("extract: %d/%d row(s) carry a Document ID — direct tagging available",
+                 len(url_docs), len(urls))
+
+    brands_found = sorted({v for v in url_brands.values()})
+    log.info("extracted %d URLs from %r, brand=%r, brands_in_file=%s, taxonomy_export=%s (user=%s)",
+             len(urls), f.filename, brand, brands_found, taxonomy_export, g.user.id)
     return jsonify({"urls": urls, "brand": brand, "count": len(urls),
-                    "taxonomy_export": taxonomy_export})
+                    "taxonomy_export": taxonomy_export,
+                    # Per-row brands from the Input Name column, so a mixed
+                    # export can be classified and tagged brand by brand.
+                    "url_brands": url_brands,
+                    "url_docs": url_docs,
+                    "brands_in_file": brands_found,
+                    "unresolved_inputs": unresolved})
 
 
 @app.route("/api/classify", methods=["POST"])
 @require_auth
 def classify():
+    _t_req = _time.monotonic()
     data = request.get_json(force=True)
     urls = [u.strip() for u in data.get("urls", []) if u and u.strip()]
     brand = (data.get("brand") or "").strip()
@@ -976,7 +1112,9 @@ def classify():
             if data.get("final") or not is_chunk:
                 _BENTLEY_UPLOADS.pop(g.user.id, None)
         else:
-            results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id))
+            results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id,
+                                               url_brands=data.get("url_brands") or {},
+                                               url_docs=data.get("url_docs") or {}))
     except AuthenticationError:
         log.error("classify failed: invalid/missing ANTHROPIC_API_KEY (user=%s)", g.user.id)
         return jsonify({"error": "Invalid or missing ANTHROPIC_API_KEY (server config)."}), 400
@@ -992,8 +1130,19 @@ def classify():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
     applied = sum(1 for r in results if r.get("tag"))
-    log.info("classify done: brand=%r total=%d tagged=%d (user=%s)",
-              brand, len(results), applied, g.user.id)
+    _elapsed = _time.monotonic() - _t_req
+    _per_post = _elapsed / max(1, len(urls))
+    log.info("classify done: brand=%r total=%d tagged=%d in %.1fs (%.2fs/post) (user=%s)",
+              brand, len(results), applied, _elapsed, _per_post, g.user.id)
+    if _per_post > SLOW_CLASSIFY_SECONDS_PER_POST:
+        log.warning(
+            "classify SLOW: %.2fs/post (threshold %.1fs). Throughput today: the dashboard "
+            "sends %d request(s) of %d URL(s) in parallel, and each request classifies %d "
+            "post(s) at once. If the box is idle, raise MELTWATER_CLASSIFY_PARALLEL "
+            "(keep it under gunicorn --threads) and/or MELTWATER_CLASSIFY_CONCURRENCY. "
+            "Check the per-stage fetch/llm timings above first, and rule out Anthropic 429s.",
+            _per_post, SLOW_CLASSIFY_SECONDS_PER_POST, CLASSIFY_PARALLEL,
+            CLASSIFY_CHUNK_SIZE, config.CLASSIFY_CONCURRENCY)
 
     # Don't save a run per chunk (it would fragment history into many partial
     # runs). Chunked runs are simply not written to history for now; a single
@@ -1154,9 +1303,10 @@ def _classify_bentley_urls(urls):
     return [_bentley_result(r) for r in bentley_run(urls, workers=10)]
 
 
-async def _classify_urls(urls, brand, fetch_mode, user_id):
+async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_docs=None):
     posts = [{"permalink": u, "excerpt": ""} for u in urls]
 
+    _t_fetch = _time.monotonic()
     log.info("fetch start: mode=%r posts=%d", fetch_mode, len(posts))
     if fetch_mode == "apify":
         # Paid Apify actor: one record per URL (post OR the specific comment),
@@ -1225,29 +1375,54 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
             posts = await asyncio.gather(*[_f(p) for p in posts])
 
     got_text = sum(1 for p in posts if p.get("text"))
-    log.info("fetch done: mode=%r got_text=%d/%d", fetch_mode, got_text, len(posts))
+    _fetch_s = _time.monotonic() - _t_fetch
+    log.info("fetch done: mode=%r got_text=%d/%d in %.1fs", fetch_mode, got_text, len(posts), _fetch_s)
     if got_text < len(posts) * 0.5:
         log.warning("fetch got text for less than half the posts (mode=%r) — "
                      "classifications for the rest will be unreliable", fetch_mode)
 
-    # Brand config (custom tag labels + per-tag rules). Empty when nothing is
-    # configured -> classify_web falls back to the default behaviour exactly.
-    brand_cfg = db.brand_config(brand) if db.is_configured() else {"labels": {}, "rules": {}, "roll_up_terms": []}
-    n_rules = len(brand_cfg.get("rules") or {})
-    log.info("brand config resolved: brand=%r custom_labels=%d rules=%d",
-              brand, len(brand_cfg.get("labels") or {}), n_rules)
+    # Each post is judged against ITS OWN brand. In a mixed export (Kaseya V2 /
+    # Kaseya Datto / Kaseya 365 in one file) the same thread can be positive
+    # about one product and negative about another, so classifying everything
+    # against a single run brand gives the wrong answer — and the wrong tag.
+    # `url_brands` comes from the export's Input Name column; anything missing
+    # falls back to the brand picked in the dropdown.
+    url_brands = url_brands or {}
+    for p in posts:
+        p["_brand"] = url_brands.get(p["permalink"]) or brand
+
+    brands_used = sorted({p["_brand"] for p in posts})
+    if len(brands_used) > 1:
+        counts = {b: sum(1 for p in posts if p["_brand"] == b) for b in brands_used}
+        log.info("classify: MIXED export — %d brand(s) from Input Name: %s", len(brands_used), counts)
+
+    # Brand config (custom tag labels + per-tag rules), loaded once per brand.
+    # Empty when nothing is configured -> classify_web falls back to the
+    # default behaviour exactly.
+    cfg_by_brand: dict[str, dict] = {}
+    for b in brands_used:
+        cfg = db.brand_config(b) if db.is_configured() else {"labels": {}, "rules": {}, "roll_up_terms": []}
+        cfg_by_brand[b] = cfg
+        log.info("brand config resolved: brand=%r custom_labels=%d rules=%d",
+                 b, len(cfg.get("labels") or {}), len(cfg.get("rules") or {}))
 
     anthropic = AsyncAnthropic()
     sem = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
+    _t_llm = _time.monotonic()
     decisions = await asyncio.gather(
         *[classify_web.classify_post(
-            anthropic, config.MODEL, brand, p["permalink"], p.get("text", ""), sem, brand_cfg,
+            anthropic, config.MODEL, p["_brand"], p["permalink"], p.get("text", ""), sem,
+            cfg_by_brand[p["_brand"]],
             content_type=p.get("content_type", "post"),
             post_text=p.get("post_text", ""),
             comment_text=p.get("comment_text", ""),
             deleted=bool(p.get("deleted")),
         ) for p in posts]
     )
+    _llm_s = _time.monotonic() - _t_llm
+    log.info("classify llm: %d post(s) in %.1fs (%.2fs/post, concurrency=%d); fetch took %.1fs",
+             len(posts), _llm_s, _llm_s / max(1, len(posts)), config.CLASSIFY_CONCURRENCY, _fetch_s)
+    brand_by_url = {p["permalink"]: p["_brand"] for p in posts}
 
     errors = [d for d in decisions if "classification error" in (d.get("reason") or "")]
     if errors:
@@ -1271,6 +1446,13 @@ async def _classify_urls(urls, brand, fetch_mode, user_id):
             "flag_brand": d.get("flag_brand", ""),
             "reason": d.get("reason", ""),
             "content_type": d.get("content_type", "post"),
+            # Which brand this row was judged against. Apply groups on this to
+            # open the right saved search per brand.
+            "brand": brand_by_url.get(d["permalink"], brand),
+            # Carried straight through from the export so apply can tag by id.
+            **({"document_id": (url_docs or {}).get(d["permalink"], {}).get("document_id"),
+                "existing_tags": (url_docs or {}).get(d["permalink"], {}).get("existing_tags") or []}
+               if (url_docs or {}).get(d["permalink"]) else {}),
         })
     return out
 
@@ -1548,14 +1730,53 @@ def apply_to_meltwater():
                     except Exception:
                         log.exception("apply: could not save captured Meltwater session (user=%s)", _uid)
 
-                report = run_async(apply_results_to_meltwater(
-                    creds["meltwater_email"], creds["meltwater_password"], topic_url, results,
-                    request_otp,
-                    account_hint=(environment if sso_account else None),
-                    brand_name=(brand_name if sso_account else None),
-                    saved_state=saved_state,
-                    on_state_captured=(_on_state_captured if sso_account else None),
-                ))
+                # A mixed export carries a per-row brand (from Input Name), and
+                # each brand lives behind its OWN Meltwater saved search — so
+                # one pass per brand. Login/OTP happens at most once: the first
+                # pass saves the browser session and the rest reuse it.
+                groups = _group_results_by_brand(results, brand_name)
+                if len(groups) > 1:
+                    log.info("apply: MIXED export — %d brand group(s): %s", len(groups),
+                             {b: len(rs) for b, rs in groups.items()})
+
+                sub_reports = []
+                for i, (g_brand, g_results) in enumerate(groups.items(), 1):
+                    g_env, g_topic = environment, topic_url
+                    if len(groups) > 1:
+                        # Each brand has its own Environment / topic URL.
+                        g_row = db.get_brand(g_brand) if db.is_configured() else None
+                        g_env = (g_row or {}).get("environment") or environment
+                        g_topic = (db.resolve_topic_url(g.user.id, g_row) if g_row else None) or topic_url
+                        log.info("apply: brand group %d/%d — brand=%r rows=%d env=%r",
+                                 i, len(groups), g_brand, len(g_results), g_env)
+
+                    r_i = run_async(apply_results_to_meltwater(
+                        creds["meltwater_email"], creds["meltwater_password"], g_topic, g_results,
+                        request_otp,
+                        account_hint=(g_env if sso_account else None),
+                        brand_name=(g_brand if sso_account else None),
+                        saved_state=saved_state,
+                        on_state_captured=(_on_state_captured if sso_account else None),
+                    )) or {}
+                    sub_reports.append((g_brand, r_i))
+
+                    if r_i.get("_session_expired"):
+                        break  # pointless to keep going; surfaced below
+                    # Re-read the session after EVERY pass, not just the first.
+                    # Each pass rotates Meltwater's tokens and writes the new
+                    # state back, so carrying the copy we started with would
+                    # hand the next brand tokens that have already been
+                    # rotated away — Meltwater answers those with /logout, and
+                    # the second brand would fail as "session expired" even
+                    # though the stored session is perfectly healthy.
+                    if sso_account and db.is_configured():
+                        try:
+                            saved_state = db.get_meltwater_browser_state(g.user.id) or saved_state
+                        except Exception:
+                            log.exception("apply: could not re-read the saved session between brands")
+
+                report = (sub_reports[0][1] if len(sub_reports) == 1
+                          else _merge_apply_reports(sub_reports))
                 if report and report.get("_session_expired"):
                     log.warning("apply: saved SSO session expired for user=%s — asking user to clear it",
                                  g.user.id)

@@ -21,6 +21,7 @@ import html as _html
 import json
 import re
 import sys
+import threading
 import time
 import xml.etree.ElementTree as _ET
 
@@ -37,7 +38,10 @@ from taxonomy import normalize_brand, tag_name, is_valid_tag
 
 PERMALINK_HINTS = ["url", "permalink", "link", "source url", "article url"]
 TEXT_HINTS = ["hit sentence", "snippet", "content", "body", "text", "summary", "opening text"]
-TOPIC_HINTS = ["search", "topic", "saved search", "query"]
+# "Input Name" is what a Meltwater export actually calls the saved search the
+# row came from — it was missing here, so brand auto-detection silently found
+# nothing on every real export.
+TOPIC_HINTS = ["input name", "search", "topic", "saved search", "query"]
 TAG_HINTS = ["tag", "tags"]
 
 
@@ -72,6 +76,35 @@ def load_export(path: str) -> tuple[pd.DataFrame, dict]:
     return df, cols
 
 
+def _norm_key(s: str) -> str:
+    """Squash an Input Name / brand name to a comparable key: lowercase,
+    punctuation and separators gone. 'Kaseya_V2_Reddit_Test', 'Kaseya V2 |
+    Reddit' and 'kaseya v2' all reduce to 'kaseyav2reddittest' / 'kaseyav2reddit'
+    / 'kaseyav2' — close enough for prefix matching, exact enough that
+    'Kaseya V2' never matches 'Kaseya 365'."""
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def resolve_brand_from_input_name(input_name: str, known_brands: list[str]) -> str | None:
+    """Map one row's Input Name to one of the brands configured in the app.
+
+    Longest match wins, which is the whole point: 'Kaseya V2 | Reddit' must
+    resolve to 'Kaseya V2', not to 'Kaseya' — both are real brands and the
+    shorter one is a prefix of the longer. Returns None when nothing matches,
+    so the caller can surface it instead of guessing a brand.
+    """
+    key = _norm_key(input_name)
+    if not key:
+        return None
+    best = None
+    for b in known_brands:
+        bk = _norm_key(b)
+        if bk and bk in key:
+            if best is None or len(bk) > len(_norm_key(best)):
+                best = b
+    return best
+
+
 def infer_brand(df: pd.DataFrame, topic_col: str | None) -> str | None:
     """Derive the run brand from the topic name, e.g. 'Kaseya V2 | Reddit' -> Kaseya."""
     if not topic_col or topic_col not in df.columns:
@@ -87,8 +120,18 @@ def infer_brand(df: pd.DataFrame, topic_col: str | None) -> str | None:
 # --- Full-text fetching ----------------------------------------------------
 
 # Serialize + pace Reddit requests so we don't trip 429s.
-_reddit_lock = asyncio.Lock()
-_reddit_last = 0.0
+#
+# All of this state MUST be event-loop independent. The web app runs every
+# request in a FRESH event loop (webapp/app.py run_async), so:
+#   * a module-level asyncio.Lock binds itself to the first loop that awaits it
+#     and then raises "is bound to a different event loop" on every later
+#     request, and
+#   * loop.time() is a PER-LOOP monotonic clock with an arbitrary epoch, so a
+#     timestamp taken under one loop is meaningless under another.
+# So: a threading.Lock that only ever guards arithmetic (never an await), and
+# time.monotonic(), which is process-wide.
+_reddit_sched_lock = threading.Lock()
+_reddit_next_at = 0.0   # monotonic time at which the next request may start
 _reddit_token: dict = {"value": None, "expires_at": 0.0}
 
 
@@ -99,15 +142,19 @@ _reddit_resume_at = 0.0
 
 
 async def _throttle():
-    global _reddit_last
-    async with _reddit_lock:
-        loop = asyncio.get_event_loop()
-        now = loop.time()
-        wait = max(config.REDDIT_MIN_INTERVAL - (now - _reddit_last),
-                   _reddit_resume_at - now)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        _reddit_last = loop.time()
+    """Reserve this caller's Reddit slot, then wait for it.
+
+    The slot is RESERVED under the lock and awaited outside it, so concurrent
+    callers — including ones running on different event loops — stagger behind
+    each other instead of all waking at the same instant."""
+    global _reddit_next_at
+    with _reddit_sched_lock:
+        now = time.monotonic()
+        start = max(now, _reddit_next_at, _reddit_resume_at)
+        _reddit_next_at = start + config.REDDIT_MIN_INTERVAL
+    wait = start - time.monotonic()
+    if wait > 0:
+        await asyncio.sleep(wait)
 
 
 def _note_reddit_ratelimit(r) -> None:
@@ -120,7 +167,7 @@ def _note_reddit_ratelimit(r) -> None:
         remaining = float(r.headers.get("x-ratelimit-remaining", "1") or 1)
         reset = float(r.headers.get("x-ratelimit-reset", "0") or 0)
         if remaining <= 0 and reset > 0:
-            _reddit_resume_at = asyncio.get_event_loop().time() + reset + 1.0
+            _reddit_resume_at = time.monotonic() + reset + 1.0
     except Exception:
         pass
 
@@ -133,7 +180,7 @@ async def _reddit_oauth_token(client: httpx.AsyncClient, force: bool = False) ->
     now hits a login/bot wall (403), which is what silently produced empty text
     (and therefore blanket-Neutral classifications)."""
     if not force and _reddit_token["value"]:
-        now = asyncio.get_event_loop().time()
+        now = time.monotonic()
         if now < _reddit_token.get("expires_at", 0):
             return _reddit_token["value"]
     if not (config.REDDIT_CLIENT_ID and config.REDDIT_CLIENT_SECRET):
@@ -151,7 +198,7 @@ async def _reddit_oauth_token(client: httpx.AsyncClient, force: bool = False) ->
             _reddit_token["value"] = body.get("access_token")
             # Refresh a minute early rather than racing the expiry.
             ttl = float(body.get("expires_in", 3600))
-            _reddit_token["expires_at"] = asyncio.get_event_loop().time() + max(60.0, ttl - 60)
+            _reddit_token["expires_at"] = time.monotonic() + max(60.0, ttl - 60)
             return _reddit_token["value"]
         if r.status_code in (401, 403):
             print(f"  Reddit rejected the API credentials (HTTP {r.status_code}) — "
@@ -412,7 +459,32 @@ async def _fetch_reddit_bulk_rss(client: httpx.AsyncClient, posts: list[dict]) -
 # 10s). Each record echoes the submitted URL back in `query`, so mapping results
 # to mentions is an exact lookup rather than fuzzy matching.
 
-_APIFY_DELETED = {"[deleted]", "[removed]", "[deleted by user]"}
+# Reddit's tombstones for content that no longer exists. Every fetch route
+# runs into these, not just Apify: the JSON API and RSS return the literal
+# marker as the body, so without this check a deleted mention gets sent to
+# Claude to have its "sentiment" judged.
+# Every entry is bracketed on purpose. An un-bracketed phrase like
+# "deleted by user" is something a real person can write as their whole
+# comment, and matching it would tag that comment Neutral without ever
+# reading it.
+DELETED_MARKERS = {
+    "[deleted]", "[removed]", "[deleted by user]",
+    "[removed by reddit]", "[unavailable]",
+}
+
+
+def is_deleted_text(s: str | None) -> bool:
+    """True when the fetched body IS a Reddit tombstone and nothing else.
+
+    Deliberately an exact match (after trimming whitespace and the markdown
+    emphasis Reddit sometimes wraps it in) — a real comment that merely
+    mentions "[deleted]" while discussing something must not be swallowed.
+    """
+    t = (s or "").strip().strip("*_ \t\r\n").strip().lower()
+    return t in DELETED_MARKERS
+
+
+_APIFY_DELETED = DELETED_MARKERS  # back-compat alias
 
 
 def _url_key(u: str) -> str:
@@ -427,8 +499,7 @@ def _url_key(u: str) -> str:
 def _apify_is_deleted(rec: dict) -> bool:
     if rec.get("is_deleted_or_removed") is True:
         return True
-    body = (rec.get("body") or rec.get("selftext") or "").strip().lower()
-    return body in {d.lower() for d in _APIFY_DELETED}
+    return is_deleted_text(rec.get("body") or rec.get("selftext"))
 
 
 def _apify_apply_record(p: dict, rec: dict) -> None:
