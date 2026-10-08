@@ -312,6 +312,23 @@ _FINANCE_PATH_MARKERS = ("/stocks/", "/stock/", "/markets/", "/market/",
                          "/analyst-ratings/", "/quote/", "/investing/")
 
 
+_FINANCE_COMPETITORS = ("nemetschek", "autodesk", "trimble", "hexagon",
+                        "dassault", "aveva", "procore", "esri")
+
+
+def is_competitor_finance_subject(text: str = "") -> bool:
+    """§2d: True if a finance/stock item's subject is a COMPETITOR'S stock (the
+    competitor is named and Bentley/BSY is not), i.e. Bentley is only a boilerplate
+    peer line -> Not in scope. Used to guard the deterministic finance-stub tag so
+    e.g. a 'Markt Bote' post on Nemetschek is not auto-tagged Corporate - Financial / IR."""
+    low = (text or "").lower()
+    if not low:
+        return False
+    bentley = "bentley" in low or "bsy" in low
+    competitor = any(c in low for c in _FINANCE_COMPETITORS)
+    return competitor and not bentley
+
+
 def is_finance_page(url: str = "") -> bool:
     """True if the URL is a finance / stock-markets page (host or path signals)."""
     from urllib.parse import urlparse
@@ -376,6 +393,58 @@ def is_listing_page(text: str = "") -> bool:
     if not any(k == "strong" for k in kinds):
         return False   # bare-ellipsis prose alone is not a listing page
     return len(teasers) / len(blocks) >= 0.5
+
+
+# ---------------------------------------------------------------------------
+# §2a — PRE-EXISTING Meltwater category tags dictate protocol tags. Analysts set
+# "… Inclusion/Exclusion" and "Reporting Inclusion" categories on a mention
+# BEFORE protocol tagging; they arrive (on SOME mentions, not all) in the export's
+# Document Tags column. When present they are high-trust deterministic signals.
+# ---------------------------------------------------------------------------
+_PILLAR_INCLUSION = {
+    "connected data inclusion": "Pillar - Connected Data",
+    "ai infrastructure inclusion": "Pillar - Infrastructure AI",
+    "infrastructure ai inclusion": "Pillar - Infrastructure AI",
+    "resilient built world inclusion": "Pillar - Resilient Built World",
+}
+_PILLAR_EXCLUSION = {
+    "connected data exclusion": "Pillar - Connected Data",
+    "ai infrastructure exclusion": "Pillar - Infrastructure AI",
+    "infrastructure ai exclusion": "Pillar - Infrastructure AI",
+    "resilient built world exclusion": "Pillar - Resilient Built World",
+}
+
+
+def existing_tag_not_in_scope(document_tags: str = "") -> bool:
+    """§2a: a pre-existing duplicate / syndicated-content category tag on the
+    mention means Not in scope (track the parent, not the copy)."""
+    dt = (document_tags or "").lower()
+    return "syndicated content" in dt or "duplicate/" in dt or "duplicate /" in dt
+
+
+def apply_existing_tag_signals(fam: dict, document_tags: str = "") -> dict:
+    """§2a: apply the mention's pre-existing category tags (from Document Tags)
+    to the protocol families, in place:
+      - "Reporting Inclusion"  -> Type of Coverage - Unique
+      - "<Pillar> Inclusion"   -> ensure that Pillar is present
+      - "<Pillar> Exclusion"   -> REMOVE that Pillar (the theme belongs to a
+                                  competitor, e.g. 'Bentley Connected Data Exclusion')
+    These are high-trust analyst signals, so they override the model's guess.
+    Only fires for markers actually present in Document Tags; absent -> no-op."""
+    dt = (document_tags or "").lower()
+    if not dt:
+        return fam
+    if "reporting inclusion" in dt:
+        fam["type_of_coverage"] = ["Type of Coverage - Unique"]
+    pill = list(fam.get("pillar") or [])
+    for marker, label in _PILLAR_INCLUSION.items():
+        if marker in dt and label not in pill:
+            pill.append(label)
+    for marker, label in _PILLAR_EXCLUSION.items():
+        if marker in dt and label in pill:
+            pill = [p for p in pill if p != label]
+    fam["pillar"] = pill
+    return fam
 
 
 def is_financial_ir_source(url: str = "", source: str = "") -> str | None:
