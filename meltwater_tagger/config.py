@@ -85,6 +85,19 @@ APIFY_BATCH_SIZE = int(os.environ.get("APIFY_BATCH_SIZE", "200"))
 # those are retried once, and the retry logs tell you to dial it back.
 APIFY_RUN_SIZE = int(os.environ.get("APIFY_RUN_SIZE", "4"))
 APIFY_CONCURRENCY = int(os.environ.get("APIFY_CONCURRENCY", "8"))
+# Comment permalinks: resolve them by scraping their PARENT THREAD instead of
+# asking the search-based actor for the comment directly.
+#
+# Console evidence from one 8-URL batch: the direct comment lookups took 59s and
+# 86s and returned 0 and 1 record(s), then three parent-thread scrapes returned
+# 32-34 records each in 20-40s and did all the real work. The direct pass for
+# comments is close to pure waste, and the codebase already documented that it
+# "returns nothing at all ... even though the comment is live".
+#
+# Thread scrapes bill every comment they return, so mentions are grouped per
+# thread: N mentions in one thread cost ONE scrape, not N.
+# Set to 0 to restore the old direct-first order.
+APIFY_COMMENTS_VIA_THREAD = os.environ.get("APIFY_COMMENTS_VIA_THREAD", "1") not in ("0", "false", "False")
 # Back-off before the single retry of a throttled run (seconds).
 APIFY_RETRY_DELAY = int(os.environ.get("APIFY_RETRY_DELAY", "10"))
 # Comment cap for the parent-thread retry used when the actor's direct
