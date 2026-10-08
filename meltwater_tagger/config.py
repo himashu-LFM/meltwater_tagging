@@ -66,9 +66,27 @@ APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 APIFY_ACTOR = os.environ.get("APIFY_ACTOR", "fatihtahta~reddit-scraper-search-fast")
 # How long to wait for one synchronous actor run (seconds).
 APIFY_TIMEOUT = int(os.environ.get("APIFY_TIMEOUT", "300"))
-# Mentions per actor run. The actor handles large batches fine; chunking keeps
-# any single run well inside the sync timeout.
+# DEPRECATED, no longer read by the fetch loop: it set one big run per batch,
+# which we measured to be the slow shape. Superseded by APIFY_RUN_SIZE +
+# APIFY_CONCURRENCY below. Kept defined so a leftover line in app.env is inert
+# rather than an AttributeError.
 APIFY_BATCH_SIZE = int(os.environ.get("APIFY_BATCH_SIZE", "200"))
+# URLs per actor run, and how many runs may execute AT THE SAME TIME.
+#
+# Production measurement: a run of 8 URLs took 118.7s (14.8s/url) and a run of 3
+# took ~60s -> roughly 25s fixed start-up + ~12s per URL, with no internal
+# parallelism in the actor. So wall-clock is driven by how many runs overlap,
+# not by how big each run is. Bigger runs are CHEAPER (start-up amortised);
+# more concurrent runs are FASTER. 4 x 8 is the balance: a 116-URL batch becomes
+# 29 runs in 4 waves (~5 min) instead of one 25-minute serial crawl, for ~15%
+# more compute units.
+#
+# Raise APIFY_CONCURRENCY to go faster, until Apify starts returning 429/402 -
+# those are retried once, and the retry logs tell you to dial it back.
+APIFY_RUN_SIZE = int(os.environ.get("APIFY_RUN_SIZE", "4"))
+APIFY_CONCURRENCY = int(os.environ.get("APIFY_CONCURRENCY", "8"))
+# Back-off before the single retry of a throttled run (seconds).
+APIFY_RETRY_DELAY = int(os.environ.get("APIFY_RETRY_DELAY", "10"))
 # Comment cap for the parent-thread retry used when the actor's direct
 # comment-permalink lookup returns nothing. Every comment returned is billed, so
 # this is a ceiling on the cost of recovering one missed mention.
