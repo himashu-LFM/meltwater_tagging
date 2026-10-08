@@ -563,6 +563,7 @@ async def fetch_via_apify(posts: list[dict]) -> list[dict]:
                 "maxPosts": len(chunk) + 10,
                 "maxComments": len(chunk) + 10,
             }
+            _t_run = time.monotonic()
             try:
                 r = await client.post(url, json=payload, headers=headers)
                 if r.status_code not in (200, 201):
@@ -572,6 +573,13 @@ async def fetch_via_apify(posts: list[dict]) -> list[dict]:
             except Exception as e:
                 print(f"apify: run errored: {type(e).__name__}: {e}", flush=True)
                 continue
+            _run_s = time.monotonic() - _t_run
+            # Per-RUN timing. Comparing runs of different sizes tells us how much
+            # of the cost is fixed (actor start-up, paid once per run) versus
+            # per-URL — i.e. whether FEWER+BIGGER runs or MORE PARALLEL runs is
+            # the right lever. Without this the two are indistinguishable.
+            print(f"apify: run of {len(chunk)} url(s) took {_run_s:.1f}s "
+                  f"({_run_s / max(1, len(chunk)):.1f}s/url)", flush=True)
 
             # Index results by the URL we submitted (`query`), then by ids.
             by_query, by_id = {}, {}

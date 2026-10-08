@@ -1059,6 +1059,48 @@ def extract():
                     "unresolved_inputs": unresolved})
 
 
+@app.route("/api/prefetch", methods=["POST"])
+@require_auth
+def prefetch():
+    """Fetch an ENTIRE upload's post text in one go, before the dashboard starts
+    sending its /api/classify chunks.
+
+    Why: the dashboard splits a big upload into small classify requests, and the
+    fetch used to happen inside each one — so an Apify-backed run paid the actor's
+    per-run start-up cost once PER CHUNK (~15 times on a 116-post upload) instead
+    of once. Doing it here lets the whole batch share a single fetch, and
+    _classify_urls then reads from the cache.
+
+    Best-effort by design: the client ignores a failure here, and every classify
+    chunk still fetches whatever it does not find cached, so the worst case is the
+    old behaviour rather than a broken run."""
+    data = request.get_json(force=True, silent=True) or {}
+    urls = [u.strip() for u in data.get("urls", []) if u and u.strip()]
+    fetch_mode = data.get("fetch_mode") or ("apify" if config.APIFY_TOKEN else "reddit_scraper")
+    if not ALLOW_CDP and fetch_mode == "cdp":
+        fetch_mode = "reddit_scraper"
+    if not urls:
+        return jsonify({"ok": False, "error": "No URLs provided"}), 400
+
+    t0 = _time.monotonic()
+    log.info("prefetch start: %d url(s) mode=%r (user=%s)", len(urls), fetch_mode, g.user.id)
+    posts = [{"permalink": u, "excerpt": ""} for u in urls]
+    try:
+        posts = run_async(_fetch_posts(posts, fetch_mode, g.user.id))
+    except Exception as e:
+        log.exception("prefetch failed (user=%s) — chunks will fetch individually", g.user.id)
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    _PREFETCH[g.user.id] = {"at": _time.monotonic(), "mode": fetch_mode,
+                            "posts": {p["permalink"]: p for p in posts}}
+    got = sum(1 for p in posts if p.get("text") or p.get("deleted"))
+    elapsed = _time.monotonic() - t0
+    log.info("prefetch done: %d/%d url(s) in %.1fs (%.2fs/url) (user=%s)",
+             got, len(urls), elapsed, elapsed / max(1, len(urls)), g.user.id)
+    return jsonify({"ok": True, "fetched": got, "total": len(urls),
+                    "seconds": round(elapsed, 1)})
+
+
 @app.route("/api/classify", methods=["POST"])
 @require_auth
 def classify():
@@ -1128,6 +1170,11 @@ def classify():
     except Exception as e:
         log.exception("classify failed: unexpected error (brand=%r, user=%s)", brand, g.user.id)
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    # The batch is done with the prefetched text — release it (a stale entry is
+    # harmless, it just holds memory until the next prefetch replaces it).
+    if data.get("final") or not is_chunk:
+        _PREFETCH.pop(g.user.id, None)
 
     applied = sum(1 for r in results if r.get("tag"))
     _elapsed = _time.monotonic() - _t_req
@@ -1303,9 +1350,13 @@ def _classify_bentley_urls(urls):
     return [_bentley_result(r) for r in bentley_run(urls, workers=10)]
 
 
-async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_docs=None):
-    posts = [{"permalink": u, "excerpt": ""} for u in urls]
-
+# --- fetch stage, callable on its own ---------------------------------------
+# Split out of _classify_urls so a batch can be fetched ONCE up front instead of
+# once per chunk. The dashboard sends a big upload as several small /api/classify
+# requests, and fetching inside each of them meant one Apify actor RUN per chunk —
+# a 116-post upload paid the per-run start-up cost ~15 times. /api/prefetch now
+# does the whole batch in one go and _classify_urls reads from that cache.
+async def _fetch_posts(posts, fetch_mode, user_id):
     _t_fetch = _time.monotonic()
     log.info("fetch start: mode=%r posts=%d", fetch_mode, len(posts))
     if fetch_mode == "apify":
@@ -1374,12 +1425,50 @@ async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_
                 return p
             posts = await asyncio.gather(*[_f(p) for p in posts])
 
+
     got_text = sum(1 for p in posts if p.get("text"))
     _fetch_s = _time.monotonic() - _t_fetch
     log.info("fetch done: mode=%r got_text=%d/%d in %.1fs", fetch_mode, got_text, len(posts), _fetch_s)
     if got_text < len(posts) * 0.5:
         log.warning("fetch got text for less than half the posts (mode=%r) — "
                      "classifications for the rest will be unreliable", fetch_mode)
+    return posts
+
+
+# Per-user cache of an already-fetched batch: user_id -> {"at": monotonic,
+# "mode": str, "posts": {permalink: post_dict}}. Short-lived and replaced by the
+# next prefetch; a miss simply means _classify_urls fetches that post itself, so
+# losing it only costs time, never correctness.
+_PREFETCH: dict = {}
+_PREFETCH_TTL_S = float(os.environ.get("MELTWATER_PREFETCH_TTL", "1800"))
+
+
+async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_docs=None):
+    posts = [{"permalink": u, "excerpt": ""} for u in urls]
+
+    # Wall time of the fetch STAGE as this request experienced it — a cache hit
+    # should show ~0s, which is how you can see the prefetch working in the logs.
+    _t_fetch = _time.monotonic()
+    # Use anything /api/prefetch already fetched for this user, so a chunked
+    # upload pays the fetch cost ONCE for the whole batch rather than once per
+    # chunk. Anything not in the cache is fetched here exactly as before.
+    cached = _PREFETCH.get(user_id)
+    if (cached and cached.get("mode") == fetch_mode
+            and (_time.monotonic() - cached["at"]) < _PREFETCH_TTL_S):
+        hits = 0
+        for p in posts:
+            got = cached["posts"].get(p["permalink"])
+            if got and (got.get("text") or got.get("deleted")):
+                p.update(got)
+                hits += 1
+        misses = [p for p in posts if not (p.get("text") or p.get("deleted"))]
+        log.info("fetch: %d/%d post(s) served from the prefetch cache; %d to fetch",
+                 hits, len(posts), len(misses))
+        if misses:
+            await _fetch_posts(misses, fetch_mode, user_id)
+    else:
+        posts = await _fetch_posts(posts, fetch_mode, user_id)
+    _fetch_s = _time.monotonic() - _t_fetch
 
     # Each post is judged against ITS OWN brand. In a mixed export (Kaseya V2 /
     # Kaseya Datto / Kaseya 365 in one file) the same thread can be positive

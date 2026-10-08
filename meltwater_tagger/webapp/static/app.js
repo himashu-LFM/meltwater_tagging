@@ -171,6 +171,25 @@ async function classifyChunk(chunk, brand, fetchMode, isFinal, deferRun, urlBran
   return data;
 }
 
+// Fetch the WHOLE upload's text in one request before the classify chunks go
+// out. Fetching inside each chunk meant one Apify actor run per chunk, and the
+// per-run start-up cost was being paid once for every 8 posts instead of once
+// for the batch. Best-effort: on any failure we just carry on, because each
+// chunk still fetches whatever it does not find cached.
+async function prefetchAll(urls, fetchMode) {
+  try {
+    const r = await Auth.authedFetch("/api/prefetch", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls, fetch_mode: fetchMode }),
+    });
+    if (!r.ok) return false;
+    const d = await r.json().catch(() => ({}));
+    return !!d.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function run() {
   $("inputErr").textContent = "";
   const brand = $("brand").value.trim();
@@ -206,6 +225,14 @@ async function run() {
     // URLs have neither, so send nothing and let the dropdown brand apply.
     const urlBrands = pasted.length ? null : state.urlBrands;
     const urlDocs = pasted.length ? null : state.urlDocs;
+
+    // One fetch for the whole batch, then the chunks only do classification.
+    // Only worth it when the batch is actually split across requests.
+    if (chunks.length > 1) {
+      setLoaderPhase(`Fetching ${urls.length} posts…`);
+      await prefetchAll(urls, fetchMode);
+      setLoaderPhase(null);
+    }
 
     const sendChunk = async (i, isFinal) => {
       const data = await classifyChunk(chunks[i], brand, fetchMode, isFinal, deferRun,
@@ -267,10 +294,18 @@ async function run() {
 let loaderTimer;
 let _loaderMsgIdx = 0;
 let _loaderProgress = { done: 0, total: 0 };
+let _loaderPhase = null;   // when set, shown instead of the cycling message
 const _LOADER_MSGS = ["Reading articles…", "Understanding coverage…", "Applying tagging rules…", "Assigning tags…"];
 function renderLoader() {
+  if (_loaderPhase) { $("loaderText").textContent = _loaderPhase; return; }
   const p = _loaderProgress.total ? `  ·  ${_loaderProgress.done}/${_loaderProgress.total} done` : "";
   $("loaderText").textContent = _LOADER_MSGS[_loaderMsgIdx] + p;
+}
+// The batch fetch is one long step with no per-post progress, so show what it is
+// doing rather than a counter that sits at 0/116 and looks frozen.
+function setLoaderPhase(text) {
+  _loaderPhase = text || null;
+  renderLoader();
 }
 function setLoaderProgress(done, total) {
   _loaderProgress = { done, total };
