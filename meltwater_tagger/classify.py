@@ -1130,7 +1130,7 @@ async def main():
                   "in that Chrome window and the URLs open normally there.")
 
     # 2) Classify in parallel.
-    anthropic = AsyncAnthropic()
+    anthropic = AsyncAnthropic(timeout=config.CLASSIFY_TIMEOUT)
     # Preflight: catch a bad/missing API key now instead of failing all N posts.
     try:
         await anthropic.messages.create(

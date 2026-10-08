@@ -89,6 +89,21 @@ BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
+# --- Per-call latency guards (sentiment path) -----------------------------
+# The taxonomy (Bentley) classifier has had these since day one; the sentiment
+# classifier had NEITHER, so a single post could think for minutes and a stuck
+# call could hang for the SDK default of 600s (x2 retries). Same env names as
+# the taxonomy path, so one knob covers both.
+#
+# Why cap THINKING and not max_tokens: adaptive thinking bills against
+# max_tokens, so lowering max_tokens truncates the JSON answer mid-string on
+# posts the model thinks hard about (JSONDecodeError -> row dumped to review).
+# Capping the thinking budget bounds the latency while leaving the full output
+# allowance intact, so the truncation fix stays in place.
+# Set MELTWATER_THINKING_BUDGET=0 to turn extended thinking off entirely.
+CLASSIFY_TIMEOUT = float(os.environ.get("MELTWATER_CLASSIFY_TIMEOUT", "150"))
+THINKING_BUDGET = int(os.environ.get("MELTWATER_THINKING_BUDGET", "2000"))
+
 # Max characters of full post text to send to the model per post.
 MAX_POST_CHARS = int(os.environ.get("MELTWATER_MAX_POST_CHARS", "12000"))
 

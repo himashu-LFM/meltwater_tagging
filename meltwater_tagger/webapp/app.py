@@ -1406,7 +1406,9 @@ async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_
         log.info("brand config resolved: brand=%r custom_labels=%d rules=%d",
                  b, len(cfg.get("labels") or {}), len(cfg.get("rules") or {}))
 
-    anthropic = AsyncAnthropic()
+    # Timeout so a stuck call flags that row for review instead of hanging the
+    # whole batch (the SDK default is 600s, retried twice).
+    anthropic = AsyncAnthropic(timeout=config.CLASSIFY_TIMEOUT)
     sem = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
     _t_llm = _time.monotonic()
     decisions = await asyncio.gather(

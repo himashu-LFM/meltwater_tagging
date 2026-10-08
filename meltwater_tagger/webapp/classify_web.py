@@ -17,6 +17,7 @@ import sys
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_THIS_DIR))
 sys.path.insert(0, _THIS_DIR)
+import config
 from prompts import (
     SYSTEM_PROMPT, POST_TEMPLATE, COMMENT_TEMPLATE, CONTENT_TYPE_GUIDANCE,
     DECISION_SCHEMA,
@@ -151,18 +152,27 @@ async def classify_post(anthropic, model, run_brand, permalink, text, sem, cfg,
     user_msg = _build_user_message(run_brand, permalink, text, content_type, post_text, comment_text)
     async with sem:
         try:
-            resp = await anthropic.messages.create(
+            kwargs = dict(
                 model=model,
-                # Adaptive thinking bills against max_tokens, so a low ceiling
-                # truncates the JSON answer mid-string on posts the model thinks
-                # hard about (seen as JSONDecodeError -> review). Only tokens
-                # actually generated are charged, so a high ceiling is free.
+                # KEEP this high. Thinking bills against max_tokens, so a low
+                # ceiling truncates the JSON answer mid-string on posts the model
+                # thinks hard about (seen as JSONDecodeError -> review). Only
+                # tokens actually generated are charged, so a high ceiling is free.
                 max_tokens=16000,
-                thinking={"type": "adaptive"},
                 system=system,
                 messages=[{"role": "user", "content": user_msg}],
                 output_config={"format": {"type": "json_schema", "schema": DECISION_SCHEMA}},
             )
+            # Bounded thinking instead of adaptive. Adaptive scales against
+            # max_tokens, so with a 16000 ceiling one post could think for a very
+            # long time — and a chunk only finishes when its SLOWEST post does, so
+            # a single deep-thinking post paced every other post beside it. An
+            # explicit budget keeps the reasoning (the accuracy lever) while
+            # capping the latency; the taxonomy path has run this way all along.
+            if config.THINKING_BUDGET > 0:
+                kwargs["thinking"] = {"type": "enabled",
+                                      "budget_tokens": config.THINKING_BUDGET}
+            resp = await anthropic.messages.create(**kwargs)
             raw = next(b.text for b in resp.content if b.type == "text")
             decision = json.loads(raw)
         except Exception as e:
