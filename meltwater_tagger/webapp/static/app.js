@@ -151,6 +151,9 @@ async function classifyChunk(chunk, brand, fetchMode, isFinal, deferRun, urlBran
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       urls: chunk, brand, fetch_mode: fetchMode, defer_run: deferRun, final: isFinal,
+      // Ties this request to the loader's progress poll. Chunks of one run share
+      // the token, so their per-post counts add up into a single total.
+      job: _jobToken,
       // Per-row brand (from the export's Input Name) and Meltwater Document ID.
       url_brands: sliceFor(urlBrands),
       url_docs: sliceFor(urlDocs),
@@ -212,6 +215,8 @@ async function run() {
   let labels = null, runBrand = brand;
   setLoaderProgress(0, urls.length);
   cycleLoaderText();
+  _jobToken = newJobToken();
+  startProgressPoll(_jobToken, urls.length);
 
   // Results are collected PER CHUNK INDEX and flattened at the end, so the
   // rendered order still matches the upload order even though chunks now finish
@@ -263,7 +268,9 @@ async function run() {
     await sendChunk(lastIdx, true);
 
     merged.push(...collect());
+    stopProgressPoll();
   } catch (err) {
+    stopProgressPoll();
     // Keep whatever finished before the failure (same as before, just gathered
     // from the per-chunk slots).
     merged.push(...collect());
@@ -283,6 +290,7 @@ async function run() {
     return;
   }
 
+  stopProgressPoll();
   state.results = merged;
   state.runId = null;
   renderResults({ run_brand: runBrand, results: merged, labels: labels || undefined });
@@ -292,14 +300,57 @@ async function run() {
 }
 
 let loaderTimer;
+// Live progress ---------------------------------------------------------------
+// The loader used to advance only when a whole CHUNK returned, so a batch that
+// fitted in one request (<= CLASSIFY_CHUNK_SIZE) showed "0/8 done" for the whole
+// run and looked frozen. The server now counts posts as they finish and this
+// polls for that count. It is purely cosmetic: every failure path is swallowed,
+// and the per-chunk counter below still works if the poll never answers.
+let _jobToken = null;
+let _progressTimer = null;
+const _PHASE_TEXT = { fetch: "Fetching post text…", classify: "Assigning tags…" };
+let _loaderPhaseCode = null;
+
+function newJobToken() {
+  try {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  } catch (e) { /* fall through */ }
+  return `job-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function startProgressPoll(job, total) {
+  stopProgressPoll();
+  _progressTimer = setInterval(async () => {
+    try {
+      const r = await Auth.authedFetch(`/api/progress?job=${encodeURIComponent(job)}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      // Never let a stale poll walk the number backwards or past the total.
+      const done = Math.min(Math.max(Number(d.done) || 0, _loaderProgress.done), total);
+      _loaderProgress = { done, total };
+      _loaderPhaseCode = d.phase || null;
+      if (_loaderPhaseCode) _loaderPhase = _PHASE_TEXT[_loaderPhaseCode] || null;
+      renderLoader();
+    } catch (e) { /* progress is cosmetic - never surface it */ }
+  }, 1000);
+}
+
+function stopProgressPoll() {
+  clearInterval(_progressTimer);
+  _progressTimer = null;
+  _loaderPhaseCode = null;
+}
+
 let _loaderMsgIdx = 0;
 let _loaderProgress = { done: 0, total: 0 };
 let _loaderPhase = null;   // when set, shown instead of the cycling message
 const _LOADER_MSGS = ["Reading articles…", "Understanding coverage…", "Applying tagging rules…", "Assigning tags…"];
 function renderLoader() {
-  if (_loaderPhase) { $("loaderText").textContent = _loaderPhase; return; }
-  const p = _loaderProgress.total ? `  ·  ${_loaderProgress.done}/${_loaderProgress.total} done` : "";
-  $("loaderText").textContent = _LOADER_MSGS[_loaderMsgIdx] + p;
+  // No counter during the fetch: nothing is classified yet, and "0/8 done" next
+  // to "Fetching post text…" is exactly the frozen-looking thing we are fixing.
+  const counting = _loaderProgress.total > 0 && _loaderPhaseCode !== "fetch";
+  const p = counting ? `  ·  ${_loaderProgress.done}/${_loaderProgress.total} done` : "";
+  $("loaderText").textContent = (_loaderPhase || _LOADER_MSGS[_loaderMsgIdx]) + p;
 }
 // The batch fetch is one long step with no per-post progress, so show what it is
 // doing rather than a counter that sits at 0/116 and looks frozen.

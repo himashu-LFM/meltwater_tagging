@@ -540,100 +540,137 @@ async def fetch_via_apify(posts: list[dict]) -> list[dict]:
     Returns the posts unchanged (so the caller can fall back) when no
     APIFY_TOKEN is configured."""
     if not config.APIFY_TOKEN:
-        print("apify: APIFY_TOKEN not set — cannot use the Apify path", flush=True)
+        print("apify: APIFY_TOKEN not set - cannot use the Apify path", flush=True)
         return posts
 
     targets = [p for p in posts if "reddit.com" in (p.get("permalink") or "")]
     if not targets:
         return posts
 
-    # Token goes in the Authorization HEADER, never the query string — httpx logs
+    # Token goes in the Authorization HEADER, never the query string - httpx logs
     # the full URL, so a ?token=... would end up in plain text in the app logs.
     url = f"https://api.apify.com/v2/acts/{config.APIFY_ACTOR}/run-sync-get-dataset-items"
     headers = {"Authorization": f"Bearer {config.APIFY_TOKEN}"}
 
-    async with httpx.AsyncClient(timeout=config.APIFY_TIMEOUT + 30) as client:
-        # Runs are issued CONCURRENTLY, in small groups.
-        #
-        # Measured on production (8 URLs): a single run took 118.7s = 14.8s/url,
-        # and a 3-URL run took ~60s. That fits ~25s fixed start-up + ~12s PER URL,
-        # and the actor does not parallelise internally — so making runs BIGGER
-        # does not shorten the wall clock, it just serialises more URLs behind
-        # each other. Splitting the batch across several runs that execute at the
-        # same time is what actually makes it faster.
-        #
-        # The trade-off is cost: every run pays the fixed start-up again, so very
-        # small runs burn compute units. APIFY_RUN_SIZE is the balance point -
-        # big enough to amortise start-up, small enough that concurrency bites.
-        batches = [targets[i:i + config.APIFY_RUN_SIZE]
-                   for i in range(0, len(targets), config.APIFY_RUN_SIZE)]
-        sem = asyncio.Semaphore(max(1, config.APIFY_CONCURRENCY))
+    # Each mention goes to the lookup that actually works for ITS url shape.
+    #
+    # Measured in the Apify console on a real 8-URL batch (2m06s end to end):
+    #   2 runs x 4 comment URLs -> 59s and 86s, returning 0 and 1 record(s)
+    #   3 parent-thread scrapes -> 20-40s each, returning 32-34 records each
+    # So ~86s of that batch bought exactly one record, and the thread scrapes did
+    # all the real work afterwards, one after another.
+    #
+    # The actor is search-based: it resolves POST permalinks, but a COMMENT
+    # permalink usually returns nothing - which is why the thread-scrape fallback
+    # existed at all. Running the doomed pass first just adds a minute per batch.
+    # So comments go straight to their parent thread, GROUPED so that several
+    # mentions in one thread cost one scrape, and every run is issued
+    # concurrently. APIFY_COMMENTS_VIA_THREAD=0 restores the old direct-first order.
+    direct: list[dict] = []
+    by_thread: dict[str, list[dict]] = {}
+    for p in targets:
+        pid, cid = reddit_ids(p.get("permalink", ""))
+        if cid and pid and config.APIFY_COMMENTS_VIA_THREAD:
+            by_thread.setdefault(pid, []).append(p)
+        else:
+            direct.append(p)
 
-        async def _one(chunk: list[dict]) -> None:
+    async with httpx.AsyncClient(timeout=config.APIFY_TIMEOUT + 30) as client:
+        # Runs execute CONCURRENTLY, in small groups.
+        #
+        # A run of 8 URLs took 118.7s (14.8s/url) and a run of 3 took ~60s, so
+        # roughly 25s fixed start-up + ~12s per URL, with no internal parallelism
+        # in the actor. Wall clock is therefore set by how many runs overlap, not
+        # by how big each run is: bigger runs are CHEAPER (start-up amortised),
+        # more concurrent runs are FASTER.
+        sem = asyncio.Semaphore(max(1, config.APIFY_CONCURRENCY))
+        batches = [direct[i:i + config.APIFY_RUN_SIZE]
+                   for i in range(0, len(direct), config.APIFY_RUN_SIZE)]
+
+        async def _direct_job(chunk: list[dict]) -> None:
             async with sem:
                 await _apify_run_batch(client, url, headers, chunk)
 
+        async def _thread_job(pid: str, group: list[dict]) -> None:
+            async with sem:
+                await _apify_scrape_thread(client, url, headers, pid, group)
+
         _t_all = time.monotonic()
-        print(f"apify: {len(targets)} url(s) -> {len(batches)} run(s) of "
-              f"<={config.APIFY_RUN_SIZE}, up to "
-              f"{min(config.APIFY_CONCURRENCY, len(batches))} at a time", flush=True)
-        # One failed run must not lose the whole batch: gather every result and
-        # let the unresolved posts fall through to the caller's own fallbacks.
-        await asyncio.gather(*[_one(b) for b in batches], return_exceptions=True)
+        n_comments = sum(len(g) for g in by_thread.values())
+        print(f"apify: {len(targets)} url(s) -> {len(batches)} direct run(s) + "
+              f"{len(by_thread)} thread scrape(s) "
+              f"({n_comments} comment(s) deduped into {len(by_thread)} thread(s)), "
+              f"up to {config.APIFY_CONCURRENCY} at a time", flush=True)
+        # One failed run must not lose the whole batch: gather everything and let
+        # the unresolved posts fall through to the second pass below.
+        await asyncio.gather(
+            *[_direct_job(b) for b in batches],
+            *[_thread_job(pid, g) for pid, g in by_thread.items()],
+            return_exceptions=True)
+
+        # Second pass: whatever the primary route missed, try the OTHER one. A
+        # comment its thread scrape did not contain (deep in a huge thread, past
+        # maxComments) can still turn up in a direct lookup, and vice versa.
+        leftover = [p for p in targets if not (p.get("text") or p.get("deleted"))]
+        if leftover:
+            retry_direct, retry_thread = [], []
+            for p in leftover:
+                pid, cid = reddit_ids(p.get("permalink", ""))
+                if cid and pid and config.APIFY_COMMENTS_VIA_THREAD:
+                    retry_direct.append(p)
+                else:
+                    retry_thread.append(p)
+            print(f"apify: second pass for {len(leftover)} unresolved mention(s) "
+                  f"({len(retry_direct)} direct, {len(retry_thread)} via thread)",
+                  flush=True)
+            jobs = [_direct_job(retry_direct[i:i + config.APIFY_RUN_SIZE])
+                    for i in range(0, len(retry_direct), config.APIFY_RUN_SIZE)]
+            if retry_thread:
+                jobs.append(_apify_recover_via_threads(
+                    client, url, headers, retry_thread, sem))
+            await asyncio.gather(*jobs, return_exceptions=True)
+
         _all_s = time.monotonic() - _t_all
         got = sum(1 for p in targets if p.get("text") or p.get("deleted"))
-        print(f"apify: all {len(batches)} run(s) finished in {_all_s:.1f}s "
+        print(f"apify: finished in {_all_s:.1f}s "
               f"({_all_s / max(1, len(targets)):.1f}s/url effective) - "
               f"{got}/{len(targets)} resolved", flush=True)
     return posts
 
 
-async def _apify_run_batch(client, url, headers, chunk: list[dict]) -> None:
-    """One actor run for one small group of URLs. Applies results in place.
+def _apify_thread_url(link: str) -> str:
+    """The parent-thread URL for a mention.
 
-    Every stage is timed separately. A previous run showed the fetch STAGE at
-    173.6s while the actor call itself was only 118.7s, and nothing in the code
-    accounted for the missing 55s - so the HTTP call, the record matching and the
-    thread-recovery pass are now reported individually instead of guessed at.
+    Truncating at '/comment/' is not enough: the older
+    /comments/<post>/<slug>/<cid>/ form has no such segment, so the 'thread' URL
+    would still point at the single comment. Cut right after the post id instead.
     """
+    clean = (link or "").split("?")[0].split("#")[0]
+    m = re.match(r"^(.*?/comments/[a-z0-9]+)", clean, re.I)
+    return m.group(1) if m else clean.split("/comment/")[0]
+
+
+async def _apify_run_batch(client, url, headers, chunk: list[dict]) -> None:
+    """One DIRECT actor run for a small group of URLs. Applies results in place."""
+    if not chunk:
+        return
     payload = {
         "urls": [p["permalink"] for p in chunk],
         # We judge each mention on its OWN content, so never pull a
-        # thread's other comments (they'd also be billed).
+        # thread's other comments (they would also be billed).
         "scrapeComments": False,
         "maxPosts": len(chunk) + 10,
         "maxComments": len(chunk) + 10,
     }
-    _t_run = time.monotonic()
-    records = None
-    for attempt in (1, 2):
-        try:
-            r = await client.post(url, json=payload, headers=headers)
-            if r.status_code in (200, 201):
-                records = r.json()
-                break
-            # 429 (rate) and 402 (usage/plan limit) mean we asked for too many
-            # runs at once. Back off and retry this batch ONCE rather than
-            # silently dropping its posts.
-            if r.status_code in (402, 429) and attempt == 1:
-                print(f"apify: run throttled (HTTP {r.status_code}) - retrying once in "
-                      f"{config.APIFY_RETRY_DELAY}s; lower APIFY_CONCURRENCY if this "
-                      f"keeps happening", flush=True)
-                await asyncio.sleep(config.APIFY_RETRY_DELAY)
-                continue
-            print(f"apify: run failed (HTTP {r.status_code}): {r.text[:200]}", flush=True)
-            return
-        except Exception as e:
-            print(f"apify: run errored: {type(e).__name__}: {e}", flush=True)
-            return
+    records = await _apify_post(client, url, headers, payload,
+                                f"direct run of {len(chunk)} url(s)")
     if records is None:
         return
-    _http_s = time.monotonic() - _t_run
 
     _t_apply = time.monotonic()
     # Index results by the URL we submitted (`query`), then by ids.
     by_query, by_id = {}, {}
-    for rec in records or []:
+    for rec in records:
         q = (rec.get("query") or "").strip()
         if q:
             by_query[_url_key(q)] = rec
@@ -652,29 +689,89 @@ async def _apify_run_batch(client, url, headers, chunk: list[dict]) -> None:
     _apply_s = time.monotonic() - _t_apply
 
     got = sum(1 for p in chunk if p.get("text") or p.get("deleted"))
-    print(f"apify: run of {len(chunk)} url(s) took {_http_s:.1f}s "
-          f"({_http_s / max(1, len(chunk)):.1f}s/url) + {_apply_s:.2f}s matching - "
-          f"{got}/{len(chunk)} resolved ({len(records or [])} record(s) returned)",
-          flush=True)
-
-    # The actor's direct comment-permalink lookup is unreliable: for some
-    # comments it returns nothing at all (observed taking 30-60s and
-    # yielding 0 records) even though the comment is live and IS returned
-    # when its parent thread is scraped. Recover those by scraping the
-    # parent thread once and matching the comment by id. Kept as a
-    # fallback only - a thread scrape bills every comment it returns
-    # (~68 records where we need 1), so it must never be the default.
-    missing = [p for p in chunk if not (p.get("text") or p.get("deleted"))]
-    if missing:
-        _t_rec = time.monotonic()
-        await _apify_recover_via_threads(client, url, headers, missing)
-        print(f"apify: thread recovery for {len(missing)} mention(s) took "
-              f"{time.monotonic() - _t_rec:.1f}s", flush=True)
+    print(f"apify: direct run resolved {got}/{len(chunk)} "
+          f"({len(records)} record(s), {_apply_s:.2f}s matching)", flush=True)
 
 
-async def _apify_recover_via_threads(client, url, headers, missing: list[dict]) -> None:
-    """Second pass for mentions the direct lookup missed: one thread scrape per
-    distinct parent thread, then match each mention by its comment id."""
+async def _apify_scrape_thread(client, url, headers, pid: str, group: list[dict]) -> None:
+    """Scrape one parent thread once and fill every mention that lives in it.
+
+    This is the route that actually resolves comment permalinks. It bills every
+    comment the thread returns, which is exactly why it is shared across all the
+    mentions in that thread instead of being run per mention.
+    """
+    if not group:
+        return
+    records = await _apify_post(client, url, headers, {
+        "urls": [_apify_thread_url(group[0].get("permalink", ""))],
+        "scrapeComments": True,        # needed to reach the comment
+        "maxPosts": 2,
+        "maxComments": config.APIFY_THREAD_MAX_COMMENTS,
+    }, f"thread {pid} ({len(group)} mention(s))")
+    if records is None:
+        return
+
+    by_id = {(rec.get("id") or "").lower(): rec for rec in records if rec.get("id")}
+    # Thread-scraped comment records carry no postTitle, so take the parent
+    # context from the post record that came back in the same scrape.
+    parent = next((rec for rec in records if rec.get("kind") == "post"), None)
+    parent_ctx = ""
+    if parent:
+        parent_ctx = "\n\n".join(x for x in (parent.get("title"),
+                                             parent.get("body") or parent.get("selftext")) if x)
+    for p in group:
+        _pid, cid = reddit_ids(p.get("permalink", ""))
+        rec = by_id.get(cid) if cid else by_id.get(_pid)
+        if rec:
+            _apify_apply_record(p, rec)
+            if parent_ctx and p.get("content_type") == "comment" and not p.get("post_text"):
+                p["post_text"] = parent_ctx[: config.MAX_POST_CHARS]
+                p["text"] = (f"[PARENT POST]\n{p['post_text']}\n\n"
+                             f"[COMMENT]\n{p.get('comment_text','')}").strip()
+
+    got = sum(1 for p in group if p.get("text") or p.get("deleted"))
+    print(f"apify: thread {pid} resolved {got}/{len(group)} mention(s) "
+          f"({len(records)} record(s) scraped)", flush=True)
+
+
+async def _apify_post(client, url, headers, payload: dict, what: str):
+    """POST one actor run, with timing and one retry when Apify throttles us.
+
+    Returns the records, or None when the run could not be completed - those
+    posts are simply left unresolved for a later pass or the caller's own
+    fallback, rather than failing the whole batch.
+    """
+    _t = time.monotonic()
+    for attempt in (1, 2):
+        try:
+            r = await client.post(url, json=payload, headers=headers)
+            if r.status_code in (200, 201):
+                records = r.json() or []
+                _s = time.monotonic() - _t
+                n = max(1, len(payload.get("urls") or []))
+                print(f"apify: {what} took {_s:.1f}s ({_s / n:.1f}s/url)", flush=True)
+                return records
+            # 429 (rate) and 402 (usage/plan limit) mean we asked for too many
+            # runs at once. Back off and retry ONCE rather than silently
+            # dropping these posts.
+            if r.status_code in (402, 429) and attempt == 1:
+                print(f"apify: {what} throttled (HTTP {r.status_code}) - retrying once "
+                      f"in {config.APIFY_RETRY_DELAY}s; lower APIFY_CONCURRENCY if this "
+                      f"keeps happening", flush=True)
+                await asyncio.sleep(config.APIFY_RETRY_DELAY)
+                continue
+            print(f"apify: {what} failed (HTTP {r.status_code}): {r.text[:200]}", flush=True)
+            return None
+        except Exception as e:
+            print(f"apify: {what} errored: {type(e).__name__}: {e}", flush=True)
+            return None
+    return None
+
+
+async def _apify_recover_via_threads(client, url, headers, missing: list[dict],
+                                     sem=None) -> None:
+    """Fallback for mentions a direct lookup missed: one scrape per distinct
+    parent thread, run concurrently, then match each mention by its id."""
     if not missing:
         return
     by_thread: dict[str, list[dict]] = {}
@@ -687,45 +784,15 @@ async def _apify_recover_via_threads(client, url, headers, missing: list[dict]) 
     print(f"apify: retrying {len(missing)} unresolved mention(s) via "
           f"{len(by_thread)} parent thread(s)", flush=True)
 
-    for pid, group in by_thread.items():
-        sub = group[0].get("permalink", "").split("/comment/")[0]
-        try:
-            r = await client.post(url, headers=headers, json={
-                "urls": [sub],
-                "scrapeComments": True,       # needed to reach the comment
-                "maxPosts": 2,
-                "maxComments": config.APIFY_THREAD_MAX_COMMENTS,
-            })
-            if r.status_code not in (200, 201):
-                print(f"apify: thread retry failed for {pid} (HTTP {r.status_code})", flush=True)
-                continue
-            records = r.json() or []
-        except Exception as e:
-            print(f"apify: thread retry errored for {pid}: {type(e).__name__}: {e}", flush=True)
-            continue
+    async def _one(pid, group):
+        if sem is None:
+            await _apify_scrape_thread(client, url, headers, pid, group)
+        else:
+            async with sem:
+                await _apify_scrape_thread(client, url, headers, pid, group)
 
-        by_id = {(rec.get("id") or "").lower(): rec for rec in records if rec.get("id")}
-        # Thread-scraped comment records carry no postTitle, so take the parent
-        # context from the post record that came back in the same scrape.
-        parent = next((rec for rec in records if rec.get("kind") == "post"), None)
-        parent_ctx = ""
-        if parent:
-            parent_ctx = "\n\n".join(x for x in (parent.get("title"),
-                                                 parent.get("body") or parent.get("selftext")) if x)
-        for p in group:
-            _pid, cid = reddit_ids(p.get("permalink", ""))
-            rec = by_id.get(cid) if cid else by_id.get(_pid)
-            if rec:
-                _apify_apply_record(p, rec)
-                if parent_ctx and p.get("content_type") == "comment" and not p.get("post_text"):
-                    p["post_text"] = parent_ctx[: config.MAX_POST_CHARS]
-                    p["text"] = (f"[PARENT POST]\n{p['post_text']}\n\n"
-                                 f"[COMMENT]\n{p.get('comment_text','')}").strip()
-                print(f"apify: recovered {p.get('permalink')} from parent thread", flush=True)
-            else:
-                print(f"apify: still unresolved after thread retry: {p.get('permalink')}",
-                      flush=True)
-
+    await asyncio.gather(*[_one(pid, g) for pid, g in by_thread.items()],
+                         return_exceptions=True)
 
 async def fetch_reddit_scraper_bulk(posts: list[dict]) -> list[dict]:
     """Public entry point for the credential-free grouped RSS fetch — what the

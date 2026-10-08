@@ -1101,6 +1101,19 @@ def prefetch():
                     "seconds": round(elapsed, 1)})
 
 
+@app.route("/api/progress", methods=["GET"])
+@require_auth
+def progress():
+    """How far the batch identified by ?job= has got.
+
+    Polled by the loader roughly once a second. Deliberately trivial: no run
+    state is kept here, so a miss just reports zero and the UI carries on.
+    """
+    job = (request.args.get("job") or "")[:64]
+    e = _PROGRESS.get(job) or {}
+    return jsonify({"done": int(e.get("done") or 0), "phase": e.get("phase") or ""})
+
+
 @app.route("/api/classify", methods=["POST"])
 @require_auth
 def classify():
@@ -1156,7 +1169,8 @@ def classify():
         else:
             results = run_async(_classify_urls(urls, brand, fetch_mode, g.user.id,
                                                url_brands=data.get("url_brands") or {},
-                                               url_docs=data.get("url_docs") or {}))
+                                               url_docs=data.get("url_docs") or {},
+                                               job=(data.get("job") or "")[:64] or None))
     except AuthenticationError:
         log.error("classify failed: invalid/missing ANTHROPIC_API_KEY (user=%s)", g.user.id)
         return jsonify({"error": "Invalid or missing ANTHROPIC_API_KEY (server config)."}), 400
@@ -1272,7 +1286,8 @@ def reclassify():
         if is_taxonomy:
             fresh = _classify_bentley_urls(retry_urls)
         else:
-            fresh = run_async(_classify_urls(retry_urls, brand, fetch_mode, g.user.id))
+            fresh = run_async(_classify_urls(retry_urls, brand, fetch_mode, g.user.id,
+                                             job=(data.get("job") or "")[:64] or None))
     except AuthenticationError:
         return jsonify({"error": "Invalid or missing ANTHROPIC_API_KEY (server config)."}), 400
     except APIStatusError as e:
@@ -1442,13 +1457,55 @@ async def _fetch_posts(posts, fetch_mode, user_id):
 # "mode": str, "posts": {permalink: post_dict}}. Short-lived and replaced by the
 # next prefetch; a miss simply means _classify_urls fetches that post itself, so
 # losing it only costs time, never correctness.
+# Live progress for a running batch: job token -> {"done", "phase", "at"}.
+#
+# The loader used to tick only when a whole CHUNK came back, so any batch that
+# fit in one request (<= CLASSIFY_CHUNK_SIZE) sat at "0/8 done" for the entire
+# run and looked hung. The client owns the total; the server only reports how
+# many posts have actually finished and which stage is running, so parallel
+# chunks sharing one token just add up.
+_PROGRESS: dict = {}
+_PROGRESS_TTL_S = 900.0
+
+
+def _progress_phase(job, text):
+    """Name the current stage. Best-effort: progress must never break a run."""
+    if not job:
+        return
+    try:
+        e = _PROGRESS.setdefault(job, {"done": 0, "phase": "", "at": 0.0})
+        e["phase"] = text
+        e["at"] = _time.monotonic()
+        # opportunistic sweep so abandoned runs cannot grow the dict forever
+        if len(_PROGRESS) > 64:
+            cutoff = _time.monotonic() - _PROGRESS_TTL_S
+            for k in [k for k, v in _PROGRESS.items() if v.get("at", 0) < cutoff]:
+                _PROGRESS.pop(k, None)
+    except Exception:
+        pass
+
+
+def _progress_bump(job, n=1):
+    """One more post finished."""
+    if not job:
+        return
+    try:
+        e = _PROGRESS.setdefault(job, {"done": 0, "phase": "", "at": 0.0})
+        e["done"] += n
+        e["at"] = _time.monotonic()
+    except Exception:
+        pass
+
+
 _PREFETCH: dict = {}
 _PREFETCH_TTL_S = float(os.environ.get("MELTWATER_PREFETCH_TTL", "1800"))
 
 
-async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_docs=None):
+async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None,
+                         url_docs=None, job=None):
     posts = [{"permalink": u, "excerpt": ""} for u in urls]
 
+    _progress_phase(job, "fetch")
     # Wall time of the fetch STAGE as this request experienced it — a cache hit
     # should show ~0s, which is how you can see the prefetch working in the logs.
     _t_fetch = _time.monotonic()
@@ -1501,16 +1558,23 @@ async def _classify_urls(urls, brand, fetch_mode, user_id, url_brands=None, url_
     anthropic = AsyncAnthropic()
     sem = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
     _t_llm = _time.monotonic()
-    decisions = await asyncio.gather(
-        *[classify_web.classify_post(
+    _progress_phase(job, "classify")
+
+    async def _one(p):
+        # gather() keeps input order regardless of completion order, so counting
+        # here does not disturb how results line up with the upload.
+        d = await classify_web.classify_post(
             anthropic, config.MODEL, p["_brand"], p["permalink"], p.get("text", ""), sem,
             cfg_by_brand[p["_brand"]],
             content_type=p.get("content_type", "post"),
             post_text=p.get("post_text", ""),
             comment_text=p.get("comment_text", ""),
             deleted=bool(p.get("deleted")),
-        ) for p in posts]
-    )
+        )
+        _progress_bump(job)
+        return d
+
+    decisions = await asyncio.gather(*[_one(p) for p in posts])
     _llm_s = _time.monotonic() - _t_llm
     log.info("classify llm: %d post(s) in %.1fs (%.2fs/post, concurrency=%d); fetch took %.1fs",
              len(posts), _llm_s, _llm_s / max(1, len(posts)), config.CLASSIFY_CONCURRENCY, _fetch_s)
