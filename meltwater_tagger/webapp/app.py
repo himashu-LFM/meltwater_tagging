@@ -1183,11 +1183,14 @@ def classify():
               brand, len(results), applied, _elapsed, _per_post, g.user.id)
     if _per_post > SLOW_CLASSIFY_SECONDS_PER_POST:
         log.warning(
-            "classify SLOW: %.2fs/post (threshold %.1fs). Throughput today: the dashboard "
-            "sends %d request(s) of %d URL(s) in parallel, and each request classifies %d "
-            "post(s) at once. If the box is idle, raise MELTWATER_CLASSIFY_PARALLEL "
-            "(keep it under gunicorn --threads) and/or MELTWATER_CLASSIFY_CONCURRENCY. "
-            "Check the per-stage fetch/llm timings above first, and rule out Anthropic 429s.",
+            "classify SLOW: %.2fs/post (threshold %.1fs). Read the 'fetch done ... in Xs' "
+            "and 'classify llm ... in Ys' lines ABOVE and tune whichever stage dominates - "
+            "they are usually not the same one. FETCH-bound (the common case, and what the "
+            "Apify actor costs at ~12s per URL per run): raise APIFY_CONCURRENCY, or lower "
+            "APIFY_RUN_SIZE so more runs overlap. LLM-bound: raise MELTWATER_CLASSIFY_CONCURRENCY "
+            "and/or MELTWATER_CLASSIFY_PARALLEL (keep it under gunicorn --threads) and rule out "
+            "Anthropic 429s. Raising the classify knobs does NOTHING for a fetch-bound run. "
+            "Current shape: %d request(s) of %d URL(s) in parallel, %d post(s) classified at once.",
             _per_post, SLOW_CLASSIFY_SECONDS_PER_POST, CLASSIFY_PARALLEL,
             CLASSIFY_CHUNK_SIZE, config.CLASSIFY_CONCURRENCY)
 
