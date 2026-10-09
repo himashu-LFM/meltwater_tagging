@@ -53,6 +53,7 @@ from meltwater_apply import (
     apply_results_to_meltwater, apply_via_session, apply_via_api, decode_session_expiry,
     is_meltwater_sso_email,
 )
+from apply_tags import norm_permalink
 import classify_web
 from logging_setup import get_logger
 
@@ -1040,7 +1041,11 @@ def extract():
             if not did or did.lower() == "nan":
                 continue
             raw_tags = str(df[tags_col].iloc[i]).strip() if tags_col else ""
-            existing = ([t.strip() for t in raw_tags.split(",") if t.strip()]
+            # Meltwater joins Document Tags with ';' (see brands/bentley/
+            # apply_bentley.parse_existing_tags), but some exports use ','.
+            # Split on both so the skip-if-tagged rule sees real tag names
+            # rather than one unsplit blob.
+            existing = ([t.strip() for t in re.split(r"[;,]", raw_tags) if t.strip()]
                         if raw_tags and raw_tags.lower() != "nan" else [])
             url_docs[u] = {"document_id": did, "existing_tags": existing}
         log.info("extract: %d/%d row(s) carry a Document ID — direct tagging available",
@@ -1896,7 +1901,20 @@ def apply_to_meltwater():
                              {b: len(rs) for b, rs in groups.items()})
 
                 sub_reports = []
+                # Tags THIS run has already applied, keyed by canonical
+                # permalink. A mixed export can list the same Reddit URL under
+                # two brands; without this, group 2 still sees the export's
+                # (now stale) Document Tags and tags a mention group 1 just
+                # tagged. All brands share one Meltwater account, so that shows
+                # up as the same document carrying several brands' tags.
+                tagged_this_run: dict[str, list[str]] = {}
                 for i, (g_brand, g_results) in enumerate(groups.items(), 1):
+                    if tagged_this_run:
+                        for r in g_results:
+                            seen = tagged_this_run.get(norm_permalink(r.get("permalink") or ""))
+                            if seen:
+                                r["existing_tags"] = list(
+                                    dict.fromkeys(list(r.get("existing_tags") or []) + seen))
                     g_env, g_topic = environment, topic_url
                     if len(groups) > 1:
                         # Each brand has its own Environment / topic URL.
@@ -1915,6 +1933,11 @@ def apply_to_meltwater():
                         on_state_captured=(_on_state_captured if sso_account else None),
                     )) or {}
                     sub_reports.append((g_brand, r_i))
+
+                    for a in (r_i.get("applied") or []):
+                        k = norm_permalink((a or {}).get("permalink") or "")
+                        if k and a.get("tag"):
+                            tagged_this_run.setdefault(k, []).append(a["tag"])
 
                     if r_i.get("_session_expired"):
                         break  # pointless to keep going; surfaced below
