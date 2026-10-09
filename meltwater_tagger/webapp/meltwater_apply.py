@@ -1787,6 +1787,12 @@ MSEARCH_MAX_PAGES = int(os.environ.get("MELTWATER_MSEARCH_MAX_PAGES", "40"))
 # leaving tagged mentions alone protects another brand's tags and makes a
 # repeat run of the same export nearly free. Set false to restore re-tagging.
 SKIP_IF_TAGGED = os.environ.get("MELTWATER_SKIP_IF_TAGGED", "true").lower() == "true"
+# The DOC-ID fast path takes existing tags from the uploaded export, so it can
+# only honour SKIP_IF_TAGGED when the export actually carries a 'Document Tags'
+# column with values. When it doesn't, prefer the slower saved-search path,
+# which reads tags live from msearch. Set false to keep the fast path anyway
+# (faster, but a mention another brand already tagged will be tagged again).
+DOCID_REQUIRE_TAGS = os.environ.get("MELTWATER_DOCID_REQUIRE_TAGS", "true").lower() == "true"
 # Saved searches default to a ROLLING "Last 7 days" window, so a mention that
 # was in the export a few days ago has since fallen out of the search and comes
 # back "unreached" even though nothing is wrong. Widen the window right after
@@ -3052,6 +3058,20 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
             # come back "NOT IN SEARCH". One pass covers every brand in the
             # file, because document ids don't care which search a row is from.
             doc_map = _docmap_from_results(results)
+            # The fast path reads existing tags from the EXPORT, not from
+            # Meltwater. That is only safe while the export is fresh. If the
+            # file carries no Document Tags at all, we cannot tell a genuinely
+            # untagged mention from one another brand tagged after the export
+            # was taken — and tagging it again is exactly the duplicate the
+            # skip rule exists to prevent. Fall back to the saved search, whose
+            # msearch response carries the LIVE tags.
+            if (doc_map and SKIP_IF_TAGGED and DOCID_REQUIRE_TAGS
+                    and not any(h.get("tags") for h in doc_map.values())):
+                log.warning("apply: DOC-ID PATH skipped — the export carries no 'Document Tags' "
+                            "for any of the %d row(s), so already-tagged mentions cannot be "
+                            "detected. Using the saved search for live tags instead. "
+                            "(Set MELTWATER_DOCID_REQUIRE_TAGS=false to override.)", len(doc_map))
+                doc_map = {}
             if doc_map and len(doc_map) == len(to_apply):
                 log.info("apply: DOC-ID PATH — all %d target(s) carry a Document ID; "
                          "tagging directly (no search, no date range)", len(to_apply))
