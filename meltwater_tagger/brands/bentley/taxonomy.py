@@ -187,6 +187,78 @@ def region_for_country(country: str) -> str:
         return ""
     return region
 
+
+# ---------------------------------------------------------------------------
+# TYPE OF PUBLICATION is OUTLET-driven — the same outlet is always the same kind,
+# so a deterministic domain lookup is far more reliable than the model's
+# per-article guess (which over-reaches for 'Technology Publication'/'Mainstream'
+# where the client consistently uses 'Trade Media'). Built from the human-tagged
+# ground truth + the handover docs. Unknown outlets fall back to the model.
+# Values must be exact labels from TYPE_OF_PUBLICATION above.
+_PUBLICATION_BY_OUTLET = {
+    # --- Trade Media: sector / engineering / construction / mining trade press ---
+    "construction-property.com": "Type of publication - Trade Media",
+    "engtechnica.com": "Type of publication - Trade Media",
+    "engineering.com": "Type of publication - Trade Media",
+    "connectedworld.com": "Type of publication - Trade Media",
+    "peggysmedleyshow.com": "Type of publication - Trade Media",
+    "ittech-news.com": "Type of publication - Trade Media",
+    "miningmagazine.com": "Type of publication - Trade Media",
+    "mining.com": "Type of publication - Trade Media",
+    "roadsbridges.com": "Type of publication - Trade Media",
+    "waterworld.com": "Type of publication - Trade Media",
+    "aecmag.com": "Type of publication - Trade Media",
+    "builderpolska.pl": "Type of publication - Trade Media",
+    "constructiondigital.com": "Type of publication - Trade Media",
+    "constructiontechnology.in": "Type of publication - Trade Media",
+    "energydigital.com": "Type of publication - Trade Media",
+    "informedinfrastructure.com": "Type of publication - Trade Media",
+    "pbctoday.co.uk": "Type of publication - Trade Media",
+    "euro-security.de": "Type of publication - Trade Media",
+    "diariodotransporte.com.br": "Type of publication - Trade Media",
+    "tapchixaydung.vn": "Type of publication - Trade Media",
+    "completeaitraining.com": "Type of publication - Trade Media",
+    "geneonline.com": "Type of publication - Trade Media",
+    "engineeringmatters.reby.media": "Type of publication - Trade Media",
+    "roadsandbridges.com": "Type of publication - Trade Media",
+    # PR-wire redistribution outlets the client tagged Trade Media (observed on
+    # the syndicated Naviam/Cohesive release group).
+    "pr.capecorallivingmagazine.com": "Type of publication - Trade Media",
+    "pr.herrimanjournal.com": "Type of publication - Trade Media",
+    "pr.chillicothevoice.com": "Type of publication - Trade Media",
+    "pr.hopedaletownnews.com": "Type of publication - Trade Media",
+    "pr.cottonwoodheightsjournal.com": "Type of publication - Trade Media",
+    "pr.wilsonvillespokesman.com": "Type of publication - Trade Media",
+    "smb.elizabethton.com": "Type of publication - Trade Media",
+    # --- Mainstream: general news / business / finance outlets ---
+    "markets.financialcontent.com": "Type of publication - Mainstream",
+    "valuethemarkets.com": "Type of publication - Mainstream",
+    "finance.yahoo.com": "Type of publication - Mainstream",
+    "markets.businessinsider.com": "Type of publication - Mainstream",
+    # --- Technology Publication: the outlets the client explicitly tagged so ---
+    "integratormedia.com": "Type of publication - Technology Publication",
+    "technical.ly": "Type of publication - Technology Publication",
+}
+
+
+def publication_for_outlet(url: str = "", source: str = "") -> str:
+    """Deterministic Type of publication for a KNOWN outlet, else "". Matches the
+    host against _PUBLICATION_BY_OUTLET (exact or as a parent domain). Falls back
+    to the model for unknown outlets. Only returns a label that still exists in
+    TYPE_OF_PUBLICATION (so a client-removed type is never emitted)."""
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url if "://" in (url or "") else "http://" + (url or "")).netloc.lower()
+    except Exception:
+        host = ""
+    if host.startswith("www."):
+        host = host[4:]
+    valid = {t["label"] for t in TYPE_OF_PUBLICATION}
+    for dom, pub in _PUBLICATION_BY_OUTLET.items():
+        if (host == dom or host.endswith("." + dom)) and pub in valid:
+            return pub
+    return ""
+
 # ---------------------------------------------------------------------------
 # CORPORATE — about the COMPANY Bentley. "Exclusive to other types": use a
 # corporate tag only when there IS a corporate focus; General is the fallback,
