@@ -193,6 +193,26 @@ async function prefetchAll(urls, fetchMode) {
   }
 }
 
+// Save a finished MULTI-CHUNK run as one history entry. Single-request runs are
+// saved server-side inside /api/classify and return their id there; a chunked
+// batch cannot be, because no single request sees the whole upload - which is
+// why anything over CLASSIFY_CHUNK_SIZE used to vanish from History entirely.
+// Best-effort: history is a record, not the product, so a failure here never
+// disturbs the results the user is looking at.
+async function saveRun(brand, results) {
+  try {
+    const r = await Auth.authedFetch("/api/runs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brand, results }),
+    });
+    if (!r.ok) return null;
+    const d = await r.json().catch(() => ({}));
+    return d.run_id || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function run() {
   $("inputErr").textContent = "";
   const brand = $("brand").value.trim();
@@ -212,7 +232,7 @@ async function run() {
   // a single-request batch saves its run to history exactly as before.
   const deferRun = chunks.length > 1;
   const merged = [];
-  let labels = null, runBrand = brand;
+  let labels = null, runBrand = brand, runId = null;
   setLoaderProgress(0, urls.length);
   cycleLoaderText();
   _jobToken = newJobToken();
@@ -247,6 +267,10 @@ async function run() {
       // lands last doesn't matter.
       if (data.labels) labels = data.labels;
       if (data.run_brand) runBrand = data.run_brand;
+      // A single-request run is saved server-side and returns its id here.
+      // Keeping it is what lets "Apply to Meltwater" update that History row
+      // with what Meltwater actually confirmed.
+      if (data.run_id) runId = data.run_id;
       classified += perChunk[i].length;
       setLoaderProgress(classified, urls.length);
     };
@@ -278,7 +302,7 @@ async function run() {
     if (merged.length) {
       // Keep whatever already succeeded so a late failure doesn't lose earlier work.
       state.results = merged;
-      state.runId = null;
+      state.runId = runId;
       renderResults({ run_brand: runBrand, results: merged, labels: labels || undefined });
       showView("resultsView");
       Toast.error(`${err.message} Showing the ${merged.length} of ${urls.length} classified so far.`, "Partial result");
@@ -291,8 +315,10 @@ async function run() {
   }
 
   stopProgressPoll();
+  // Chunked runs have no server-side id yet - save the merged run as one entry.
+  if (!runId && merged.length) runId = await saveRun(runBrand, merged);
   state.results = merged;
-  state.runId = null;
+  state.runId = runId;
   renderResults({ run_brand: runBrand, results: merged, labels: labels || undefined });
   showView("resultsView");
   const taggable = merged.filter(x => x.action === "apply").length;

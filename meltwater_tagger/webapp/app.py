@@ -1106,6 +1106,39 @@ def prefetch():
                     "seconds": round(elapsed, 1)})
 
 
+@app.route("/api/runs", methods=["POST"])
+@require_auth
+def save_run_route():
+    """Persist a finished multi-request run as ONE history entry.
+
+    A chunked batch cannot be saved from inside /api/classify: each request only
+    ever sees its own slice of the upload, so saving there would either fragment
+    one upload into N partial runs or -- as it actually did -- save nothing at
+    all, because every chunk carries defer_run=true. Any batch larger than
+    CLASSIFY_CHUNK_SIZE therefore never reached History.
+
+    The client already merges the chunks to render the table, so it posts the
+    finished run here once. Single-request runs are still saved by /api/classify
+    and never reach this route.
+    """
+    if not db.is_configured():
+        return jsonify({"ok": False, "error": "history is not configured"}), 200
+    data = request.get_json(force=True) or {}
+    results = data.get("results") or []
+    brand = (data.get("brand") or "").strip()
+    if not results or not brand:
+        return jsonify({"ok": False, "error": "nothing to save"}), 400
+    try:
+        rec = db.save_run(g.user.id, brand, results, status="classified")
+    except Exception:
+        # History is a record, not the product: never fail a finished run over it.
+        log.exception("failed to save chunked run to history (non-fatal, user=%s)", g.user.id)
+        return jsonify({"ok": False, "error": "save failed"}), 500
+    log.info("chunked run saved to history: id=%s posts=%d (user=%s)",
+             rec.get("id"), len(results), g.user.id)
+    return jsonify({"ok": True, "run_id": rec.get("id")})
+
+
 @app.route("/api/progress", methods=["GET"])
 @require_auth
 def progress():
