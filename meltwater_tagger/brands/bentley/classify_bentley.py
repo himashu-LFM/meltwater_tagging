@@ -373,6 +373,16 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
                       text_source="reporting-exclusion")
         return result
 
+    # 1b') §2a: a pre-existing duplicate / syndicated-content category tag on the
+    #      mention (Document Tags) means Not in scope — track the parent, not the copy.
+    if rules.existing_tag_not_in_scope(document_tags):
+        result.update(scope="out", tags=["Not in scope"],
+                      tags_by_family={"type_of_coverage": ["Not in scope"]},
+                      reason="Already flagged Duplicate / Syndicated Content in Meltwater — Not in scope "
+                             "(track the parent article).",
+                      text_source="duplicate-syndicated")
+        return result
+
     # 1b-i) client rule (2026-09, confirmed): a regional / localized edition (a
     #       country-code subdomain, e.g. mx.investing.com, uk.finance.yahoo.com) is
     #       a translated duplicate — Not in Scope. Runs BEFORE the financial-source
@@ -453,7 +463,10 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
             # stock/finances, so tag it Corporate - Financial / IR (Region + Fin/IR
             # only), not Not-in-scope. (Regional finance editions were already
             # dropped earlier by is_regional_edition.)
-            if rules.is_finance_page(url):
+            # §2d: only Bentley's OWN financials count. If the stub is clearly a
+            # COMPETITOR's stock post (competitor named, Bentley not the subject),
+            # Bentley is just a boilerplate peer line -> fall through to Not in scope.
+            if rules.is_finance_page(url) and not rules.is_competitor_finance_subject(snippet_body):
                 region = taxonomy.region_for_country(pub_country)
                 fam = {"region": [region] if region else [],
                        "corporate": ["Corporate - Financial / IR"]}
@@ -661,6 +674,21 @@ def classify_url(url: str, source: str = "", pub_country: str = "", byline: str 
         fam["type_of_coverage"] = ["Type of Coverage - Unique"]
     elif rules.is_bentley_press_release(text):
         fam["type_of_coverage"] = [rules.PRESS_RELEASE_LABEL]
+
+    # §2a: the mention's PRE-EXISTING Meltwater category tags (Document Tags) are
+    # high-trust analyst signals and override the model's guess — Reporting
+    # Inclusion -> Unique, <Pillar> Inclusion -> add that Pillar, <Pillar>
+    # Exclusion -> remove it (theme belongs to a competitor). Applied BEFORE the
+    # Financial/IR-only suppression so a Financial/IR item still drops its pillars.
+    fam = rules.apply_existing_tag_signals(fam, document_tags)
+
+    # Type of publication is OUTLET-driven: for a KNOWN outlet, a deterministic
+    # domain lookup overrides the model's per-article guess (which over-reaches
+    # for 'Technology Publication'/'Mainstream' where the client uses 'Trade
+    # Media'). Unknown outlets keep the model's call.
+    pub = taxonomy.publication_for_outlet(url, source)
+    if pub:
+        fam["type_of_publication"] = [pub]
 
     # Client rule (2026-09): Region is taken from the export's Publication Country
     # column, not inferred from the domain/model. When we have a country that maps

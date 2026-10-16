@@ -83,6 +83,16 @@ topic it touches. Concretely:
     • Product & Technology — a specifically named Bentley product appears.
   Do NOT tag HR or Education for an awards, event, or product story. Multiple Corporate tags are allowed
   when each genuinely applies; adding wrong ones is the error the client flags.
+- EVENT COVERAGE (client rule): when the story is ABOUT an event being held — a conference, innovation
+  day, summit, awards ceremony, or a podcast with 3rd-party guests — tag Corporate - Events/Milestones/
+  Awards PLUS base tags only (publication, coverage, region, spokesperson). Do NOT add Pillar, Industry,
+  or Corporate - Product & Technology for the material merely DISCUSSED at the event. (A dedicated product
+  story, or a project win that happens to be announced, is still tagged normally — this rule is for
+  coverage whose subject is the event itself.)
+- FINANCIAL / IR (client rule): tag Corporate - Financial / IR ONLY when BENTLEY'S OWN stock, dividend,
+  earnings or financial data is the subject (e.g. "BSY", "Bentley Systems" dividend/price/revenue). A post
+  about a COMPETITOR'S stock (Nemetschek, Autodesk, Trimble, …) where Bentley is only a boilerplate
+  peer/competitor line is NOT in scope -> Not in scope.
 - Type of publication (pick ONE, by the OUTLET's nature, not the story): Mainstream = general
   news, business, or financial outlets (incl. wire/newswire and finance press); Technology Publication =
   technology-focused publications; Trade Media = sector trade press (construction, engineering, mining,
