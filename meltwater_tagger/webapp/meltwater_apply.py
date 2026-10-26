@@ -559,13 +559,22 @@ CARD_SELECTOR = os.environ.get(
 HEADLESS = os.environ.get("MELTWATER_HEADLESS", "true").lower() != "false"
 SLOW_MO = int(os.environ.get("MELTWATER_SLOW_MO", "0"))  # ms between actions
 
+# Browser viewport. Meltwater's Explore results page lays out as three columns —
+# left nav, the mentions list, and the analytics panel. Below roughly 1600px the
+# app drops the MENTIONS LIST and renders analytics only, which the card scanner
+# sees as an empty feed ("no cards matched CARD_SELECTOR", articles=0): every
+# target then comes back unreached even though the search and account are right.
+# 1920x1080 leaves room for all three. Keep it wide.
+VIEWPORT_WIDTH = int(os.environ.get("MELTWATER_VIEWPORT_WIDTH", "1920"))
+VIEWPORT_HEIGHT = int(os.environ.get("MELTWATER_VIEWPORT_HEIGHT", "1080"))
+
 CHROMIUM_LAUNCH_ARGS = [
     "--disable-dev-shm-usage",
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--disable-gpu",
     "--disable-blink-features=AutomationControlled",
-    "--window-size=1440,900",
+    f"--window-size={VIEWPORT_WIDTH},{VIEWPORT_HEIGHT}",
     # --- memory reduction for small cloud instances -----------------------
     # Rendering Meltwater's heavy SPA in headless Chrome can OOM a small Render
     # instance, which Render handles by KILLING AND RESTARTING the whole
@@ -679,7 +688,7 @@ async def _new_browser_context(browser, **kwargs):
     new_context kwargs (e.g. none today) pass straight through."""
     context = await browser.new_context(
         user_agent=config.BROWSER_UA,
-        viewport={"width": 1440, "height": 900},
+        viewport={"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
         locale="en-US",
         **kwargs,
     )
