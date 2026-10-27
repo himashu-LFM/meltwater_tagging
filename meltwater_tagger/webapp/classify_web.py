@@ -132,7 +132,14 @@ async def classify_post(anthropic, model, run_brand, permalink, text, sem, cfg,
         deleted = True
         usable = ""
 
-    if deleted and not (usable or "").strip():
+    # Deleted is decided on the flag alone, NOT on "and the text is empty".
+    # A deleted mention must always come out Neutral and must never be flagged
+    # for review: there is nothing left to judge, but the mention still exists
+    # in Meltwater and still needs a tag. The old "and empty" condition meant
+    # that any leftover context on the mention (e.g. a parent post that is still
+    # alive) made this miss, and the mention went to the model with its own text
+    # blank — so the model graded the surrounding context instead.
+    if deleted:
         log.info("deleted/removed on Reddit: %s — tagging Neutral", permalink)
         return {"permalink": permalink, "action": "apply",
                 "tag": _label_for(run_brand, "neutral", cfg.get("labels", {})),
