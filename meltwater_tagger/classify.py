@@ -693,6 +693,35 @@ async def _apify_run_batch(client, url, headers, chunk: list[dict]) -> None:
           f"({len(records)} record(s), {_apply_s:.2f}s matching)", flush=True)
 
 
+def _apify_parent_comment(rec: dict, by_id: dict) -> str:
+    """The body of the comment `rec` is a reply to, or "" for a top-level
+    comment.
+
+    Costs nothing: the parent is sitting in `by_id` already. Actors spell the
+    link differently and Reddit prefixes ids with t1_ (comment) / t3_ (post), so
+    try the known spellings and only accept an id that resolves to a COMMENT in
+    this same thread — a t3_ parent means the mention is top-level and the post
+    context already covers it.
+    """
+    for key in ("parentId", "parent_id", "parentID", "parent"):
+        raw = rec.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        ref = raw.strip().lower()
+        if ref.startswith("t3_"):      # parent is the post, not a comment
+            return ""
+        ref = ref.split("_", 1)[-1]    # drop the t1_ prefix if present
+        par = by_id.get(ref)
+        if par is None or (par.get("kind") or "").lower() == "post":
+            continue
+        if _apify_is_deleted(par):
+            return ""
+        body = (par.get("body") or par.get("selftext") or "").strip()
+        if body:
+            return body[: config.MAX_POST_CHARS]
+    return ""
+
+
 async def _apify_scrape_thread(client, url, headers, pid: str, group: list[dict]) -> None:
     """Scrape one parent thread once and fill every mention that lives in it.
 
@@ -724,14 +753,37 @@ async def _apify_scrape_thread(client, url, headers, pid: str, group: list[dict]
         rec = by_id.get(cid) if cid else by_id.get(_pid)
         if rec:
             _apify_apply_record(p, rec)
-            if parent_ctx and p.get("content_type") == "comment" and not p.get("post_text"):
-                p["post_text"] = parent_ctx[: config.MAX_POST_CHARS]
+            # A deleted comment has no text to judge: _apify_apply_record has
+            # already emptied it and set `deleted` so classify_post can tag it
+            # Neutral. Adding parent context here would refill `text`, the
+            # Neutral short-circuit (which tests for EMPTY text) would miss, and
+            # the mention would go to the model with the post filled in and the
+            # comment slot blank — i.e. the post would get judged, not the
+            # comment. Leave it empty.
+            if p.get("content_type") != "comment" or p.get("deleted"):
+                continue
+            # Prefer
+            # the fuller context we already paid for.
+            ctx = parent_ctx if len(parent_ctx) > len(p.get("post_text") or "") \
+                else (p.get("post_text") or "")
+            # A mention that is a REPLY is judged against the post alone, which
+            # loses the comment it is answering. That comment is already in `records`.
+            reply_to = _apify_parent_comment(rec, by_id)
+            if reply_to:
+                ctx = (f"{ctx}\n\n--- REPLYING TO (the comment directly above "
+                       f"this one; context only) ---\n{reply_to}").strip()
+                p["reply_context"] = True
+            if ctx:
+                p["post_text"] = ctx[: config.MAX_POST_CHARS]
                 p["text"] = (f"[PARENT POST]\n{p['post_text']}\n\n"
                              f"[COMMENT]\n{p.get('comment_text','')}").strip()
 
     got = sum(1 for p in group if p.get("text") or p.get("deleted"))
+    n_reply = sum(1 for p in group if p.get("reply_context"))
     print(f"apify: thread {pid} resolved {got}/{len(group)} mention(s) "
-          f"({len(records)} record(s) scraped)", flush=True)
+          f"({len(records)} record(s) scraped, parent post body "
+          f"{'yes' if parent_ctx else 'no'}, {n_reply} with reply context)",
+          flush=True)
 
 
 async def _apify_post(client, url, headers, payload: dict, what: str):
