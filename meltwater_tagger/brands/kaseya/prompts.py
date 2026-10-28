@@ -46,53 +46,74 @@ the default — only do that in the two narrow cases spelled out in step 3.
      lists naming several tools with no single one evaluated, off-topic content
      that only matched on a keyword, or any case where no other single brand is
      clearly the evaluated subject — action = "apply" with primary_brand =
-     "{run_brand}" and sentiment = "Neutral" (unless the post text itself
-     contains a genuine positive or negative verdict about {run_brand}, per the
-     sentiment rules below). This is the MOST COMMON outcome for borderline posts.
+     "{run_brand}" and the sentiment the rules below give it. Neutral is the
+     usual answer for these borderline cases, but apply the sentiment rules
+     first: if the text reports a problem with {run_brand}, or criticises it,
+     the tag is Negative even when the mention is brief or incidental.
 
 ## SENTIMENT JUDGMENT — read this carefully, it is the crux
 
-The bar for NEGATIVE and POSITIVE is HIGH. NEUTRAL is the default. Most posts in a
-social-listening feed are operational discussion, not opinions about the brand.
-Distinguish an EVALUATIVE STANCE about the brand from FACTUAL / OPERATIONAL TALK.
+The question that decides NEGATIVE vs NEUTRAL is simply: does the text report a
+PROBLEM with the brand, or express CRITICISM or DISSATISFACTION about it?
+  - Yes -> NEGATIVE.
+  - No  -> NEUTRAL.
+NEUTRAL means "nothing is wrong and no judgment is offered", not "the complaint is
+too small to count".
 
-NEGATIVE — reserve this for a STRONG, whole-brand condemnation, or the company
-seriously failing/harming its customers. The bar is high. Qualifying cases look like:
-  - broad condemnation of the brand/company itself ("Kaseya is a disaster",
-    "painfully inept", "avoid them", "regret it", "we're leaving because they're bad")
-  - the company inflicting real harm and being unresponsive: support/billing totally
-    unreachable with clear frustration, pushing a change that broke production without
-    consent, quality visibly collapsing and driving customers away.
-  It must read as an overall verdict against the BRAND, not a gripe about one thing.
+NEGATIVE — the brand is the subject of a problem, a criticism, or a bad experience.
+Tag NEGATIVE whenever the text reports or expresses any of the following about the
+brand, WHETHER THE TONE IS ANGRY, MEASURED, OR PURELY FACTUAL:
+  - a BUG, fault, error, crash, or anything not working as it should
+  - an OUTAGE, downtime, degraded service, or a status-page incident
+  - a SECURITY issue: a vulnerability, CVE, breach, suspicious behaviour, or a
+    concern raised about the product's security
+  - a CONFIGURATION problem, or a feature that is broken, missing, or badly designed
+  - criticism of a specific FEATURE ("the AI feature is bad", "Agent Browser is buggy")
+  - criticism of a PRICE, POLICY, licensing or renewal change — including a plain
+    complaint about an increase
+  - criticism of the COMPANY, its SUPPORT, its BILLING, or a specific EMPLOYEE
+  - DISSATISFACTION of any strength: frustration, annoyance, disappointment, regret,
+    lost trust, or churn ("we're leaving", "wasn't keeping it anyway", "switched away")
+  - broad condemnation of the brand ("Kaseya is a disaster", "avoid them")
+  - the company inflicting real harm and being unresponsive
 
-  CRITICAL — the following are NOT enough for Negative; tag them NEUTRAL:
-  - criticism of a single FEATURE ("the AI feature is bad", "Agent Browser is buggy")
-  - criticism of an EMPLOYEE or a specific PERSON
-  - criticism of a PRICE / POLICY / renewal change (even a hike, even if annoyed)
-  - a described bug, outage, or security issue
-  - sarcasm or a snarky one-liner about a product quirk
-  These are ordinary discussion. The analyst standard treats them as NEUTRAL.
+  CRITICAL — this is a DELIBERATE CHANGE from an older, much higher bar. Do NOT
+  apply the old reasoning. Specifically:
+  - A problem does NOT have to be a whole-brand verdict. One broken feature is enough.
+  - A problem does NOT have to be confirmed. A suspected, hedged or still-being-
+    investigated fault ("maybe", "might be", "anyone else seeing this?") is enough.
+  - The author does NOT have to sound upset. A calm, polite, factual report of a
+    fault is NEGATIVE.
+  - Do NOT downgrade to Neutral on the grounds that it is "ordinary operational
+    discussion", "just a support question", or "just troubleshooting". If a problem
+    with the brand is being described, that is NEGATIVE.
 
-NEUTRAL — the DEFAULT, and by far the most common tag. Use it for general discussion
-and factual/operational content, EVEN WHEN a problem or criticism is present:
-  - general discussion, factual observations, "is anyone else seeing X?"
-  - bug reports, error descriptions, troubleshooting, outage/status relays, how-to
-  - security issues, feature quirks, configuration, comparisons, tool-stack name-drops
-  - criticism of a specific feature, employee, or price/policy change (see above)
-  - factual relays of price / policy / renewal changes (even increases)
-  - inquiries / help-seeking / "anyone have experience with X?" / asking for opinions
-  - mild jokes, memes, snark, light banter, incidental or passing mentions
-  - speculative / uncertain attribution (hedging: "maybe", "might be", "looking into")
-  - a frustrated tone in what is fundamentally a support/troubleshooting/gripe post
+NEUTRAL — no problem, and no judgment. Use it when the brand is mentioned with
+nothing wrong attached:
+  - general discussion and factual observations that report no fault
+  - questions and help-seeking that do not describe something going wrong
+    ("which RMM does everyone use?", "how do I set up the agent?", "anyone have
+    experience with X?", asking for opinions)
+  - product news, release notes, feature or pricing announcements relayed with no
+    criticism attached
+  - comparisons, roundups and tool-stack name-drops where the brand is only listed
+  - incidental or passing mentions
+  - name collisions (a venue or unrelated entity sharing the name) and off-topic
+    content that only matched on a keyword
+  - mild jokes, memes and light banter that carry no real criticism
 
 POSITIVE — only for clear praise, recommendation, endorsement, or satisfaction
 directed at the brand ("works great", "would recommend", "switched and happy").
 NOTE: if positive sentiment points at our brand but the post's PRIMARY subject is a
 competitor, action = "skip_flag" for that competitor — do not force Positive for us.
 
-TIE-BREAK: if you are unsure between NEGATIVE and NEUTRAL, choose NEUTRAL. If unsure
-between POSITIVE and NEUTRAL, choose NEUTRAL. Only commit to Negative/Positive when
-the post is genuinely an opinion/verdict about the brand, not operational chatter.
+MIXED CONTENT: if the text contains both praise and a problem, the problem wins —
+tag NEGATIVE. ("Great product, but the agent crashes weekly" is NEGATIVE.)
+
+TIE-BREAK: if a problem, fault, criticism or dissatisfaction involving the brand is
+present AT ALL, choose NEGATIVE. Choose NEUTRAL only when nothing is being reported
+as wrong and no evaluative stance is offered. If unsure between POSITIVE and
+NEUTRAL, choose NEUTRAL.
 
 Sarcasm: judge the implied stance. Heavy, clearly derisive sarcasm aimed at the
 brand can be NEGATIVE; mild jokes/memes are NEUTRAL.
@@ -143,11 +164,13 @@ Each mention is either a POST or a COMMENT, stated in the message.
   ONLY as context to understand what the comment is referring to.
   * Apply the exact same NEGATIVE / NEUTRAL / POSITIVE bar as above, to the
     comment's evaluative stance about the brand.
-  * The comment does NOT inherit the post's sentiment. If the parent post is
-    negative but the comment itself only discusses neutral/operational things
-    (no positive or negative verdict about the brand), the comment is NEUTRAL.
-    Likewise, a neutral post with a strongly evaluative comment is judged by the
-    comment. Judge ONLY the comment's own words.
+  * The comment does NOT inherit the post's sentiment. If the parent post
+    reports a problem but the comment itself raises no problem and offers no
+    criticism of its own, the comment is NEUTRAL. Likewise, a problem-free post
+    with a comment that reports a fault or criticises the brand is judged by the
+    comment, and that comment is NEGATIVE. Judge ONLY the comment's own words —
+    but note that a comment agreeing with, adding to, or confirming a problem
+    raised elsewhere in the thread IS itself reporting that problem.
 
 ## REASON FORMAT (required)
 Begin `reason` with "Post: " or "Comment: " to make the mention type explicit,
