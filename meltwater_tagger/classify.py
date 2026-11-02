@@ -276,6 +276,44 @@ async def _get_reddit_json(client: httpx.AsyncClient, url: str) -> dict | None:
 _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 
 
+class _Gone(list):
+    """Sentinel: Reddit answered, and the answer was 'this content is gone'.
+
+    Subclasses list and stays EMPTY on purpose, so every existing
+    `if entries:` / `if not entries:` caller keeps behaving exactly as before
+    (falsy = nothing to enrich from). Only the callers that explicitly test
+    `is REDDIT_GONE` act on the distinction.
+    """
+
+
+REDDIT_GONE = _Gone()
+
+
+def _rss_says_gone(status: int, content: bytes) -> bool:
+    """True when the feed body proves the content is gone, rather than us
+    being throttled.
+
+    Verified live against reddit.com:
+      * removed/forbidden post -> HTTP 403 + a complete 702-byte Atom feed with
+        ZERO <entry> elements and <title>reddit.com: forbidden</title>
+      * nonexistent post       -> HTTP 404 + a complete 487-byte Atom feed, no entries
+      * our IP out of budget   -> HTTP 429/403 + an EMPTY body (0 bytes), nothing to parse
+
+    So the discriminator is not the status code (403 means both things) but
+    whether Reddit bothered to send a well-formed feed. A throttle gives us
+    nothing; a dead permalink gives us a real, empty feed.
+    """
+    if status not in (403, 404, 410) or not content:
+        return False
+    try:
+        root = _ET.fromstring(content)
+    except Exception:
+        return False                       # HTML block page, not a feed -> unknown
+    if not root.tag.endswith("}feed"):
+        return False
+    return not root.findall("a:entry", _ATOM_NS)
+
+
 def _reddit_html_to_text(raw: str | None) -> str:
     """Turn Reddit's markdown-HTML feed fragment into readable plain text."""
     if not raw:
@@ -323,6 +361,14 @@ async def _get_reddit_rss(client: httpx.AsyncClient, url: str):
                     return _ET.fromstring(r.content).findall("a:entry", _ATOM_NS)
                 except Exception:
                     return None
+            # Deleted/removed/nonexistent permalink. Reddit answers with a real
+            # but empty feed, which is positive evidence the content is gone —
+            # return immediately rather than spending four 8s+ backoffs on a
+            # post that is never coming back.
+            if _rss_says_gone(r.status_code, r.content):
+                print(f"rss: gone on Reddit (HTTP {r.status_code}, empty feed) {rss_url}",
+                      flush=True)
+                return REDDIT_GONE
             # Reddit alternates 429 and 403 ("Blocked") when the per-IP RSS
             # budget is spent; both mean "slow down", so back off hard rather
             # than burning retries that make it worse.
@@ -430,11 +476,18 @@ async def _fetch_reddit_bulk_rss(client: httpx.AsyncClient, posts: list[dict]) -
             # single comment in this thread -> focused feed, one guaranteed hit
             p = members[0]
             entries = await _get_reddit_rss(client, p.get("permalink", ""))
-            if entries:
+            if entries is REDDIT_GONE:
+                _mark_gone(p)
+            elif entries:
                 enrich_from_reddit_rss(p, entries, p.get("excerpt", "") or "")
             continue
 
         entries = await _get_reddit_rss(client, f"https://www.reddit.com/comments/{pid}")
+        if entries is REDDIT_GONE:
+            # The whole thread is gone, so every mention in it is gone too.
+            for p in members:
+                _mark_gone(p)
+            continue
         if not entries:
             continue
         for p in members:
@@ -448,7 +501,9 @@ async def _fetch_reddit_bulk_rss(client: httpx.AsyncClient, posts: list[dict]) -
               flush=True)
         for p in misses:
             entries = await _get_reddit_rss(client, p.get("permalink", ""))
-            if entries:
+            if entries is REDDIT_GONE:
+                _mark_gone(p)
+            elif entries:
                 enrich_from_reddit_rss(p, entries, p.get("excerpt", "") or "")
     return posts
 
@@ -500,6 +555,23 @@ def _apify_is_deleted(rec: dict) -> bool:
     if rec.get("is_deleted_or_removed") is True:
         return True
     return is_deleted_text(rec.get("body") or rec.get("selftext"))
+
+
+def _mark_gone(p: dict) -> None:
+    """Flag a mention whose permalink Reddit says no longer exists.
+
+    Same end state as a tombstone body or Apify's is_deleted_or_removed flag:
+    classify_post sees `deleted` and tags Neutral. Used when the content is
+    gone so completely that there is no record OR tombstone to read — removed
+    by admins, caught by the spam filter, or posted by a since-suspended
+    account.
+    """
+    _, cid = reddit_ids(p.get("permalink", ""))
+    p["content_type"] = "comment" if cid else "post"
+    p["post_text"] = ""
+    p["comment_text"] = ""
+    p["text"] = ""
+    p["deleted"] = True
 
 
 def _apify_apply_record(p: dict, rec: dict) -> None:
@@ -629,6 +701,32 @@ async def fetch_via_apify(posts: list[dict]) -> list[dict]:
                 jobs.append(_apify_recover_via_threads(
                     client, url, headers, retry_thread, sem))
             await asyncio.gather(*jobs, return_exceptions=True)
+
+        # Third pass: ask Reddit whether what Apify could not find still exists.
+        #
+        # Apify returns ZERO records for a removed post, which looks exactly
+        # like a failed run — so without this check every removed mention came
+        # out as "couldn't fetch" -> review, instead of Neutral. The public
+        # Atom feed answers "gone" definitively and costs nothing (no Apify
+        # credits, no Reddit credentials). Anything it cannot answer stays
+        # unresolved and still goes to review, which is the safe direction.
+        still_missing = [p for p in targets if not (p.get("text") or p.get("deleted"))]
+        if still_missing:
+            print(f"apify: checking whether {len(still_missing)} unresolved "
+                  f"mention(s) are deleted on Reddit", flush=True)
+            n_gone = 0
+            async with httpx.AsyncClient(timeout=30) as rss_client:
+                for p in still_missing:
+                    try:
+                        if await _get_reddit_rss(
+                                rss_client, p.get("permalink", "")) is REDDIT_GONE:
+                            _mark_gone(p)
+                            n_gone += 1
+                    except Exception:
+                        pass
+            print(f"apify: {n_gone}/{len(still_missing)} confirmed deleted on "
+                  f"Reddit (tagged Neutral); {len(still_missing) - n_gone} still "
+                  f"unreadable (review)", flush=True)
 
         _all_s = time.monotonic() - _t_all
         got = sum(1 for p in targets if p.get("text") or p.get("deleted"))
@@ -901,6 +999,12 @@ async def fetch_and_enrich(client: httpx.AsyncClient, p: dict, prefer: str = "rs
 
     async def _try_rss() -> bool:
         entries = await _get_reddit_rss(client, url)
+        if entries is REDDIT_GONE:
+            # Reddit confirmed the permalink is dead. That is a real answer, not
+            # a failed fetch: mark it deleted so the classifier tags Neutral
+            # instead of sending it to review as "couldn't fetch".
+            _mark_gone(p)
+            return True
         return bool(entries) and enrich_from_reddit_rss(p, entries, fallback)
 
     async def _try_json() -> bool:
