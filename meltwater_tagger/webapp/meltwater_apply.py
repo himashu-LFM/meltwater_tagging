@@ -146,6 +146,67 @@ async def _ms_fill_and_next(page, selector, value, label):
     log.info("login[ms-sso]: submitted %s", label)
 
 
+async def _visible(page, selector: str) -> bool:
+    """True when `selector` matches something actually on screen right now.
+    Passive — never navigates, never waits."""
+    try:
+        el = await page.query_selector(selector)
+        return bool(el and await el.is_visible())
+    except Exception:
+        return False
+
+
+# A narrow OTP box selector for DETECTION only. MS_SSO_SELECTORS["otp_field"]
+# ends in `input[type="text"]`, which is fine once we know we are on the code
+# screen but matches half the web when used to identify a page.
+_OTP_DETECT = 'input[name="otc"], #idTxtBx_SAOTCC_OTC'
+
+
+async def _detect_sso_state(page) -> str:
+    """Which screen of the Meltwater -> Microsoft sign-in are we looking at?
+
+    The flow is NOT a fixed sequence: Microsoft skips the password when its own
+    cookie is still valid, skips MFA on some tenants, and inserts nag screens
+    whenever it likes. So instead of marching through steps 1..6 and failing the
+    moment a screen is missing, we look at the page, act on what is actually
+    there, and look again.
+
+    Returns one of: logged_in, mw_email, ms_email, ms_password, mfa_push,
+    method_chooser, otp, security_nag, kmsi, unknown.
+    """
+    url = (page.url or "").lower()
+    on_auth_host = ("microsoftonline.com" in url or "authorize.meltwater.com" in url
+                    or "/login" in url or "/logout" in url)
+
+    # Already inside Meltwater — the account control is only on authed pages.
+    if not on_auth_host and await _visible(page, '[data-testid="PersonIcon"]'):
+        return "logged_in"
+
+    try:
+        body = ((await page.inner_text("body")) or "")[:4000].lower()
+    except Exception:
+        body = ""
+
+    # Order matters: most specific screens first.
+    if await _visible(page, _OTP_DETECT):
+        return "otp"
+    if "stay signed in" in body:
+        return "kmsi"
+    if "keep your account secure" in body or "protect your account" in body:
+        return "security_nag"
+    if await _visible(page, MS_SSO_SELECTORS["password"]):
+        return "ms_password"
+    if "verify your identity" in body or "how would you like" in body:
+        return "method_chooser"
+    if await _visible(page, MS_SSO_SELECTORS["cant_use_authenticator"]):
+        return "mfa_push"
+    if "microsoftonline.com" in url and await _visible(page, MS_SSO_SELECTORS["email"]):
+        return "ms_email"
+    if await _visible(page, LOGIN_SELECTORS["email"]):
+        return "mw_email"
+    return "unknown"
+
+
 async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[bool, str]:
     """Drive the Meltwater -> Microsoft Entra SSO login for @meltwater.com
     accounts, up to and INCLUDING entering the SMS OTP. Post-OTP navigation
@@ -156,198 +217,216 @@ async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[b
     supplied by the caller (the web app). Without it MFA can't be completed."""
     log.info("login[ms-sso]: ===== Microsoft SSO flow START for %s =====", email)
 
-    # Screen 1 — Meltwater's own email box (identical to the standard flow).
-    log.info("login[ms-sso]: STEP 1/6 — Meltwater login page: opening %s", MELTWATER_LOGIN_URL)
-    try:
-        await page.goto(MELTWATER_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-    except Exception as e:
-        log.error("login[ms-sso]: STEP 1/6 FAILED — could not open the Meltwater login page: %s", e)
-        return False, f"Could not open the Meltwater login page: {e}"
-    try:
-        mw_email = await page.wait_for_selector(LOGIN_SELECTORS["email"], timeout=15000)
-    except Exception:
-        log.error("login[ms-sso]: STEP 1/6 FAILED — Meltwater email field not found %s", await _diag(page))
-        return False, f"Meltwater email field not found {await _diag(page)}"
-    if _LOG_SECRETS:
-        log.info("login[ms-sso]: STEP 1/6 — typing email %r into the Meltwater box and clicking Next", email)
-    else:
-        log.info("login[ms-sso]: STEP 1/6 — typing the email into the Meltwater box and clicking Next")
-    await mw_email.fill(email)
-    await mw_email.press("Tab")
-    await page.wait_for_timeout(500)
-    await _submit_step(page, mw_email, "mw-email")
-
-    # Redirect to Microsoft Entra.
-    log.info("login[ms-sso]: STEP 2/6 — waiting for redirect to Microsoft (login.microsoftonline.com)")
-    try:
-        await page.wait_for_url(f"**{MS_SSO_HOST}**", timeout=30000)
-        log.info("login[ms-sso]: STEP 2/6 — now on Microsoft: %s", page.url)
-    except Exception:
-        # Some tenants reach the MS screen without a URL change we catch;
-        # fall through and look for the field directly.
-        log.info("login[ms-sso]: STEP 2/6 — no Microsoft URL match yet %s", await _diag(page))
-
-    # Screen 2 — Microsoft usually goes straight to the password screen for this
-    # account (the Meltwater email carries over). We do NOT require a separate MS
-    # email entry: only fill it if an email field actually appears quickly (same
-    # Meltwater address); otherwise proceed straight to the password.
-    log.info("login[ms-sso]: STEP 2/6 — checking for a Microsoft email screen (optional)")
-    try:
-        ms_email = await page.wait_for_selector(MS_SSO_SELECTORS["email"], timeout=4000)
-    except Exception:
-        ms_email = None
-    if ms_email:
-        if _LOG_SECRETS:
-            log.info("login[ms-sso]: STEP 2/6 — Microsoft email screen shown; re-entering email %r and clicking Next", email)
-        else:
-            log.info("login[ms-sso]: STEP 2/6 — Microsoft email screen shown; re-entering the Meltwater email and clicking Next")
-        await ms_email.fill(email)
-        await ms_email.press("Tab")
-        await page.wait_for_timeout(400)
-        btn = await page.query_selector(MS_SSO_SELECTORS["submit"])
-        if btn:
-            await btn.click()
-        else:
-            await ms_email.press("Enter")
-        try:
-            await page.wait_for_load_state("networkidle", timeout=20000)
-        except Exception:
-            pass
-    else:
-        log.info("login[ms-sso]: STEP 2/6 — no Microsoft email screen; going straight to the password")
-
-    # Screen 3 — Microsoft password box.
-    if _LOG_SECRETS:
-        log.info("login[ms-sso]: STEP 3/6 — Microsoft password page: typing password %r and clicking Sign in", password)
-    else:
-        log.info("login[ms-sso]: STEP 3/6 — Microsoft password page: typing the password and clicking Sign in")
-    try:
-        await _ms_fill_and_next(page, MS_SSO_SELECTORS["password"], password, "ms-password")
-    except Exception:
-        log.error("login[ms-sso]: STEP 3/6 FAILED — Microsoft password field never appeared %s", await _diag(page))
-        return False, ("Microsoft's password screen never loaded, so the sign-in "
-                       "could not be completed. Nothing was tagged — please try "
-                       "Apply again, and report it if it keeps happening.")
-    try:
-        await page.wait_for_load_state("networkidle", timeout=20000)
-    except Exception:
-        pass
-
-    # Bail out NOW only if Microsoft rejected the CREDENTIALS. Without this the
-    # run walks on into the MFA steps, finds no Text option, and parks on
-    # "waiting for the SMS code" — so the analyst sits in front of an OTP box
-    # for a code that will never arrive.
+    # DRIVEN BY WHAT IS ON SCREEN, NOT BY A FIXED SEQUENCE.
     #
-    # Deliberately narrow: the screens that appear right here are normally the
-    # MFA prompts, which STEP 4/5/6 exist to handle. Checking the full blocker
-    # list at this point aborted healthy runs. Everything else is left to
-    # STEP 8, by which time a real interstitial is the only thing that can
-    # still be on screen.
-    blocker = await classify_login_blocker(page)
-    if blocker and blocker[0] in ("wrong_password", "password_expired", "account_locked"):
-        code, message = blocker
-        log.error("login[ms-sso]: STEP 3/6 FAILED — blocked by %r %s", code, await _diag(page))
-        return False, message
-
-    # Screen 4 — MFA "Approve sign in request": we can't approve a push, so pick
-    # "I can't use my Microsoft Authenticator app right now" to reach the method
-    # chooser. (Absent on single-method tenants that jump straight to a code.)
-    log.info("login[ms-sso]: STEP 4/6 — MFA screen: clicking \"I can't use my Microsoft Authenticator app right now\"")
-    try:
-        link = await page.wait_for_selector(MS_SSO_SELECTORS["cant_use_authenticator"], timeout=15000)
-        await link.click()
-        log.info("login[ms-sso]: STEP 4/6 — chose an alternate verification method")
-        await page.wait_for_timeout(1500)
-    except Exception:
-        log.info("login[ms-sso]: STEP 4/6 — no 'can't use authenticator' link shown (skipping) %s", await _diag(page))
-
-    # Screen 5 — "Verify your identity" chooser: click the Text (SMS) option.
-    log.info("login[ms-sso]: STEP 5/6 — 'Verify your identity' chooser: clicking the Text (SMS) option")
-    clicked_text = False
-    try:
-        text_opt = page.get_by_text(re.compile(r"^\s*Text\b", re.I))
-        if await text_opt.count() > 0:
-            await text_opt.first.click()
-            clicked_text = True
-    except Exception:
-        pass
-    if not clicked_text:
-        try:
-            node = await page.query_selector(
-                'div[role="button"]:has-text("Text"), div[data-value]:has-text("Text")')
-            if node:
-                await node.click()
-                clicked_text = True
-        except Exception:
-            pass
-    if clicked_text:
-        log.info("login[ms-sso]: STEP 5/6 — SMS code requested; Microsoft is texting the code to the phone")
-        await page.wait_for_timeout(1500)
-    else:
-        log.info("login[ms-sso]: STEP 5/6 — no Text option shown (may already be on the code screen) %s",
-                  await _diag(page))
-
-    # Screen 6 — OTP entry. Ask the analyst for the code, up to 3 attempts.
-    if request_otp is None:
-        log.error("login[ms-sso]: STEP 6/6 FAILED — an SMS code is required but no OTP input was wired up")
-        return False, ("This @meltwater.com account needs an SMS verification code, but there "
-                       "was no way to enter one (OTP entry is only available in the web app).")
-
-    max_attempts = 3
+    # The old version marched through steps 1..6 and returned False the moment a
+    # screen it expected was missing. That is wrong, because screens are
+    # genuinely optional: Microsoft skips the password when its own cookie is
+    # still valid, skips MFA on some tenants, and injects nag screens at will.
+    # The worst case was the common one — SSO signed us straight back in, no
+    # password box ever appeared, and the flow declared failure while sitting on
+    # a perfectly good logged-in Meltwater page.
+    #
+    # So: look at the page, handle whatever it actually is, look again. Any
+    # screen can appear in any order, or not at all.
+    max_attempts = 3                 # OTP tries
+    otp_attempt = 0
     last_error = None
-    for attempt in range(1, max_attempts + 1):
-        log.info("login[ms-sso]: STEP 6/6 — waiting for the analyst to enter the SMS code (attempt %d/%d)",
-                  attempt, max_attempts)
-        code = await request_otp(attempt, max_attempts, last_error)
-        if not code:
-            log.warning("login[ms-sso]: STEP 6/6 — no code entered in time; giving up")
-            return False, "No verification code was entered in time (waited up to 5 minutes)."
-        code = str(code).strip()
-        if _LOG_SECRETS:
-            log.info("login[ms-sso]: STEP 6/6 — got code %r; typing it on the Microsoft screen and submitting (attempt %d)", code, attempt)
-        else:
-            log.info("login[ms-sso]: STEP 6/6 — got a code; typing it on the Microsoft screen and submitting (attempt %d)", attempt)
+    seen: dict[str, int] = {}
+    opened_login = False
+
+    for turn in range(1, 31):
+        try:                          # let a redirect settle before judging
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        state = await _detect_sso_state(page)
+        log.info("login[ms-sso]: [%02d] page is %r — %s", turn, state, page.url)
+
+        if state == "logged_in":
+            log.info("login[ms-sso]: ===== signed in ✓ =====")
+            return True, "Logged in."
+
+        # Same screen over and over = we are not getting anywhere. Allow a few
+        # repeats (a nag can legitimately show twice) before giving up.
+        seen[state] = seen.get(state, 0) + 1
+        if seen[state] > 4:
+            log.error("login[ms-sso]: stuck on %r after %d tries %s",
+                      state, seen[state], await _diag(page))
+            return False, (f"Sign-in stalled on the {state!r} screen. "
+                           "Nothing was tagged — please try Apply again.")
+
+        # Remember where we are, so we can tell whether the action below
+        # actually moved us on.
+        before_url = page.url
         try:
-            otp_field = await page.wait_for_selector(MS_SSO_SELECTORS["otp_field"], timeout=15000)
-            await otp_field.fill(code)
-            await otp_field.press("Tab")
-            await page.wait_for_timeout(300)
-            verify = await page.query_selector(MS_SSO_SELECTORS["otp_verify"])
-            if verify:
-                await verify.click()
-            else:
-                await otp_field.press("Enter")
+            if state == "mw_email":
+                el = await page.query_selector(LOGIN_SELECTORS["email"])
+                if el:
+                    log.info("login[ms-sso]: entering the email on Meltwater's login page")
+                    await el.fill(email)
+                    await el.press("Tab")
+                    await page.wait_for_timeout(500)
+                    await _submit_step(page, el, "mw-email")
+                elif not opened_login:
+                    opened_login = True
+                    await page.goto(MELTWATER_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+
+            elif state == "ms_email":
+                log.info("login[ms-sso]: Microsoft email screen — re-entering the email")
+                el = await page.query_selector(MS_SSO_SELECTORS["email"])
+                if el:
+                    await el.fill(email)
+                    await el.press("Tab")
+                    await page.wait_for_timeout(400)
+                    btn = await page.query_selector(MS_SSO_SELECTORS["submit"])
+                    await (btn.click() if btn else el.press("Enter"))
+
+            elif state == "ms_password":
+                log.info("login[ms-sso]: Microsoft password screen — signing in")
+                try:
+                    await _ms_fill_and_next(page, MS_SSO_SELECTORS["password"],
+                                            password, "ms-password")
+                except Exception as e:
+                    log.warning("login[ms-sso]: could not submit the password: %s", e)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass
+                # Only a CREDENTIAL rejection is fatal — everything else is just
+                # another screen for the loop to handle on the next turn.
+                blocker = await classify_login_blocker(page)
+                if blocker and blocker[0] in ("wrong_password", "password_expired",
+                                              "account_locked"):
+                    log.error("login[ms-sso]: blocked by %r %s", blocker[0], await _diag(page))
+                    return False, blocker[1]
+
+            elif state == "mfa_push":
+                log.info("login[ms-sso]: MFA push screen — choosing another method")
+                el = await page.query_selector(MS_SSO_SELECTORS["cant_use_authenticator"])
+                if el:
+                    await el.click()
+                    await page.wait_for_timeout(1500)
+
+            elif state == "method_chooser":
+                log.info("login[ms-sso]: method chooser — picking Text (SMS)")
+                clicked = False
+                try:
+                    opt = page.get_by_text(re.compile(r"^\s*Text\b", re.I))
+                    if await opt.count() > 0:
+                        await opt.first.click()
+                        clicked = True
+                except Exception:
+                    pass
+                if not clicked:
+                    node = await page.query_selector(
+                        'div[role="button"]:has-text("Text"), div[data-value]:has-text("Text")')
+                    if node:
+                        await node.click()
+                        clicked = True
+                log.info("login[ms-sso]: %s", "SMS requested — Microsoft is texting the code"
+                         if clicked else "no Text option here; looking again")
+                await page.wait_for_timeout(1500)
+
+            elif state == "otp":
+                if request_otp is None:
+                    log.error("login[ms-sso]: an SMS code is required but no OTP input was wired up")
+                    return False, ("This @meltwater.com account needs an SMS verification code, "
+                                   "but there was no way to enter one (OTP entry is only "
+                                   "available in the web app).")
+                otp_attempt += 1
+                if otp_attempt > max_attempts:
+                    log.error("login[ms-sso]: the code was rejected %d times", max_attempts)
+                    return False, f"The verification code was rejected {max_attempts} times."
+                log.info("login[ms-sso]: waiting for the analyst to enter the SMS code "
+                         "(attempt %d/%d)", otp_attempt, max_attempts)
+                code = await request_otp(otp_attempt, max_attempts, last_error)
+                if not code:
+                    log.warning("login[ms-sso]: no code entered in time; giving up")
+                    return False, "No verification code was entered in time (waited up to 5 minutes)."
+                if _LOG_SECRETS:
+                    log.info("login[ms-sso]: got code %r; submitting it", str(code).strip())
+                else:
+                    log.info("login[ms-sso]: got a code; submitting it")
+                try:
+                    fld = await page.wait_for_selector(MS_SSO_SELECTORS["otp_field"], timeout=15000)
+                    await fld.fill(str(code).strip())
+                    await fld.press("Tab")
+                    await page.wait_for_timeout(300)
+                    verify = await page.query_selector(MS_SSO_SELECTORS["otp_verify"])
+                    await (verify.click() if verify else fld.press("Enter"))
+                except Exception as e:
+                    last_error = "Could not enter the code on the Microsoft page — try again."
+                    log.warning("login[ms-sso]: OTP entry failed: %s", e)
+                    continue
+                await page.wait_for_timeout(3000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                err = None
+                try:
+                    err_el = await page.query_selector(MS_SSO_SELECTORS["otp_error"])
+                    if err_el and await err_el.is_visible():
+                        err = (await err_el.inner_text()).strip()
+                except Exception:
+                    pass
+                if err:
+                    last_error = err or "That code wasn't accepted — check it and try again."
+                    log.warning("login[ms-sso]: code rejected: %s", last_error)
+                    seen["otp"] = 0        # a fresh try is progress, not a stall
+                else:
+                    log.info("login[ms-sso]: code accepted ✓")
+                    last_error = None
+
+            elif state == "security_nag":
+                log.info("login[ms-sso]: 'keep your account secure' nag — dismissing")
+                if not await _dismiss_security_nag(page, timeout=8000):
+                    log.info("login[ms-sso]: nothing to dismiss; looking again")
+
+            elif state == "kmsi":
+                log.info("login[ms-sso]: 'Stay signed in?' — clicking Yes so the session persists")
+                el = await page.query_selector(MS_SSO_SELECTORS["kmsi_yes"])
+                if el:
+                    await el.click()
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+
+            else:   # unknown
+                # Could be a redirect in flight, or an interstitial we don't know.
+                # Give it a moment; if it persists, go back to the login page once
+                # and let the loop re-enter the flow from there.
+                log.info("login[ms-sso]: unrecognised screen %s", await _diag(page))
+                await page.wait_for_timeout(2000)
+                if seen["unknown"] >= 3 and not opened_login:
+                    opened_login = True
+                    log.info("login[ms-sso]: restarting from the Meltwater login page")
+                    try:
+                        await page.goto(MELTWATER_LOGIN_URL,
+                                        wait_until="domcontentloaded", timeout=30000)
+                    except Exception as e:
+                        return False, f"Could not open the Meltwater login page: {e}"
         except Exception as e:
-            last_error = "Could not enter the code on the Microsoft page — try again."
-            log.warning("login[ms-sso]: STEP 6/6 — OTP entry failed (attempt %d): %s", attempt, e)
+            # A screen can navigate away mid-action, which detaches the element
+            # we were holding. That is normal in this flow, NOT a reason to kill
+            # the run: look at whatever page we ended up on and carry on.
+            log.warning("login[ms-sso]: %r step interrupted (%s: %s) — re-reading "
+                        "the page", state, type(e).__name__, e)
+            await page.wait_for_timeout(1000)
             continue
 
-        await page.wait_for_timeout(3000)
+        # Let a navigation that the action kicked off actually happen, so the
+        # next turn judges the NEW page instead of re-submitting the old one.
         try:
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_url(lambda u: u != before_url, timeout=5000)
         except Exception:
-            pass
+            await page.wait_for_timeout(500)
 
-        err = None
-        try:
-            err_el = await page.query_selector(MS_SSO_SELECTORS["otp_error"])
-            if err_el and await err_el.is_visible():
-                err = (await err_el.inner_text()).strip()
-        except Exception:
-            pass
-        if err:
-            last_error = err or "That code wasn't accepted — check it and try again."
-            log.warning("login[ms-sso]: STEP 6/6 — code rejected on attempt %d: %s", attempt, last_error)
-            continue
-
-        # No visible error -> the code was accepted.
-        log.info("login[ms-sso]: STEP 6/6 — code accepted on attempt %d %s", attempt, await _diag(page))
-        # Finish the flow: dismiss "Stay signed in?" and wait for the redirect
-        # back to app.meltwater.com so callers land on an authenticated app page.
-        return await _finish_ms_sso(page)
-
-    log.error("login[ms-sso]: STEP 6/6 FAILED — the code was rejected %d times", max_attempts)
-    return False, f"The verification code was rejected {max_attempts} times."
+    log.error("login[ms-sso]: gave up after 30 turns %s", await _diag(page))
+    return False, ("The Microsoft sign-in did not complete. Nothing was tagged — "
+                   "please try Apply again.")
 
 
 async def _dismiss_security_nag(page, timeout: int = 8000) -> bool:
@@ -2475,31 +2554,58 @@ async def switch_meltwater_account(page, account_hint: str) -> bool:
     try:
         # 1) open the top-right account menu. The person icon lives inside the
         #    account button; click it (or its clickable ancestor).
+        # Click the WHOLE account control first (the pill in the top-right that
+        # reads e.g. "Kaseya - Fairhair" next to the avatar), and only fall back
+        # to the bare avatar icon.
+        #
+        # Order matters, and the old order was the bug: '[data-testid="PersonIcon"]'
+        # came first and always matched, so the button candidates after it were
+        # dead code and we only ever clicked the inner icon — which no longer
+        # opens the menu. The icon is a child of the real control, so go up to
+        # the clickable ancestor instead.
+        #
+        # Note the pill is labelled with the ACCOUNT name ("Kaseya - Fairhair"),
+        # not the user's name, so never match it on the person's name.
+        candidates_open = [
+            'button:has([data-testid="PersonIcon"])',
+            '[role="button"]:has([data-testid="PersonIcon"])',
+            '[data-testid="PersonIcon"] >> xpath=ancestor::*[self::button or @role="button"][1]',
+            # last resort: the icon itself (what the old code always did)
+            '[data-testid="PersonIcon"]',
+        ]
         opened = False
-        for sel in ('[data-testid="PersonIcon"]',
-                    'button:has([data-testid="PersonIcon"])',
-                    '[data-testid="PersonIcon"] >> xpath=ancestor::button[1]'):
+        tried = []
+        for sel in candidates_open:
             try:
                 el = await page.query_selector(sel)
             except Exception:
                 el = None
-            if el:
-                try:
-                    await el.click()
-                    opened = True
-                    log.info("apply: ACCOUNT SWITCH — clicked account button via %s", sel)
-                    break
+            if not el:
+                continue
+            try:
+                await el.click(timeout=3000)
+            except Exception:
+                continue
+            tried.append(sel)
+            # Verify THIS click actually opened the menu before moving on. The
+            # old code clicked once, warned if the menu stayed shut, and then
+            # carried on regardless — which is how it ended up clicking the
+            # left-nav "Account" link and landing on the Account settings page.
+            try:
+                await page.wait_for_selector('text="Logout"', timeout=3000)
+                opened = True
+                log.info("apply: ACCOUNT SWITCH — account menu is open (via %s)", sel)
+                break
+            except Exception:
+                log.info("apply: ACCOUNT SWITCH — %s clicked but no menu; trying next", sel)
+                try:          # close anything half-open before the next attempt
+                    await page.keyboard.press("Escape")
                 except Exception:
-                    continue
+                    pass
         if not opened:
-            log.warning("apply: ACCOUNT SWITCH — account button not found %s", await _diag(page))
+            log.warning("apply: ACCOUNT SWITCH — could not open the account menu "
+                        "(tried %s) %s", tried or "no matching control", await _diag(page))
             return False
-        # confirm the menu actually opened (Logout / the email should be visible)
-        try:
-            await page.wait_for_selector('text="Logout"', timeout=6000)
-            log.info("apply: ACCOUNT SWITCH — account menu is open")
-        except Exception:
-            log.warning("apply: ACCOUNT SWITCH — menu didn't open (no 'Logout' seen) %s", await _diag(page))
 
         # 2) click "Account" in that menu. Prefer a menuitem role so we never hit
         #    the left-nav "Account"; fall back to the LAST plain "Account" (the
@@ -2511,6 +2617,21 @@ async def switch_meltwater_account(page, account_hint: str) -> bool:
             mi = page.get_by_role("menuitem", name=re.compile(r"account", re.I))
             for i in range(await mi.count()):
                 candidates.append(mi.nth(i))
+        except Exception:
+            pass
+        # Scope the text search to the OPEN MENU — the nearest container that
+        # also holds "Logout". The left-nav has its own "Account" link, and the
+        # old "just take the last match" heuristic picked it whenever the menu
+        # was shut, navigating us to the Account settings page instead.
+        try:
+            menu = page.locator(
+                'xpath=//*[self::div or self::ul or self::nav]'
+                '[.//*[normalize-space(text())="Logout"]]'
+                '[not(.//*[self::div or self::ul][.//*[normalize-space(text())="Logout"]])]')
+            if await menu.count():
+                tx = menu.first.get_by_text("Account", exact=False)
+                for i in range(await tx.count()):
+                    candidates.append(tx.nth(i))
         except Exception:
             pass
         try:
@@ -3050,6 +3171,42 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
         feed_opened = False
         if account_hint:
             switched = await switch_meltwater_account(page, account_hint)
+            # Meltwater sometimes bounces us to /logout -> the login page partway
+            # through (it rotates tokens on every auth/token/refresh and rejects
+            # a stale one). That is NOT a reason to throw the run away: log back
+            # in — reusing the saved session if it still works, otherwise
+            # email/password + OTP — and try the switch again.
+            if not switched and not await _is_logged_in(page):
+                log.warning("apply: SESSION BOUNCE — Meltwater sent us back to the login "
+                            "page during the account switch; logging in again instead of "
+                            "aborting")
+                ok, msg = await login_to_meltwater(page, email, password, request_otp)
+                # Microsoft SSO often signs us straight back in from its own
+                # still-valid cookie, so no password screen ever appears and the
+                # login helper reports failure — while the browser is in fact
+                # sitting on Meltwater, logged in. Trust the page, not the
+                # return value.
+                if not ok and await _is_logged_in(page):
+                    log.info("apply: SESSION BOUNCE — SSO signed us back in without a "
+                             "password prompt (login step reported %r, but we are logged "
+                             "in) — carrying on", msg)
+                    ok = True
+                if ok:
+                    log.info("apply: SESSION BOUNCE — logged back in ✓; retrying the "
+                             "account switch")
+                    if on_state_captured is not None:
+                        try:      # the re-login minted fresh tokens — keep them
+                            on_state_captured(json.dumps(await context.storage_state()))
+                            log.info("apply: SESSION SAVE — stored the re-login session ✓")
+                        except Exception as e:
+                            log.warning("apply: SESSION SAVE — could not store it: %s", e)
+                    switched = await switch_meltwater_account(page, account_hint)
+                else:
+                    log.error("apply: SESSION BOUNCE — could not log back in: %s", msg)
+                    await browser.close()
+                    return {"ok": False, "applied": [], "failed": [],
+                            "message": ("Meltwater logged us out mid-run and signing back "
+                                         f"in failed: {msg}")}
             if not switched:
                 log.error("apply: POST-LOGIN STEP FAILED — could not switch into the "
                            "'%s' environment; aborting so we never tag in the wrong account",

@@ -146,13 +146,21 @@ async def classify_post(anthropic, model, run_brand, permalink, text, sem, cfg,
                 "content_type": content_type,
                 "reason": "no post or comment found — deleted or removed on Reddit"}
 
+    # Unreadable mention: Reddit blocked us, the fetch timed out, or the actor
+    # returned nothing and the gone-check could not prove it was deleted. Tag
+    # Neutral so every mention gets a tag and nothing is left sitting in review.
+    #
+    # This is a DEFAULT, not a judgment. Unlike a deleted mention (where we know
+    # there is nothing left to judge), the text here may well have been a
+    # complaint we simply could not read. The reason string says so explicitly so
+    # the guess stays visible in the run history.
     if not (usable or "").strip():
-        log.warning("no text fetched for %s — flagging for review instead of defaulting to Neutral",
-                    permalink)
-        return {"permalink": permalink, "action": "review", "tag": None,
+        log.warning("no text fetched for %s — defaulting to Neutral", permalink)
+        return {"permalink": permalink, "action": "apply",
+                "tag": _label_for(run_brand, "neutral", cfg.get("labels", {})),
                 "content_type": content_type,
-                "reason": ("could not fetch the post text (Reddit blocked or unavailable) — "
-                           "not classified; re-run or check the fetch mode")}
+                "reason": ("could not fetch the post text (Reddit blocked or "
+                           "unavailable) — defaulted to Neutral, not judged")}
 
     system = build_system_prompt(run_brand, cfg.get("rules", {}))
     user_msg = _build_user_message(run_brand, permalink, text, content_type, post_text, comment_text)
