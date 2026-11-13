@@ -98,10 +98,16 @@ MS_SSO_SELECTORS = {
     "password": 'input[type="password"], input[name="passwd"], #i0118',
     "submit": '#idSIButton9, input[type="submit"], button[type="submit"]',
     # "I can't use my Microsoft Authenticator app right now"
+    # The link that escapes the Authenticator push to a method we can automate
+    # (SMS). Matched WITHOUT the apostrophe on purpose: Microsoft writes "I
+    # can’t use…" with a typographic U+2019, so a selector containing a plain
+    # ' never matches the real page.
     "cant_use_authenticator": (
         '#signInAnotherWay, a#signInAnotherWay, '
-        'a:has-text("I can\'t use my Microsoft Authenticator"), '
-        'a:has-text("different method"), a:has-text("another way")'
+        'a:has-text("use my Microsoft Authenticator"), '
+        ':is(a,button,div[role="button"]):has-text("Sign-in options"), '
+        'a:has-text("different method"), a:has-text("another way"), '
+        'a:has-text("verify another way"), a:has-text("Use a different")'
     ),
     "otp_field": 'input[name="otc"], #idTxtBx_SAOTCC_OTC, input[type="tel"], input[type="text"]',
     "otp_verify": '#idSubmit_SAOTCC_Continue, #idSIButton9, input[type="submit"]',
@@ -161,6 +167,49 @@ async def _visible(page, selector: str) -> bool:
 # screen but matches half the web when used to identify a page.
 _OTP_DETECT = 'input[name="otc"], #idTxtBx_SAOTCC_OTC'
 
+# Every input these screens can present. Waiting for ANY of them is what tells
+# a half-rendered page apart from a genuinely unrecognised one: Microsoft's
+# sign-in arrives with the right title and an EMPTY body for a second or two,
+# and judging it in that window is what made the loop give up on a page that
+# was about to be perfectly usable.
+_ANY_SSO_CONTROL = ", ".join((
+    _OTP_DETECT,
+    'input[type="password"]',
+    'input[type="email"]',
+    'input[name="loginfmt"]',
+    '#idSIButton9',
+    '[data-testid="PersonIcon"]',
+))
+
+
+def _stall_url(url: str) -> str:
+    """The page identity used to decide whether we are stuck: path only.
+
+    Microsoft's SAML and OTP URLs carry a fresh SAMLRequest/RelayState every
+    time, so comparing full URLs would call every reload a new page and the
+    stall guard would never fire at all."""
+    u = (url or "").split("?")[0].split("#")[0]
+    return u.lower().rstrip("/")
+
+
+async def _page_settled(page, timeout: int = 12000) -> None:
+    """Wait until the page has something to judge.
+
+    Returns as soon as a known control is on screen, or the body has any text
+    at all — whichever comes first. Never raises: a timeout just means we judge
+    whatever is there, exactly as before."""
+    try:
+        await page.wait_for_selector(_ANY_SSO_CONTROL, timeout=timeout, state="visible")
+        return
+    except Exception:
+        pass
+    try:
+        await page.wait_for_function(
+            "() => (document.body?.innerText || '').trim().length > 0",
+            timeout=3000)
+    except Exception:
+        pass
+
 
 async def _detect_sso_state(page) -> str:
     """Which screen of the Meltwater -> Microsoft sign-in are we looking at?
@@ -175,6 +224,11 @@ async def _detect_sso_state(page) -> str:
     method_chooser, otp, security_nag, kmsi, unknown.
     """
     url = (page.url or "").lower()
+    # A brand-new tab, before anything has been opened. Not a screen at all, so
+    # it must never look like one: counting these as "unrecognised" used up
+    # three of the five strikes before the login page had even been requested.
+    if not url or url in ("about:blank", "chrome://newtab/"):
+        return "blank"
     on_auth_host = ("microsoftonline.com" in url or "authorize.meltwater.com" in url
                     or "/login" in url or "/logout" in url)
 
@@ -194,14 +248,48 @@ async def _detect_sso_state(page) -> str:
         return "kmsi"
     if "keep your account secure" in body or "protect your account" in body:
         return "security_nag"
-    if await _visible(page, MS_SSO_SELECTORS["password"]):
-        return "ms_password"
+    # Microsoft's email and password screens are ONE page that swaps which
+    # panel is shown. BOTH inputs stay in the DOM the whole time and Playwright
+    # reports both as visible, so "is there a password box?" and "is there an
+    # email box?" are each true on both screens. Ordering those two checks
+    # cannot work: password-first read the email screen as the password screen
+    # (we submitted an empty form and Microsoft said "Enter a valid email
+    # address"), and email-first read the password screen as the email screen
+    # (we retyped the address at a box that was no longer the one being asked
+    # for). Both were seen live.
+    #
+    # What DOES tell them apart is the heading Microsoft writes for the panel
+    # it is actually showing. So read the words, not the inputs.
+    #
+    # Every Microsoft screen here is checked by its own heading, MOST SPECIFIC
+    # FIRST, and the email screen is last. It has to be last because every one
+    # of these pages still carries the email input, and several of them contain
+    # the words "sign in" — the Authenticator screen says "Approve sign in
+    # request", which a loose match read as the email screen, so the loop
+    # retyped the address while the phone was waiting to be approved.
+    if "microsoftonline.com" in url:
+        if "enter password" in body or "please enter your password" in body:
+            return "ms_password"
+        if ("approve sign in request" in body or "open your authenticator" in body
+                or "didn't receive a sign-in request" in body
+                or "enter the number" in body):
+            return "mfa_push"
+        if "verify your identity" in body or "how would you like" in body:
+            return "method_chooser"
+        if await _visible(page, MS_SSO_SELECTORS["cant_use_authenticator"]):
+            return "mfa_push"
+        # Only now: an email box that is genuinely what this page is asking for.
+        if ("enter a valid email" in body
+                or await _visible(page, MS_SSO_SELECTORS["email"])):
+            return "ms_email"
     if "verify your identity" in body or "how would you like" in body:
         return "method_chooser"
     if await _visible(page, MS_SSO_SELECTORS["cant_use_authenticator"]):
         return "mfa_push"
-    if "microsoftonline.com" in url and await _visible(page, MS_SSO_SELECTORS["email"]):
-        return "ms_email"
+    # Off the Microsoft host the ambiguity does not exist: Meltwater's own
+    # login page has an email box and nothing else.
+    if await _visible(page, MS_SSO_SELECTORS["password"]):
+        return "ms_password"
     if await _visible(page, LOGIN_SELECTORS["email"]):
         return "mw_email"
     return "unknown"
@@ -240,6 +328,10 @@ async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[b
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
         except Exception:
             pass
+        # Microsoft serves its sign-in page with the right title and an EMPTY
+        # body for a moment. Give the page a chance to render BEFORE deciding
+        # what it is, or a perfectly normal screen reads as 'unknown'.
+        await _page_settled(page)
         state = await _detect_sso_state(page)
         log.info("login[ms-sso]: [%02d] page is %r — %s", turn, state, page.url)
 
@@ -247,12 +339,32 @@ async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[b
             log.info("login[ms-sso]: ===== signed in ✓ =====")
             return True, "Logged in."
 
+        # A fresh tab is not a screen: open the login page and start properly.
+        if state == "blank":
+            if not opened_login:
+                opened_login = True
+                log.info("login[ms-sso]: fresh tab — opening the Meltwater login page")
+                try:
+                    await page.goto(MELTWATER_LOGIN_URL,
+                                    wait_until="domcontentloaded", timeout=30000)
+                except Exception as e:
+                    return False, f"Could not open the Meltwater login page: {e}"
+            else:
+                await page.wait_for_timeout(1000)
+            continue
+
         # Same screen over and over = we are not getting anywhere. Allow a few
         # repeats (a nag can legitimately show twice) before giving up.
-        seen[state] = seen.get(state, 0) + 1
-        if seen[state] > 4:
+        #
+        # Counted PER URL, not per state name. 'unknown' on the Meltwater login
+        # page and 'unknown' on Microsoft's SAML redirect are two different
+        # pages mid-flight, not one screen we are stuck on — tallying them
+        # together is what ended a sign-in that was actually progressing.
+        stall_key = (state, _stall_url(page.url))
+        seen[stall_key] = seen.get(stall_key, 0) + 1
+        if seen[stall_key] > 4:
             log.error("login[ms-sso]: stuck on %r after %d tries %s",
-                      state, seen[state], await _diag(page))
+                      state, seen[stall_key], await _diag(page))
             return False, (f"Sign-in stalled on the {state!r} screen. "
                            "Nothing was tagged — please try Apply again.")
 
@@ -374,7 +486,10 @@ async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[b
                 if err:
                     last_error = err or "That code wasn't accepted — check it and try again."
                     log.warning("login[ms-sso]: code rejected: %s", last_error)
-                    seen["otp"] = 0        # a fresh try is progress, not a stall
+                    # A fresh try is progress, not a stall — clear the OTP
+                    # screen's tally wherever it was counted.
+                    for k in [k for k in seen if k[0] == "otp"]:
+                        seen[k] = 0
                 else:
                     log.info("login[ms-sso]: code accepted ✓")
                     last_error = None
@@ -400,7 +515,7 @@ async def login_via_microsoft_sso(page, email, password, request_otp) -> tuple[b
                 # and let the loop re-enter the flow from there.
                 log.info("login[ms-sso]: unrecognised screen %s", await _diag(page))
                 await page.wait_for_timeout(2000)
-                if seen["unknown"] >= 3 and not opened_login:
+                if seen[stall_key] >= 3 and not opened_login:
                     opened_login = True
                     log.info("login[ms-sso]: restarting from the Meltwater login page")
                     try:
@@ -2072,6 +2187,15 @@ def _attach_api_capture(context) -> dict:
                 tok = _bearer(req)
                 if tok:
                     cap["token"] = tok
+                # The account id rides in the path of plenty of Meltwater
+                # calls, not just msearch. Harvesting it from any of them means
+                # the live-tag lookup can run on the DOC-ID fast path, which
+                # never opens the results page and so never sees an msearch.
+                # Last-wins, like the token: an account switch re-scopes every
+                # later call, so the newest id we see is the live one.
+                am = re.search(r"/accounts/([0-9a-f]{12,})(?:/|\b)", u, re.I)
+                if am:
+                    cap["account"] = am.group(1)
             if MSEARCH_HOST in u and req.method == "POST":
                 # Authoritative: msearch only fires on the results page, i.e.
                 # after any account switch, so its token is correctly scoped.
@@ -2129,6 +2253,132 @@ def _docmap_from_results(results: list[dict]) -> dict:
             "tags": [t for t in (r.get("existing_tags") or []) if isinstance(t, str)],
         }
     return docmap
+
+
+# Live tag refresh for the DOC-ID fast path.
+#
+# WHY: the fast path takes "which mentions already carry a tag" from the
+# EXPORT. Brands share one Meltwater account, so a post that names several
+# tools (e.g. "NinjaOne, N-able, ConnectWise") sits in several brand searches.
+# Run ConnectWise today -> "Neutral - ConnectWise" lands on it; run N-Able from
+# that SAME export and the file still says "no tags", so the skip rule never
+# fires and the mention ends up double-tagged. That is exactly what was seen
+# live.
+#
+# COST: one extra HTTP POST per 50 document ids, all of them in flight at once
+# — roughly a second for a whole run, with NO browser, NO Explore navigation,
+# NO date-range click and NO pagination walk. The fast path stays fast; it just
+# stops trusting a stale file.
+#
+# SAFETY: this only ever ADDS tags we did not know about. If the lookup fails
+# or comes back empty we keep the export's own tags and carry on exactly as
+# before — a refresh problem must never turn into "tag everything again".
+LIVE_TAGS_CHUNK = int(os.environ.get("MELTWATER_LIVE_TAGS_CHUNK", "50"))
+LIVE_TAGS_DAYS = int(os.environ.get("MELTWATER_LIVE_TAGS_DAYS", "730"))
+# Set false to skip the refresh entirely (restores the old export-only rule).
+LIVE_TAGS_CHECK = os.environ.get("MELTWATER_LIVE_TAGS_CHECK", "true").lower() == "true"
+
+
+def _post_ids_from_keys(keys) -> list:
+    """The reddit post ids behind our canonical keys ("reddit:<post>[:<cid>]").
+
+    One id covers every comment in that thread, so a thread with five tagged
+    mentions costs one clause, not five."""
+    ids = []
+    for k in keys:
+        if not k.startswith("reddit:"):
+            continue
+        pid = k.split("reddit:", 1)[1].split(":")[0].split("/")[0].strip()
+        if pid and pid not in ids:
+            ids.append(pid)
+    return ids
+
+
+def _live_tags_body(post_ids: list) -> str:
+    """One msearch that asks only "what are these documents tagged with now?".
+
+    Deliberately minimal: no saved-search query, no aggregations, no
+    highlighting — just a url wildcard per thread id over a wide date window,
+    so the response is small and comes back fast."""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    frm = now - _dt.timedelta(days=LIVE_TAGS_DAYS)
+    return json.dumps({"requests": [{
+        "id": "live_tags",
+        "dataSource": "general-index",
+        "request": {
+            "query": {"and": [
+                {"lowLevel": {"rune": {
+                    "anyQueries": [{"field": "metaData.url",
+                                    "value": f"*{pid}*", "type": "wildcard"}
+                                   for pid in post_ids],
+                    "type": "any"}}},
+                {"hiddenDocuments": "excluded"},
+                {"date": {"from": frm.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                          "to": now.strftime("%Y-%m-%dT%H:%M:%S.999Z")}},
+            ]},
+            "timezone": "UTC",
+            "pagination": {"limit": 200, "start": 0,
+                           "sort": {"on": "date", "order": "desc"}},
+            "documentFormat": {"highlight": False},
+        },
+        "outliers": None, "interval": None, "operation": "search",
+        "language": None, "analysis": None, "metrics": None,
+    }]})
+
+
+async def _refresh_live_tags(token: str, account: str, docmap: dict) -> int:
+    """Overwrite each doc_map entry's `tags` with what Meltwater holds RIGHT
+    NOW. Returns how many entries gained a tag the export did not know about;
+    -1 means the lookup could not be done (caller keeps the old behaviour)."""
+    if not (token and account and docmap):
+        return -1
+    post_ids = _post_ids_from_keys(docmap)
+    if not post_ids:
+        return -1
+    url = f"https://{MSEARCH_HOST}/1.0/accounts/{account}/msearch"
+    hdrs = {**_API_BASE_HEADERS,
+            "authorization": token if token.lower().startswith("bearer ")
+                             else f"Bearer {token}",
+            "content-type": "application/json"}
+    chunks = [post_ids[i:i + LIVE_TAGS_CHUNK]
+              for i in range(0, len(post_ids), LIVE_TAGS_CHUNK)]
+
+    async def _one(c, ids):
+        try:
+            r = await c.post(url, headers=hdrs, content=_live_tags_body(ids))
+            if r.status_code != 200:
+                log.warning("apply-doc: live-tag lookup returned status %s", r.status_code)
+                return None
+            return _hits_from_msearch(r.text)
+        except Exception as e:
+            log.warning("apply-doc: live-tag lookup errored: %s: %s", type(e).__name__, e)
+            return None
+
+    async with httpx.AsyncClient(timeout=60) as c:
+        parts = await asyncio.gather(*[_one(c, ids) for ids in chunks])
+    if all(p is None for p in parts):
+        return -1
+    live = {}
+    for p in parts:
+        if p:
+            live.update(p)
+    if not live:
+        log.warning("apply-doc: live-tag lookup matched no documents — keeping the "
+                    "export's own tags")
+        return -1
+    gained = 0
+    for key, hit in docmap.items():
+        found = live.get(key)
+        if found is None:
+            continue           # not returned: leave whatever the export said
+        tags = found.get("tags") or []
+        if tags and not hit.get("tags"):
+            gained += 1
+        hit["tags"] = tags
+    log.info("apply-doc: live tags read for %d/%d document(s); %d already tagged by "
+             "another brand since the export was taken", len(live), len(docmap), gained)
+    return gained
 
 
 async def _tag_via_document_ids(token: str, to_apply: dict, docmap: dict) -> dict:
@@ -3231,7 +3481,22 @@ async def apply_results_to_meltwater(email: str, password: str, topic_url: str, 
             # was taken — and tagging it again is exactly the duplicate the
             # skip rule exists to prevent. Fall back to the saved search, whose
             # msearch response carries the LIVE tags.
-            if (doc_map and SKIP_IF_TAGGED and DOCID_REQUIRE_TAGS
+            #
+            # First try to make the export's tag column irrelevant: ask
+            # Meltwater, in one batched call, what these documents are tagged
+            # with right now. That costs ~a second and closes the window where
+            # brand A tags a post after the export was taken and brand B then
+            # tags it again. Only if that lookup cannot be done do we fall back
+            # on the export, and on the slow saved-search path below.
+            live_ok = False
+            if doc_map and SKIP_IF_TAGGED and LIVE_TAGS_CHECK:
+                if await _refresh_live_tags(api_cap.get("token"),
+                                            api_cap.get("account"), doc_map) >= 0:
+                    live_ok = True
+                else:
+                    log.warning("apply: DOC-ID PATH — could not read live tags; falling "
+                                "back to the export's own 'Document Tags'")
+            if (doc_map and SKIP_IF_TAGGED and DOCID_REQUIRE_TAGS and not live_ok
                     and not any(h.get("tags") for h in doc_map.values())):
                 log.warning("apply: DOC-ID PATH skipped — the export carries no 'Document Tags' "
                             "for any of the %d row(s), so already-tagged mentions cannot be "
