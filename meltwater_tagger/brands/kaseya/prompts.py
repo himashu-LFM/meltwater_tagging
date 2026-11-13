@@ -47,78 +47,141 @@ the default — only do that in the two narrow cases spelled out in step 3.
      that only matched on a keyword, or any case where no other single brand is
      clearly the evaluated subject — action = "apply" with primary_brand =
      "{run_brand}" and the sentiment the rules below give it. Neutral is the
-     usual answer for these borderline cases, but apply the sentiment rules
-     first: if the text reports a problem with {run_brand}, or criticises it,
-     the tag is Negative even when the mention is brief or incidental.
+     usual answer for these borderline cases: an incidental or passing mention
+     carries no evaluation, so it is Neutral. It is Negative only when the
+     author actually criticises {run_brand} or expresses dissatisfaction with
+     it — a problem merely being reported as fact is not enough.
 
 ## SENTIMENT JUDGMENT — read this carefully, it is the crux
 
-The question that decides NEGATIVE vs NEUTRAL is simply: does the text report a
-PROBLEM with the brand, or express CRITICISM or DISSATISFACTION about it?
-  - Yes -> NEGATIVE.
-  - No  -> NEUTRAL.
-NEUTRAL means "nothing is wrong and no judgment is offered", not "the complaint is
-too small to count".
+These rules are the Kaseya Sentiment Tagging Protocol (ListenFirst handover
+guide). They are the authority. An earlier version of this prompt told you to
+tag any reported bug, outage or vulnerability NEGATIVE even when stated as a
+plain fact — that is WRONG and must not be applied. What decides the label is
+whether the author EVALUATES the target, not whether the topic sounds bad.
 
-NEGATIVE — the brand is the subject of a problem, a criticism, or a bad experience.
-Tag NEGATIVE whenever the text reports or expresses any of the following about the
-brand, WHETHER THE TONE IS ANGRY, MEASURED, OR PURELY FACTUAL:
-  - a BUG, fault, error, crash, or anything not working as it should
-  - an OUTAGE, downtime, degraded service, or a status-page incident
-  - a SECURITY issue: a vulnerability, CVE, breach, suspicious behaviour, or a
-    concern raised about the product's security
-  - a CONFIGURATION problem, or a feature that is broken, missing, or badly designed
-  - criticism of a specific FEATURE ("the AI feature is bad", "Agent Browser is buggy")
-  - criticism of a PRICE, POLICY, licensing or renewal change — including a plain
-    complaint about an increase
-  - criticism of the COMPANY, its SUPPORT, its BILLING, or a specific EMPLOYEE
-  - DISSATISFACTION of any strength: frustration, annoyance, disappointment, regret,
-    lost trust, or churn ("we're leaving", "wasn't keeping it anyway", "switched away")
-  - broad condemnation of the brand ("Kaseya is a disaster", "avoid them")
-  - the company inflicting real harm and being unresponsive
+Every label needs EVIDENCE in the text itself. Neutral is not a parking spot for
+hard cases: use it when the evidence genuinely does not point either way.
 
-  CRITICAL — this is a DELIBERATE CHANGE from an older, much higher bar. Do NOT
-  apply the old reasoning. Specifically:
-  - A problem does NOT have to be a whole-brand verdict. One broken feature is enough.
-  - A problem does NOT have to be confirmed. A suspected, hedged or still-being-
-    investigated fault ("maybe", "might be", "anyone else seeing this?") is enough.
-  - The author does NOT have to sound upset. A calm, polite, factual report of a
-    fault is NEGATIVE.
-  - Do NOT downgrade to Neutral on the grounds that it is "ordinary operational
-    discussion", "just a support question", or "just troubleshooting". If a problem
-    with the brand is being described, that is NEGATIVE.
+NEGATIVE — the author clearly criticises, distrusts, rejects or mocks the brand.
+  Evidence looks like: "garbage company", "huge step backwards", "I've been
+  burned by Kaseya"; poor support, billing or sales described WITH
+  dissatisfaction; leaving or refusing to sign after a bad experience; a
+  competitor is better BECAUSE the brand failed; complaints about changes after
+  an acquisition.
 
-NEUTRAL — no problem, and no judgment. Use it when the brand is mentioned with
-nothing wrong attached:
-  - general discussion and factual observations that report no fault
-  - questions and help-seeking that do not describe something going wrong
-    ("which RMM does everyone use?", "how do I set up the agent?", "anyone have
-    experience with X?", asking for opinions)
-  - product news, release notes, feature or pricing announcements relayed with no
-    criticism attached
-  - comparisons, roundups and tool-stack name-drops where the brand is only listed
-  - incidental or passing mentions
-  - name collisions (a venue or unrelated entity sharing the name) and off-topic
-    content that only matched on a keyword
-  - mild jokes, memes and light banter that carry no real criticism
+POSITIVE — the author clearly praises, recommends, prefers or is satisfied.
+  Evidence looks like: "K365 integrates smoothly", "Huntress caught the threat
+  before anyone else"; good support or a resolved issue; a direct
+  recommendation. Still POSITIVE if the author acknowledges the brand's poor
+  reputation but genuinely endorses the product.
 
-POSITIVE — only for clear praise, recommendation, endorsement, or satisfaction
-directed at the brand ("works great", "would recommend", "switched and happy").
-NOTE: if positive sentiment points at our brand but the post's PRIMARY subject is a
-competitor, action = "skip_flag" for that competitor — do not force Positive for us.
+NEUTRAL — the brand is described, used, asked about or mentioned WITHOUT a clear
+evaluation, or praise and criticism are balanced.
+  Evidence looks like: "We use ConnectWise to sync ticket data"; a technical
+  alert; a question about a lawsuit; an incidental mention.
 
-MIXED CONTENT: if the text contains both praise and a problem, the problem wins —
-tag NEGATIVE. ("Great product, but the agent crashes weekly" is NEGATIVE.)
+### GROUND RULES
+  - MENTION IS NOT SENTIMENT, AND USAGE IS NOT PRAISE. A brand name, or "we use
+    HaloPSA", is NEUTRAL unless the author expresses an opinion.
+  - FACTS ARE NOT OPINIONS. A missing feature, price, outage, incident or
+    vulnerability STATED AS FACT is NEUTRAL. It only becomes NEGATIVE when the
+    author blames, criticises or expresses dissatisfaction with the brand.
+  - JUDGE THE WHOLE TEXT. Decide which view dominates; genuinely balanced is
+    NEUTRAL.
+  - QUESTIONS ARE USUALLY NEUTRAL unless dissatisfaction is clear. How-to
+    questions, troubleshooting and ordinary operational discussion are NEUTRAL.
+  - A BUG, PRICE, LIMITATION OR INCIDENT IS NOT SENTIMENT ON ITS OWN. Look for
+    the phrase, claim, comparison or experience that actually carries the
+    judgment.
+  - BE CONSISTENT. Comparable texts get the same label.
 
-TIE-BREAK: if a problem, fault, criticism or dissatisfaction involving the brand is
-present AT ALL, choose NEGATIVE. Choose NEUTRAL only when nothing is being reported
-as wrong and no evaluative stance is offered. If unsure between POSITIVE and
-NEUTRAL, choose NEUTRAL.
+### DECISIONS BY THEME
+The same topic can land on any label; what decides it is whether the author
+evaluates the brand.
 
-Sarcasm: judge the implied stance. Heavy, clearly derisive sarcasm aimed at the
-brand can be NEGATIVE; mild jokes/memes are NEUTRAL.
+  SECURITY INCIDENTS AND VULNERABILITIES
+    Neutral  — reports a vulnerability, patch, advisory, suspicious event, false
+               positive or recovery steps without blaming the vendor
+    Negative — explicitly criticises security design, detection failures,
+               transparency, slow response or mishandling
+    Positive — explicitly praises detection, fast response or the resolution
 
-Judge by evaluative stance, not by keywords or by whether a problem is "confirmed"."""
+  PRICING, CONTRACTS AND RENEWALS
+    Neutral  — states a price, licensing model or renewal policy
+    Negative — dissatisfaction, distrust or rejection of terms; overbilling;
+               hard cancellation; leaving over price
+    Positive — praises fair pricing or terms
+
+  SUPPORT, SALES AND ACCOUNT MANAGERS
+    Neutral  — factual staffing changes or support processes
+    Negative — poor support, account-manager churn, pushy or evasive sales,
+               described with dissatisfaction
+    Positive — helpful support, management that listened, a great account manager
+
+  PRODUCT FUNCTIONALITY
+    Neutral  — "not available", "needs extra configuration", stated as fact;
+               how-to questions
+    Negative — "a nightmare", "useless", "unreliable", issues left unresolved
+    Positive — works well, saves time, better than alternatives
+
+  ACQUISITIONS (KASEYA)
+    Neutral  — describes that a product was acquired or changed
+    Negative — criticises removed integrations, contract changes or decline
+               after acquisition
+    Positive — praises how an acquired product improved
+
+  COMPETITOR COMPARISONS
+    Neutral  — competitor praised, our brand only a past vendor or comparison
+               point; balanced comparison
+    Negative — our brand or product explicitly described as inferior or as the
+               cause of the switch
+    Positive — our product meaningfully favoured, even if a rival did better on
+               one test
+
+  INDUSTRY COMMENTARY
+    Neutral  — criticism of MSPs, private equity or vendor consolidation in
+               general
+    Negative — only when the criticism is clearly aimed at the brand
+    Positive — rare; only explicit praise of the brand
+
+  LEGAL, LAWSUITS AND BREACHES
+    Neutral  — asks for an update or gives historical context ("I wonder how the
+               Kaseya lawsuit is going")
+    Negative — explicit accusation or condemnation
+    Positive — rare; only explicit praise of how the brand handled it
+
+  MIXED
+    Neutral  — genuinely balanced, no clear direction
+    Negative — clear criticism with minor praise
+    Positive — substantive praise with a minor qualification
+
+  SARCASM AND JOKES
+    Neutral  — joke with no clear unfavourable judgement
+    Negative — context clearly mocks or dismisses the brand ("Welcome to Kaseya"
+               under a complaint)
+    Positive — literal praise that context confirms is sincere
+
+### WORKED EXAMPLES
+  "I've been burned by Kaseya too much."            -> Negative (distrust from experience)
+  "The integration disappeared after Kaseya acquired
+   the product. That was a dumb decision."          -> Negative (criticises the change)
+  "K365 integrates smoothly and detection is good."  -> Positive (substantive endorsement)
+  "Inky is one of Kaseya's top-tier security tools,
+   although Avanan did better in our test."         -> Positive (praise survives the qualifier)
+  "I wonder how the Kaseya lawsuit is going."        -> Neutral  (question, no judgement)
+  "NinjaOne is easy to use."                         -> Positive (clear praise, tagged for NinjaOne)
+  "Huntress caught the threat before anyone else."   -> Positive (explicit praise)
+  "N-able has been totally vague about the incident." -> Negative (criticises transparency)
+  "We use ConnectWise to sync ticket data."          -> Neutral  (usage only)
+  "How do I edit the email template in HaloPSA?"     -> Neutral  (how-to question)
+
+TIE-BREAK: if there is no clear evaluative stance either way, choose NEUTRAL.
+Do not reach for NEGATIVE because the subject matter is unpleasant, and do not
+reach for POSITIVE because the brand is merely being used.
+
+NOTE: if positive sentiment points at our brand but the text's PRIMARY subject is a
+competitor, action = "skip_flag" for that competitor — do not force Positive for us."""
 
 # Per-post user message template
 POST_TEMPLATE = """Run brand: {run_brand}
@@ -164,20 +227,25 @@ Each mention is either a POST or a COMMENT, stated in the message.
   ONLY as context to understand what the comment is referring to.
   * Apply the exact same NEGATIVE / NEUTRAL / POSITIVE bar as above, to the
     comment's evaluative stance about the brand.
-  * The comment does NOT inherit the post's sentiment. If the parent post
-    reports a problem but the comment itself raises no problem and offers no
-    criticism of its own, the comment is NEUTRAL. Likewise, a problem-free post
-    with a comment that reports a fault or criticises the brand is judged by the
-    comment, and that comment is NEGATIVE. Judge ONLY the comment's own words —
-    but note that a comment agreeing with, adding to, or confirming a problem
-    raised elsewhere in the thread IS itself reporting that problem.
+  * The comment does NOT inherit the post's sentiment. Parent context can
+    explain a reply, but it never supplies sentiment the commenter did not
+    express. If the parent post is a complaint but the comment itself offers no
+    criticism of its own, the comment is NEUTRAL. Judge ONLY the comment's own
+    words — though a comment that agrees with, endorses or piles onto a
+    criticism raised elsewhere in the thread IS expressing that criticism
+    itself.
 
 ## REASON FORMAT (required)
 Begin `reason` with "Post: " or "Comment: " to make the mention type explicit,
-then give a precise, specific one-line justification citing what in THAT text
-(post body, or the comment's own words) drove the sentiment — e.g.
-"Comment: neutral — asks which RMM others use; no verdict on the brand (parent
-post is a Kaseya complaint, but that doesn't carry to this comment)." """
+then give a precise, specific one-line justification that points to the EXACT
+phrase or idea supporting the label, stated as sentiment TOWARD THE BRAND —
+not just the topic.
+  Good: "Comment: negative — calls Datto RMM 'a huge step backwards', an
+         explicit unfavourable judgement of the product."
+  Weak: "Comment: negative — comment is about a security breach."  (names the
+         topic, not the evaluation)
+Keep reasons proportionate. Do not invent motives, product failures or company
+responsibility that the text does not state. """
 
 # JSON schema for the structured output (one decision per post).
 DECISION_SCHEMA = {
