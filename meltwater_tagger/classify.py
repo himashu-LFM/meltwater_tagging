@@ -884,6 +884,66 @@ async def _apify_scrape_thread(client, url, headers, pid: str, group: list[dict]
           flush=True)
 
 
+# --- Actor portability ------------------------------------------------------
+#
+# Every payload in this file is written in ONE canonical shape - the one
+# fatihtahta's actor happens to use ("urls", "scrapeComments", "maxPosts",
+# "maxComments"). The two functions below translate that shape to and from
+# whichever actor is actually configured, so swapping actors is an env change
+# (APIFY_ACTOR=...) and not a rewrite of every call site.
+#
+# This exists because on 2026-11-16 Reddit began refusing our actor outright:
+# its own run log said "Skipped 1. Skip reasons: temporary Reddit access issue",
+# so every run SUCCEEDED while returning nothing, and ~90% of mentions were
+# being tagged Neutral without their text ever being read. Measured on the same
+# thread, same minute: fatihtahta 0 records, harshmaur 152 records / 56k chars.
+# Being able to move actors in one env var is the whole point.
+
+def _apify_input(payload: dict) -> dict:
+    """Translate the canonical payload into the configured actor's schema."""
+    actor = (config.APIFY_ACTOR or "").lower()
+    urls = payload.get("urls") or []
+    if "harshmaur" in actor:
+        return {
+            "startUrls": [{"url": u} for u in urls],
+            "crawlCommentsPerPost": bool(payload.get("scrapeComments")),
+            "maxPostsCount": payload.get("maxPosts", 2),
+            # Per POST, which is what our caller means. maxCommentsCount is a
+            # whole-run cap, so it must be at least as large or a multi-URL run
+            # would be truncated to one post's worth of comments.
+            "maxCommentsPerPost": payload.get("maxComments", 30),
+            "maxCommentsCount": max(
+                payload.get("maxComments", 30) * max(1, len(urls)), 30),
+            "searchCommunities": False,
+        }
+    return payload                      # fatihtahta: already canonical
+
+
+def _apify_normalize(records: list) -> list:
+    """Translate the configured actor's records into the canonical shape.
+
+    Downstream code reads `kind`, `id`, `title`, `body`/`selftext` and
+    `postTitle`; only those have to line up.
+    """
+    actor = (config.APIFY_ACTOR or "").lower()
+    if "harshmaur" not in actor or not isinstance(records, list):
+        return records
+    out = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rec = dict(rec)
+        # 'dataType' is harshmaur's 'post' / 'comment'.
+        rec.setdefault("kind", rec.get("dataType") or "")
+        # Post ids arrive fullname-prefixed ("t3_1xts3f2"); the thread-scrape
+        # lookup matches on the bare reddit id, so prefer parsedId. Comment ids
+        # are already bare and must be left alone.
+        if (rec.get("kind") or "").lower() == "post" and rec.get("parsedId"):
+            rec["id"] = rec["parsedId"]
+        out.append(rec)
+    return out
+
+
 async def _apify_post(client, url, headers, payload: dict, what: str):
     """POST one actor run, with timing and one retry when Apify throttles us.
 
@@ -892,11 +952,12 @@ async def _apify_post(client, url, headers, payload: dict, what: str):
     fallback, rather than failing the whole batch.
     """
     _t = time.monotonic()
+    sent = _apify_input(payload)
     for attempt in (1, 2):
         try:
-            r = await client.post(url, json=payload, headers=headers)
+            r = await client.post(url, json=sent, headers=headers)
             if r.status_code in (200, 201):
-                records = r.json() or []
+                records = _apify_normalize(r.json() or [])
                 _s = time.monotonic() - _t
                 n = max(1, len(payload.get("urls") or []))
                 print(f"apify: {what} took {_s:.1f}s ({_s / n:.1f}s/url)", flush=True)
